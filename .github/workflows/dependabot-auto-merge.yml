@@ -21,7 +21,10 @@ jobs:
     steps:
       - name: Fetch Dependabot metadata
         id: meta
-        uses: dependabot/fetch-metadata@v2
+        # Pinned to an immutable commit rather than the mutable v3 tag: this
+        # action is handed a token with contents:write. Dependabot keeps the
+        # pin current via the github-actions ecosystem.
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
