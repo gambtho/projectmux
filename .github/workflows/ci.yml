@@ -12,14 +12,18 @@ jobs:
   build:
     # Linux and WSL are the v1 platforms, so Linux is the only build target.
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The minimum the module declares, so CI verifies the version go.mod
+        # promises, plus the current stable release to catch drift early.
+        go: ["1.25.x", "stable"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          # Track the minimum the module declares rather than pinning a patch
-          # release, so CI verifies the version the go.mod actually promises.
-          go-version-file: go.mod
+          go-version: ${{ matrix.go }}
           check-latest: true
 
       - name: Check formatting
@@ -41,7 +45,7 @@ jobs:
         run: go vet ./...
 
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
 
       - name: Build
         env:
