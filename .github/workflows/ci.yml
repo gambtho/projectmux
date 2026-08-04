@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Linux and WSL are the v1 platforms, so Linux is the only build target.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Track the minimum the module declares rather than pinning a patch
+          # release, so CI verifies the version the go.mod actually promises.
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-formatted:"
+            echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+
+      - name: Check go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+        run: go build ./cmd/projectmux

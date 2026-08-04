@@ -1,0 +1,6 @@
+# Build artifacts
+/projectmux
+/dist/
+
+# Working notes, not part of the repository contract
+/implementation-notes.md
