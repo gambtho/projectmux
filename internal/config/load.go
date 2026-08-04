@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -97,7 +98,7 @@ func loadLayer(path string) (Layer, error) {
 	}
 
 	var layer Layer
-	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	dec.KnownFields(true)
 	if err := dec.Decode(&layer); err != nil {
 		// io.EOF means the document was empty or held only comments.
@@ -106,9 +107,11 @@ func loadLayer(path string) (Layer, error) {
 		}
 		return Layer{}, invalid(fmt.Sprintf("%s: %s", path, cleanYAMLError(err)))
 	}
-	// A second document would silently discard configuration.
+	// A second document would silently discard configuration. Anything other
+	// than io.EOF means more content followed, including a second document too
+	// malformed to decode — which must not read as "there was nothing there".
 	var extra Layer
-	if err := dec.Decode(&extra); err == nil {
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		return Layer{}, invalid(fmt.Sprintf(
 			"%s: contains more than one YAML document; use a single document", path))
 	}

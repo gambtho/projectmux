@@ -40,10 +40,8 @@ func validate(l Layer, cfg Config) []string {
 			problems = append(problems, err.Error())
 		}
 	}
-	for key := range cfg.Environment {
-		if key == "" {
-			problems = append(problems, "environment contains an empty variable name")
-		}
+	if _, empty := cfg.Environment[""]; empty {
+		problems = append(problems, "environment contains an empty variable name")
 	}
 
 	var focused []string

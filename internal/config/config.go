@@ -113,6 +113,9 @@ func (e *InvalidConfigError) Error() string {
 	return b.String()
 }
 
-func invalid(problems ...string) error {
-	return &InvalidConfigError{Problems: problems}
+// invalid builds a single-problem InvalidConfigError. Load-time failures abort
+// at the first problem because a file that will not decode has no further
+// problems to report; validate collects many and builds the error itself.
+func invalid(problem string) error {
+	return &InvalidConfigError{Problems: []string{problem}}
 }

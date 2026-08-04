@@ -13,7 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -168,7 +168,7 @@ func byName(name string, roots []string) (string, error) {
 	case 1:
 		return candidates[0], nil
 	default:
-		sort.Strings(candidates)
+		slices.Sort(candidates)
 		return "", &AmbiguousError{Name: name, Candidates: candidates}
 	}
 }
@@ -203,7 +203,7 @@ func isPrimary(path string) bool {
 	if err != nil {
 		return true
 	}
-	resolve := func(p string) string {
+	canonicalDir := func(p string) string {
 		if !filepath.IsAbs(p) {
 			p = filepath.Join(path, p)
 		}
@@ -212,7 +212,7 @@ func isPrimary(path string) bool {
 		}
 		return p
 	}
-	return resolve(gitDir) == resolve(commonDir)
+	return canonicalDir(gitDir) == canonicalDir(commonDir)
 }
 
 // slugFor names the repository. The first entry of `git worktree list` is the
@@ -238,9 +238,10 @@ func slugFor(path string) string {
 func gitOutput(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	// Discard stderr: every caller treats a git failure as "not a repository"
-	// and has a defined fallback, so git's diagnostics would only be noise.
-	cmd.Stderr = nil
+	// Stderr is left unset so Output captures it into the returned ExitError
+	// rather than leaking git's diagnostics onto the process's own stderr.
+	// Every caller treats a git failure as "not a repository" and has a defined
+	// fallback, so the message is available but never printed.
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err

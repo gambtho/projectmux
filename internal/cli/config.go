@@ -6,8 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
@@ -50,7 +51,7 @@ type workspaceInfo struct {
 	IsPrimary   bool   `json:"is_primary"`
 }
 
-func runConfig(args []string, stdout, stderr io.Writer) error {
+func runConfig(args []string, stdout io.Writer) error {
 	fs := newFlagSet("config", stdout, configHelp)
 	asJSON := fs.Bool("json", false, "emit the versioned JSON envelope")
 	compact := fs.Bool("compact", false, "emit the JSON on a single line")
@@ -160,11 +161,7 @@ func writeHuman(w io.Writer, env envelope) error {
 	fmt.Fprintf(tw, "devcontainer\t%s\n", devcontainer)
 
 	if len(env.Config.Environment) > 0 {
-		keys := make([]string, 0, len(env.Config.Environment))
-		for k := range env.Config.Environment {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
+		keys := slices.Sorted(maps.Keys(env.Config.Environment))
 		fmt.Fprint(tw, "environment\t")
 		for i, k := range keys {
 			if i > 0 {

@@ -514,6 +514,20 @@ func TestValidationRejects(t *testing.T) {
 			wants:     []string{"workspaces/slabledger.yaml"},
 		},
 		{
+			// Only the first document would be honoured, silently discarding
+			// the rest of the file.
+			name:      "a second YAML document",
+			workspace: "version: 1\n---\nautostart: true\n",
+			wants:     []string{"more than one YAML document"},
+		},
+		{
+			// The second document does not decode, so the multi-document check
+			// must not mistake its error for "nothing followed".
+			name:      "a second, undecodable YAML document",
+			workspace: "version: 1\n---\nnonsense: true\n",
+			wants:     []string{"more than one YAML document"},
+		},
+		{
 			name:      "an unknown devcontainer.enabled value",
 			workspace: "version: 1\ndevcontainer:\n  enabled: maybe\n",
 			wants:     []string{"enabled", "maybe"},

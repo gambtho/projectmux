@@ -56,7 +56,7 @@ func usagef(format string, args ...any) error {
 // to stdout for a failing command, so callers can pipe stdout without having to
 // filter diagnostics out of it.
 func Main(args []string, stdout, stderr io.Writer) int {
-	err := dispatch(args, stdout, stderr)
+	err := dispatch(args, stdout)
 	if err == nil {
 		return ExitOK
 	}
@@ -69,7 +69,9 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	return exitCode(err)
 }
 
-func dispatch(args []string, stdout, stderr io.Writer) error {
+// dispatch routes one command. Diagnostics are Main's responsibility, so
+// nothing below writes to stderr.
+func dispatch(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
 		fmt.Fprint(stdout, usage)
 		return nil
@@ -84,7 +86,7 @@ func dispatch(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stdout, versionString())
 		return nil
 	case "config":
-		return runConfig(rest, stdout, stderr)
+		return runConfig(rest, stdout)
 	default:
 		return usagef("unknown command %q", command)
 	}
