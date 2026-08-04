@@ -2,8 +2,10 @@ package config
 
 import (
 	"fmt"
+	"maps"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -40,8 +42,16 @@ func validate(l Layer, cfg Config) []string {
 			problems = append(problems, err.Error())
 		}
 	}
-	if _, empty := cfg.Environment[""]; empty {
-		problems = append(problems, "environment contains an empty variable name")
+	for _, name := range slices.Sorted(maps.Keys(cfg.Environment)) {
+		switch {
+		case name == "":
+			problems = append(problems, "environment contains an empty variable name")
+		case strings.ContainsAny(name, "=\x00"):
+			// Neither character can appear in a real environment variable name,
+			// so the export in a later slice would fail; reject it at config time.
+			problems = append(problems, fmt.Sprintf(
+				"environment variable name %q must not contain %q or a NUL byte", name, "="))
+		}
 	}
 
 	var focused []string

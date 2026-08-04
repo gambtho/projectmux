@@ -50,9 +50,9 @@ dependency on cgo.
 Run the tests, the vet pass, and a formatting check the same way CI does:
 
 ```sh
-gofmt -l .
+test -z "$(gofmt -l .)"
 go vet ./...
-go test ./...
+go test -race ./...
 ```
 
 The configuration and resolver tests are hermetic: they create throwaway git
@@ -126,7 +126,7 @@ or `host` at load time.
 
 ## Usage
 
-```
+```text
 projectmux config [--json] [--compact] [<workspace>]
 ```
 

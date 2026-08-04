@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -60,14 +61,20 @@ type Enabled string
 
 // UnmarshalYAML accepts `auto`, `true`, and `false` in either YAML spelling.
 func (e *Enabled) UnmarshalYAML(node *yaml.Node) error {
+	value := node.Value
 	switch node.ShortTag() {
-	case "!!bool", "!!str":
+	case "!!bool":
+		// YAML resolved a boolean spelling such as True or FALSE; Node.Value
+		// keeps the source casing, so lowercase it to the canonical form the
+		// rest of the program compares against.
+		value = strings.ToLower(value)
+	case "!!str":
 	default:
 		return fmt.Errorf("devcontainer.enabled must be auto, true, or false, got %q", node.Value)
 	}
-	switch node.Value {
+	switch value {
 	case "auto", "true", "false":
-		*e = Enabled(node.Value)
+		*e = Enabled(value)
 		return nil
 	default:
 		return fmt.Errorf("devcontainer.enabled must be auto, true, or false, got %q", node.Value)

@@ -52,7 +52,7 @@ type workspaceInfo struct {
 }
 
 func runConfig(args []string, stdout io.Writer) error {
-	fs := newFlagSet("config", stdout, configHelp)
+	fs := newFlagSet("config")
 	asJSON := fs.Bool("json", false, "emit the versioned JSON envelope")
 	compact := fs.Bool("compact", false, "emit the JSON on a single line")
 

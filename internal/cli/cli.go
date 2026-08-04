@@ -128,10 +128,13 @@ func versionString() string {
 }
 
 // newFlagSet builds a flag set that reports errors through the usage-error path
-// instead of writing to stderr and exiting the process itself.
-func newFlagSet(name string, out io.Writer, help string) *flag.FlagSet {
+// instead of writing to stderr and exiting the process itself. Usage is a no-op
+// because flag calls it on parse errors as well as on -h; anything it wrote
+// would land on stdout for a failing command, and the -h path prints help
+// itself when Parse returns flag.ErrHelp.
+func newFlagSet(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.Usage = func() { fmt.Fprint(out, help) }
+	fs.Usage = func() {}
 	return fs
 }

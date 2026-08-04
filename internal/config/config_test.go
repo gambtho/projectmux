@@ -454,6 +454,11 @@ func TestValidationRejects(t *testing.T) {
 			wants: []string{"my agent's window", "invalid name"},
 		},
 		{
+			name:      "an environment variable name containing an equals sign",
+			workspace: "version: 1\nenvironment:\n  \"FOO=BAR\": baz\n",
+			wants:     []string{"FOO=BAR", "must not contain"},
+		},
+		{
 			name:      "duplicate window names",
 			workspace: "version: 1\nwindows:\n  - name: docs\n    command: one\n  - name: docs\n    command: two\n",
 			wants:     []string{"docs", "more than once"},
@@ -610,6 +615,8 @@ func TestDevContainerEnabledAcceptsBooleansAndAuto(t *testing.T) {
 		"version: 1\ndevcontainer:\n  enabled: auto\n":  "auto",
 		"version: 1\ndevcontainer:\n  enabled: true\n":  "true",
 		"version: 1\ndevcontainer:\n  enabled: false\n": "false",
+		"version: 1\ndevcontainer:\n  enabled: True\n":  "true",
+		"version: 1\ndevcontainer:\n  enabled: FALSE\n": "false",
 		"version: 1\n": "auto",
 	} {
 		root := writeRoot(t, map[string]string{"workspaces/slabledger.yaml": body})
@@ -645,6 +652,17 @@ func TestConfigMarshalsToTheDocumentedJSONShape(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"location":null`) {
 		t.Errorf("unresolved location should marshal as null: %s", raw)
+	}
+
+	// Round-trip through JSON so Duration.UnmarshalJSON is exercised against
+	// exactly what MarshalJSON produces.
+	var back Config
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("round-trip unmarshal: %v", err)
+	}
+	if back.DevContainer.StartTimeout != eff.Config.DevContainer.StartTimeout {
+		t.Errorf("round-tripped start_timeout = %s, want %s",
+			back.DevContainer.StartTimeout, eff.Config.DevContainer.StartTimeout)
 	}
 }
 

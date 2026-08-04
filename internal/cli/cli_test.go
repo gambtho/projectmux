@@ -113,13 +113,19 @@ func TestConfigHelpIsSuccessful(t *testing.T) {
 			t.Errorf("config help %q does not mention %q", stdout, want)
 		}
 	}
+	if got := strings.Count(stdout, "usage: projectmux config"); got != 1 {
+		t.Errorf("config help printed %d times, want once: %q", got, stdout)
+	}
 }
 
 func TestConfigUnknownFlagIsAUsageError(t *testing.T) {
 	workspace(t, map[string]string{"defaults.yaml": validConfig})
-	code, _, stderr := run(t, "config", "--nope")
+	code, stdout, stderr := run(t, "config", "--nope")
 	if code != ExitUsage {
 		t.Errorf("exit = %d, want %d; stderr = %q", code, ExitUsage, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("a failing command wrote to stdout: %q", stdout)
 	}
 }
 

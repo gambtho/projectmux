@@ -254,6 +254,27 @@ func TestUnknownNameNamesTheSearchedRoots(t *testing.T) {
 	}
 }
 
+func TestNameIsALiteralDirectoryNameNotAPattern(t *testing.T) {
+	base := root(t)
+	makeRepo(t, filepath.Join(base, "euro_trip"))
+	outside := makeRepo(t, filepath.Join(root(t), "elsewhere"))
+
+	for _, name := range []string{
+		"*",         // would match euro_trip instead of being unknown
+		"euro[",     // would abort the search as a malformed pattern
+		"euro?trip", // wildcard
+		`euro\trip`, // glob escape character
+		"../" + filepath.Base(filepath.Dir(outside)) + "/elsewhere", // traversal out of the root
+		"a/b", // more than one path component
+	} {
+		_, err := Resolve(name, []string{base}, base)
+		var unknown *UnknownWorkspaceError
+		if !errors.As(err, &unknown) {
+			t.Errorf("Resolve(%q): error = %v, want *UnknownWorkspaceError", name, err)
+		}
+	}
+}
+
 func TestResolvingByNameWithoutConfiguredRootsSaysSo(t *testing.T) {
 	// The Bash implementation hardcoded $HOME/workspace. That is personal
 	// installation policy, so an unconfigured application says what to

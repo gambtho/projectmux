@@ -128,6 +128,14 @@ func fromDirectory(cwd string) string {
 // byName searches each configured root for a directly-named repository and for
 // linked worktrees kept in the conventional nested directories.
 func byName(name string, roots []string) (string, error) {
+	// name is one literal directory component, not a pattern or a path. Without
+	// this guard, a separator escapes the configured roots, and a glob
+	// metacharacter either matches unrelated directories ("*") or aborts the
+	// search with a pattern-syntax error ("foo["). The only wildcard the search
+	// owns is the repository level of the nested-worktree patterns below.
+	if name != filepath.Base(name) || strings.ContainsAny(name, `*?[\`) {
+		return "", &UnknownWorkspaceError{Name: name, Roots: roots}
+	}
 	var candidates []string
 	seen := map[string]bool{}
 
