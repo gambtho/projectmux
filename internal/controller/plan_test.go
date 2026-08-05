@@ -190,9 +190,25 @@ func TestPlanTable(t *testing.T) {
 			},
 			want: controller.Plan{
 				Session:    controller.SessionActionAdopt,
-				RecordName: false,
+				RecordName: true,
 				Container:  controller.ContainerActionNone,
 				Reapply:    false,
+			},
+		},
+		{
+			// A zero-value or unrecognized health is uncertainty, not
+			// absence: the conservative action is probe-first, never start.
+			name: "an unrecognized container health plans probe-first",
+			mutate: func(s *controller.Snapshot) {
+				s.Container = controller.ContainerSnapshot{
+					Observed: &controller.ContainerObservation{Health: ""},
+				}
+			},
+			want: controller.Plan{
+				Session:    controller.SessionActionCreate,
+				RecordName: true,
+				Container:  controller.ContainerActionProbeFirst,
+				Reapply:    true,
 			},
 		},
 		{

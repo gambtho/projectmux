@@ -54,16 +54,22 @@ func BuildPlan(snap Snapshot) Plan {
 	}
 
 	p := Plan{Container: containerAction(snap)}
-	p.RecordName = snap.Stored == nil || snap.Stored.ActualSession == nil
-	p.Reapply = snap.Stored == nil ||
-		snap.Stored.AppliedDigest == nil ||
-		*snap.Stored.AppliedDigest != snap.Desired.Digest
-
 	if snap.Session.State == SessionLive {
 		p.Session = sessionActionForLive(snap)
 	} else {
 		p.Session = SessionActionCreate
 	}
+	// The record needs writing when no name has been assigned, and also when
+	// adoption targets a live session whose name differs from the stored
+	// one: adopt means the record is repaired to match reality, and the
+	// executor learns that only from this flag. Adoption implies a non-nil
+	// ByIdentity — refusalFor rejects a live state without one.
+	p.RecordName = snap.Stored == nil || snap.Stored.ActualSession == nil ||
+		(p.Session == SessionActionAdopt &&
+			*snap.Stored.ActualSession != snap.Session.ByIdentity.Name)
+	p.Reapply = snap.Stored == nil ||
+		snap.Stored.AppliedDigest == nil ||
+		*snap.Stored.AppliedDigest != snap.Desired.Digest
 	return p
 }
 
@@ -134,9 +140,12 @@ func containerAction(snap Snapshot) ContainerAction {
 	switch obs.Health {
 	case state.HealthPresent:
 		return ContainerActionNone
-	case state.HealthUnknown:
-		return ContainerActionProbeFirst
-	default:
+	case state.HealthMissing:
 		return ContainerActionStart
+	default:
+		// HealthUnknown and any unrecognized value, including the zero
+		// value: probe before acting — a container is never started on
+		// uncertain knowledge.
+		return ContainerActionProbeFirst
 	}
 }

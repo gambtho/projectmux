@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -40,6 +41,25 @@ func TestOpenIsIdempotent(t *testing.T) {
 			t.Fatalf("Open #%d: %v", i+1, err)
 		}
 		s.Close()
+	}
+}
+
+func TestOpenInADirectoryWithURIMetacharacters(t *testing.T) {
+	// The DSN is a URI: an unescaped "?" or "#" in the path would be read
+	// as the query string, silently dropping the pragma configuration.
+	root := filepath.Join(t.TempDir(), "odd?state#dir")
+	s, err := Open(root)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	var timeout int
+	if err := s.db.QueryRow("PRAGMA busy_timeout").Scan(&timeout); err != nil {
+		t.Fatalf("busy_timeout: %v", err)
+	}
+	if timeout != 5000 {
+		t.Errorf("busy_timeout = %d, want 5000: the DSN query was misparsed", timeout)
 	}
 }
 

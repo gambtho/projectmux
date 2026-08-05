@@ -465,7 +465,10 @@ func Open(root string) (*Store, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, fmt.Errorf("creating the state directory: %w", err)
 	}
-	dsn := "file:" + filepath.Join(root, "state.db") +
+	// The path rides in a URI, so escape it: a directory containing "?" or
+	// "#" must not be read as the query string.
+	dbPath := (&url.URL{Path: filepath.Join(root, "state.db")}).EscapedPath()
+	dsn := "file:" + dbPath +
 		"?_txlock=immediate" +
 		"&_pragma=busy_timeout(5000)" +
 		"&_pragma=journal_mode(WAL)" +
