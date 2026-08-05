@@ -94,7 +94,9 @@ mutation-free.
 
 Gains an optional `container` block —
 `{"kind": …, "container_id": …, "health": …}` — present when a container
-is in play; additive to schema version 1.
+is in play, plus a `container_windows_stale: true` flag on the
+replacement-into-live-session case (§4); both additive to schema
+version 1.
 
 ## 3. `internal/container` adapter
 
@@ -121,26 +123,50 @@ config value passed per call; the field is a test override) bounds `up`.
      a container always applies.
   2. Configuration applies →
      `docker ps -a --filter label=devcontainer.local_folder=<worktree>`
-     (label verified present with the exact worktree path). The result
-     is **never `present`**: discovery cannot supply the full binding
-     (remoteUser/workdir are not in labels), and `present` is reserved
-     for *fully bound and running*. One match (running or stopped) →
-     `{missing, id}`; none → `{missing}`; **more than one running**
-     match → error (ambiguity is uncertainty; no claimant is picked).
-     The plan then says `start`, and the idempotent `up` acquires the
-     authoritative binding — a running container costs one ~1s no-op.
+     (label verified present with the exact worktree path). Health stays
+     truthful — `missing` means confirmed absence (design §9), so a
+     running match is **never** reported missing:
+     - one **running** match → `{present, id}` with **no user/workdir**
+       (labels cannot supply them): a truthful but *incomplete* binding
+       observation. The plan turns this into `acquire` (§4), and the
+       idempotent `up` (~1s no-op on a running container, verified)
+       supplies the authoritative binding. `status` on such a workspace
+       reports health `present` — never a false `missing`.
+     - one **stopped** match → `{missing, id}`; none → `{missing}`.
+     - **more than one running** match → error (ambiguity is
+       uncertainty; no claimant is picked).
+- **`Applies(ctx, ws, cfg) (bool, error)`** (observer) — the
+  applicability check alone: `enabled: true` → always true; `auto` →
+  the devcontainer-configuration stat of step 1 (IsNotExist → false;
+  other stat errors → error). `Observe` consults it **before probing a
+  stored binding** under `auto` (§4) — deleting `devcontainer.json`
+  must stop the workspace being container-shaped, stored binding or
+  not.
 - **`StartContainer(ctx, ws, cfg)`** (actuator) — `devcontainer up`
   bounded by `cfg.DevContainer.StartTimeout`; parses the **last stdout
-  line** as the result JSON; `outcome != "success"`, unparseable
-  output, or timeout → typed error carrying bounded stderr. Success →
+  line** as the result JSON. Failures return a typed
+  `*StartError{ExitCode int, Stderr string, TimedOut bool}` so the
+  recorded operation preserves the real exit status and bounded stderr
+  (design §9): non-`success` outcome, unparseable output, start
+  failure, or timeout. A `success` result is **validated before use**:
+  `containerId` and `remoteWorkspaceFolder` must be non-empty
+  (`remoteUser` may be empty → `-u` omitted); missing load-bearing
+  fields are a `StartError`, and nothing downstream — window rendering
+  or session mutation — sees an invalid binding. Valid success →
   `ContainerObservation{Health: present, Kind: "devcontainer",
   ContainerID, ContainerUser: remoteUser, Workdir:
   remoteWorkspaceFolder}`.
-- **`ExecCommand(binding, command, relDir string) string`** (actuator,
-  pure) — renders the §5 execution request as a tmux window command
-  string: `docker exec -i -t` + `-u <user>` when non-empty + `-w
-  <path.Join(binding.Workdir, relDir)>` + id + `sh -lc '<command>'`
-  (empty command → `sh -l`). Shell quoting through one tested
+- **`ExecCommand(binding, command, relDir string, env map[string]string) string`**
+  (actuator, pure) — renders the §5 execution request as a tmux window
+  command string: `docker exec -i -t` + `-u <user>` when non-empty +
+  `-w <path.Join(binding.Workdir, relDir)>` + one `-e KEY=VALUE` per
+  configured environment entry in sorted key order + id +
+  `sh -lc '<command>'` (empty command → `sh -l`). The environment must
+  be passed explicitly: tmux's `-e` sets pane variables on the **host**
+  side only, and `docker exec` forwards nothing into the container —
+  without these flags the every-window environment contract
+  (open/attach spec §4) would silently break while the digest still
+  recorded as applied. Shell quoting through one tested
   single-quote-escaping function — the only place quoting happens.
   ExecCommand never inspects live state; a pane whose container died
   shows docker's own error.
@@ -150,13 +176,32 @@ config value passed per call; the field is a test override) bounds `up`.
 ```go
 type ContainerActuator interface {
 	StartContainer(ctx context.Context, ws resolve.Workspace, cfg config.Config) (ContainerObservation, error)
-	ExecCommand(binding state.ContainerBinding, command, relDir string) string
+	ExecCommand(binding state.ContainerBinding, command, relDir string, env map[string]string) string
 }
 ```
 
 `Controller` gains `ContainerAct ContainerActuator`. Nil preserves
 today's behavior exactly: any non-`none` container action refuses with
 `ErrContainerActionUnsupported`.
+
+**`ContainerObserver` gains `Applies(ctx, ws, cfg) (bool, error)`**, and
+`Observe`'s container step changes for `enabled: auto`: applicability is
+checked **before** any stored binding is probed. Not applicable → the
+container snapshot is empty (exactly like `enabled: false`); the stored
+binding is retained in the store but ignored, and unset-location windows
+resolve to the host. An applicability error is the usual unknown funnel.
+`enabled: true` skips the check. This closes the hole where deleting
+`devcontainer.json` left an old binding — and container-shaped windows —
+applicable forever (the pre-existing observe path probed the binding
+first, observe.go:109).
+
+**A fourth container action, `acquire`**, keeps `BuildPlan` pure while
+handling discovery's truthful present-but-incomplete observation:
+`containerAction` returns `acquire` when the observation is `present`
+with an empty `Workdir` (the discovery shape — probes of stored bindings
+and `up` results always carry one). `acquire` executes as the idempotent
+`StartContainer`. A refusing plan still carries container action `none`
+(the global-refusal invariant is unchanged).
 
 **Window intents replace pre-rendered specs as Ensure's input.** The
 CLI derives, purely from configuration:
@@ -187,17 +232,42 @@ type WindowIntent struct {
 windows → session action → single commit (container observation +
 operation + applied digest only on confirmed creation):
 
-- container `none` → skip (an applying-but-unbound running container
-  surfaces as `start` via discovery, see §3);
-- `start` → `StartContainer`; failure → failed op, typed error, no
-  session mutation;
-- `probe-first` (observation errored) → **one** re-probe via the
-  observer: `present` → proceed (binding refreshed in the commit),
-  `missing` → `StartContainer`, error → failed op, typed error. Open
-  never mutates on uncertainty.
+- container `none` → skip;
+- `start` and `acquire` → `StartContainer` (idempotent `up`); failure →
+  failed op recording the `StartError`'s **real exit status** and
+  bounded stderr (`Operation.ExitStatus` — design §9's requirement),
+  typed error, no session mutation;
+- `probe-first` (observation errored) → **one** retry of the same
+  observation kind: a stored binding retries `ProbeContainer`; an
+  unbound workspace retries `DiscoverContainer` (probe requires a
+  binding that does not exist in that case). Retry outcomes: `present`
+  with a complete binding → proceed; `present` incomplete → acquire;
+  `missing` → start; `(nil, nil)` (auto resolved to none on retry) →
+  proceed container-free; error → failed op, typed error. Both retry
+  paths are tested. Open never mutates on uncertainty.
 - The applied digest continues to assert the whole document was
   actuated — now including that container windows were rendered
   against a live binding.
+
+**Container replacement and live sessions — an explicit, narrowed
+promise:** when the session action is `none`/`adopt` (live session, no
+reapply — the open/attach decision stands) and the container phase
+started or replaced a container, `open` does **not** recreate container
+windows in the live session: panes bound to the dead container have
+died or show docker's error, and new windows are created only at
+session creation. `open` says so instead of implying repair — human
+output and the JSON envelope carry a `container_windows_stale` note
+recommending `stop`-and-reopen (or killing the session) to rebuild.
+Live-window reconciliation remains the recorded follow-up; silent
+partial repair is worse than a truthful limitation.
+
+**Runner contract change:** `run.Run` currently discards captured
+output when the context expires (run.go:87 returns an empty `Result`).
+It now returns the partially captured stdout/stderr **alongside** the
+timeout/cancellation error, so `StartContainer` can preserve a bounded
+stderr summary for timed-out `up` runs. Additive: existing callers
+ignore the `Result` on error today; the runner tests pin the new
+behavior.
 
 **`SessionBelongsTo(s LiveSession, ws resolve.Workspace) bool`** is
 exported (the three-key predicate); `plan.go`, `status.go`, and
@@ -231,15 +301,28 @@ exported (the three-key predicate); `plan.go`, `status.go`, and
 ## 7. Testing
 
 - **Unit:** ExecCommand rendering and shell quoting (commands with
-  quotes, `$`, `;`); up-JSON last-line parsing (with stderr noise and
-  multi-line stdout fixtures); probe/discovery classification tables
-  (running/stopped/no-such-object case-insensitivity/daemon-down/
-  ambiguous multi-match); intent derivation and the location-resolution
-  matrix including both new validation errors; Ensure's container phase
-  against a `fake.ContainerActuator` (start success/failure/timeout
-  path, probe-first re-probe outcomes, container-window rendering only
-  after binding, `location: container` without a container failing
-  before actuation, nil-actuator behavior unchanged).
+  quotes, `$`, `;`; sorted `-e KEY=VALUE` env flags present for every
+  configured entry; `-u` omitted for an empty user); up-JSON last-line
+  parsing (with stderr noise and multi-line stdout fixtures) **and
+  field validation** (missing/empty `containerId` or
+  `remoteWorkspaceFolder` → `StartError`, nothing rendered); probe/
+  discovery classification tables (running/stopped/no-such-object
+  case-insensitivity/daemon-down/ambiguous multi-match; a running
+  unbound match reports `present`-incomplete, never `missing`);
+  `Applies` matrix (true/auto-with-config/auto-without/stat-error);
+  `runner` timeout returning partially captured output alongside the
+  error; intent derivation and the location-resolution matrix including
+  both new validation errors; `BuildPlan` `acquire` on
+  present-with-empty-workdir; Ensure's container phase against a
+  `fake.ContainerActuator` (start/acquire success, failure persisting
+  the `StartError` exit status into `Operation.ExitStatus`, timeout
+  path with bounded stderr, **both** probe-first retry paths — bound
+  re-probe and unbound re-discover — and each retry outcome,
+  container-window rendering only after a validated binding,
+  `location: container` without a container failing before actuation,
+  auto-with-deleted-config ignoring the stored binding, the
+  `container_windows_stale` note on replacement into a live session,
+  nil-actuator behavior unchanged).
 - **Fake tooling (CI-safe, design §12):** fake `docker`/`devcontainer`
   script binaries through the seams: `up` success/failed-outcome/
   timeout (timeout proves the failed op and retained binding), probe
@@ -273,10 +356,29 @@ devcontainer CLI abstracts, no Windows.
 - Exec mechanism is `docker exec` built from the stored binding — the
   §7 user/workdir columns are load-bearing; devcontainer-CLI exec
   rejected for pane-spawn latency and a permanent runtime dependency.
-- Discovery never reports `present`: `present` means fully bound and
-  running; acquisition always flows through the idempotent `up`
-  (verified ~1s no-op on a running container), keeping `BuildPlan`
-  unchanged.
+- Discovery keeps health truthful: a running unbound match is
+  `present` with an incomplete binding (empty workdir), never a false
+  `missing`; the new pure `acquire` plan action routes it through the
+  idempotent `up` (verified ~1s no-op on a running container).
+- Applicability (`Applies`) is checked before probing stored bindings
+  under `auto`, so deleting the devcontainer configuration
+  de-containerizes the workspace without touching the retained binding.
+- Configured environment reaches container windows via explicit
+  `docker exec -e` flags — tmux pane env is host-side only and exec
+  forwards nothing.
+- Container replacement into a live session does not recreate windows;
+  it is reported (`container_windows_stale`) with a stop-and-reopen
+  recommendation. Truthful limitation over silent partial repair;
+  reconciliation stays a follow-up.
+- `probe-first` retries the observation kind that failed: probe when
+  bound, discover when not.
+- `StartError` carries the real exit status, bounded stderr, and a
+  timeout flag; the recorded operation persists the exit status
+  (design §9). The runner returns partial capture alongside
+  timeout/cancel errors to make that possible.
+- `up` success is validated (non-empty `containerId`,
+  `remoteWorkspaceFolder`) before any window rendering or session
+  mutation.
 - `up`'s result is the last stdout line (verified; logs on stderr);
   parse exactly that.
 - Probe classification is narrow and case-insensitive on
