@@ -5,9 +5,12 @@
 package state
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	_ "modernc.org/sqlite"
 )
 
 // Root resolves the state directory: an explicit override for tests and
@@ -26,3 +29,39 @@ func Root() (string, error) {
 	}
 	return filepath.Join(home, ".local", "state", "projectmux"), nil
 }
+
+// Store is the application's only SQL issuer.
+type Store struct {
+	db *sql.DB
+}
+
+// Open creates the state directory and database as needed, configures
+// every pooled connection, and applies pending migrations.
+//
+// The pragmas ride in the DSN so the driver applies them to each new
+// connection in the pool; a one-off Exec would configure only whichever
+// connection happened to run it (design §11). _txlock=immediate makes
+// every transaction take the write lock at BEGIN, so concurrent writers
+// queue on the busy timeout instead of failing at commit.
+func Open(root string) (*Store, error) {
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return nil, fmt.Errorf("creating the state directory: %w", err)
+	}
+	dsn := "file:" + filepath.Join(root, "state.db") +
+		"?_txlock=immediate" +
+		"&_pragma=busy_timeout(5000)" +
+		"&_pragma=journal_mode(WAL)" +
+		"&_pragma=foreign_keys(1)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("opening the state database: %w", err)
+	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return &Store{db: db}, nil
+}
+
+// Close closes the connection pool.
+func (s *Store) Close() error { return s.db.Close() }
