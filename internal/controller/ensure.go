@@ -58,6 +58,10 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, windows []WindowSpec
 
 	snap, err := c.Observe(ctx, d)
 	if err != nil {
+		// Best-effort: an Observe error is a store read failure, so this
+		// write may fail too, but status should explain the open when it
+		// can (open/attach spec §2).
+		c.recordFailure(d.Workspace.ID, "observing the workspace: "+err.Error())
 		return EnsureResult{}, err
 	}
 	plan := BuildPlan(snap)
@@ -97,6 +101,7 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, windows []WindowSpec
 				c.recordFailure(d.Workspace.ID, reason)
 				return EnsureResult{}, &RefusalError{Reason: reason}
 			}
+			c.recordFailure(d.Workspace.ID, "recording the adopted session name: "+err.Error())
 			return EnsureResult{}, fmt.Errorf("recording the adopted session name: %w", err)
 		}
 		if err := c.recordOK(d.Workspace.ID); err != nil {
@@ -170,6 +175,7 @@ func (c *Controller) createSession(ctx context.Context, d Desired, windows []Win
 		AppliedDigest: &digest,
 		Operation:     state.Operation{Name: "open", Outcome: state.OutcomeOK},
 	}, c.Clock.Now()); err != nil {
+		c.recordFailure(id, "committing the reconciliation: "+err.Error())
 		return EnsureResult{}, fmt.Errorf("committing the reconciliation: %w", err)
 	}
 	return EnsureResult{Action: EnsureCreated, Session: name, Drifted: false}, nil

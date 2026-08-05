@@ -123,12 +123,16 @@ func TestCreateArgvEscapesSessionNameInTargets(t *testing.T) {
 		`set-option -t slab\; @dev_slug`,
 		`set-option -t slab\; @dev_worktree`,
 		`new-window -d -t slab\;`,
+		// The focus target escapes the complete composite argument; its
+		// trailing character is the window name's, so the session name's
+		// mid-string ";" stays literal and needs no escape.
+		`select-window -t slab;:agent-1`,
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("argv %q\nmissing %q", joined, want)
 		}
 	}
-	if strings.Contains(joined, "-s slab;") || strings.Contains(joined, "-t slab;") {
+	if strings.Contains(joined, "-s slab; ") || strings.Contains(joined, "-t slab; ") {
 		t.Errorf("argv %q carries an unescaped session name in a -s/-t position", joined)
 	}
 }

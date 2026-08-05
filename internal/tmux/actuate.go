@@ -73,7 +73,12 @@ func createArgv(spec controller.SessionSpec) []string {
 
 	for _, w := range spec.Windows {
 		if w.Focus {
-			argv = append(argv, ";", "select-window", "-t", target+":"+w.Name)
+			// Escape the complete composite target rather than
+			// concatenating the escaped session name with a raw window
+			// name: the trailing character of the whole argument is
+			// what the chain parser inspects.
+			argv = append(argv, ";", "select-window",
+				"-t", escapeChainArg(spec.Name+":"+w.Name))
 		}
 	}
 	return argv
