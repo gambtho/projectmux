@@ -43,6 +43,8 @@ commands:
         shorthand for: open <workspace>
   open [--no-attach] [--json] [--compact] [<workspace>]
         observe, ensure, record, and attach the workspace session
+  attach [--json] [--compact] [<workspace>]
+        attach to the live workspace session; never creates one
   config [--json] [--compact] [<workspace>]
         print the normalized, merged configuration for a workspace
   list [--json] [--compact]
@@ -104,6 +106,8 @@ func dispatch(ctx context.Context, args []string, stdout io.Writer) error {
 		return nil
 	case "open":
 		return runOpen(ctx, rest, stdout)
+	case "attach":
+		return runAttach(ctx, rest, stdout)
 	case "config":
 		return runConfig(rest, stdout)
 	case "list":
