@@ -827,7 +827,7 @@ func (c *Client) Sessions(ctx context.Context) ([]controller.LiveSession, error)
 		return nil, err
 	}
 	if res.ExitCode != 0 {
-		if isNoServer(res.Stderr) {
+		if res.ExitCode == 1 && isNoServer(res.Stderr) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("tmux list-sessions exited %d: %s",

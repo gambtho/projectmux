@@ -17,7 +17,8 @@ Three additions:
   observer needs: execute one subprocess with a context, structured argv,
   bounded output capture, and retained exit status.
 - **`internal/tmux`** — a read-only adapter that lists live sessions with
-  their identity keys in **one** subprocess call and implements
+  their identity keys via the two-phase raw-value transport of §5
+  (`1 + 4N` bounded subprocesses) and implements
   `controller.SessionObserver` on top of it.
 - **`internal/cli`** — `projectmux list` and `projectmux status`, rendering
   stored state, live session observations, and `controller.BuildPlan`
