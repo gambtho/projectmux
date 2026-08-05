@@ -25,6 +25,7 @@ const (
 	ContainerActionNone       ContainerAction = "none"
 	ContainerActionStart      ContainerAction = "start"
 	ContainerActionProbeFirst ContainerAction = "probe-first"
+	ContainerActionAcquire    ContainerAction = "acquire"
 )
 
 // Plan is the typed outcome of one planning pass. Refusal is non-empty
@@ -83,7 +84,7 @@ func refusalFor(snap Snapshot) string {
 	}
 	// Design §7: never adopt a session whose identity keys contradict the
 	// workspace, even when the observer matched it by ID.
-	if live := snap.Session.ByIdentity; live != nil && !belongsTo(*live, snap.Desired.Workspace) {
+	if live := snap.Session.ByIdentity; live != nil && !SessionBelongsTo(*live, snap.Desired.Workspace) {
 		return fmt.Sprintf(
 			"session %q carries contradictory identity keys; refusing to adopt it", live.Name)
 	}
@@ -103,17 +104,19 @@ func refusalFor(snap Snapshot) string {
 	return ""
 }
 
-// belongsTo compares all three load-bearing identity keys (design §7): a
-// session with the right workspace ID but a contradictory slug or worktree
-// is evidence of corruption or collision, not a match.
-func belongsTo(s LiveSession, ws resolve.Workspace) bool {
+// SessionBelongsTo compares all three load-bearing identity keys
+// (design §7): a session with the right workspace ID but a contradictory
+// slug or worktree is evidence of corruption or collision, not a match.
+// The CLI's status and attach verdicts reuse it so the rendered identity
+// can never drift from planning's.
+func SessionBelongsTo(s LiveSession, ws resolve.Workspace) bool {
 	return s.WorkspaceID == ws.ID && s.Slug == ws.Slug && s.Worktree == ws.Worktree
 }
 
 func foreignOccupant(snap Snapshot) *LiveSession {
 	for i := range snap.Session.ByName {
 		s := snap.Session.ByName[i]
-		if !belongsTo(s, snap.Desired.Workspace) {
+		if !SessionBelongsTo(s, snap.Desired.Workspace) {
 			return &s
 		}
 	}
@@ -139,6 +142,12 @@ func containerAction(snap Snapshot) ContainerAction {
 	}
 	switch obs.Health {
 	case state.HealthPresent:
+		if obs.Workdir == "" {
+			// The discovery shape: running but unbound (labels cannot
+			// supply user/workdir). Acquisition flows through the
+			// idempotent devcontainer up (spec §3).
+			return ContainerActionAcquire
+		}
 		return ContainerActionNone
 	case state.HealthMissing:
 		return ContainerActionStart

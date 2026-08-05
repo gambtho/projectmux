@@ -43,7 +43,7 @@ func newDeps() *deps {
 	d := &deps{
 		store:      fake.NewStore(),
 		sessions:   &fake.SessionObserver{},
-		containers: &fake.ContainerObserver{},
+		containers: &fake.ContainerObserver{AppliesResult: true},
 	}
 	d.ctrl = &controller.Controller{
 		Store:      d.store,
@@ -239,5 +239,43 @@ func TestContainerProbeFailureIsUnknownNotLoss(t *testing.T) {
 	}
 	if snap.Container.Err == nil {
 		t.Error("the probe error should be retained in the snapshot")
+	}
+}
+
+func TestObserveAutoNotApplicableSkipsContainer(t *testing.T) {
+	d := newDeps()
+	d.containers.AppliesResult = false
+	if err := d.store.RegisterWorkspace(testDesired("auto").Workspace, "sha256:x", testTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := d.store.RecordContainerObservation("w1", state.ContainerObservation{
+		Kind: "devcontainer", ContainerID: "c1", Health: state.HealthPresent,
+	}, testTime); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+
+	snap, err := d.ctrl.Observe(context.Background(), testDesired("auto"))
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if snap.Container.Observed != nil || snap.Container.Err != nil {
+		t.Errorf("container snapshot = %+v; a non-applicable workspace must look disabled, stored binding or not",
+			snap.Container)
+	}
+	if len(d.containers.Probed) != 0 {
+		t.Error("Applies=false still probed the stored binding")
+	}
+}
+
+func TestObserveAutoAppliesErrorIsUnknown(t *testing.T) {
+	d := newDeps()
+	d.containers.AppliesErr = errors.New("stat exploded")
+	snap, err := d.ctrl.Observe(context.Background(), testDesired("auto"))
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if snap.Container.Observed == nil || snap.Container.Observed.Health != state.HealthUnknown ||
+		snap.Container.Err == nil {
+		t.Errorf("container snapshot = %+v, want unknown with the error", snap.Container)
 	}
 }

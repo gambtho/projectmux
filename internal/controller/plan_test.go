@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gambtho/projectmux/internal/controller"
+	"github.com/gambtho/projectmux/internal/resolve"
 	"github.com/gambtho/projectmux/internal/state"
 )
 
@@ -71,7 +72,11 @@ func TestPlanTable(t *testing.T) {
 				}
 				s.Container = controller.ContainerSnapshot{
 					Observed: &controller.ContainerObservation{
+						// A probed present observation always carries the
+						// full binding; workdir-less present is the
+						// discovery shape and plans acquire instead.
 						ContainerID: "c-1", Health: state.HealthPresent,
+						Workdir: "/workspaces/slabledger",
 					},
 				}
 			},
@@ -299,5 +304,26 @@ func TestRefusalNamesTheOccupiedSession(t *testing.T) {
 	p := controller.BuildPlan(snap)
 	if !strings.Contains(p.Refusal, "slabledger") {
 		t.Errorf("refusal %q should name the occupied session", p.Refusal)
+	}
+}
+
+func TestContainerActionAcquireOnIncompleteBinding(t *testing.T) {
+	snap := controller.Snapshot{
+		Desired: controller.Desired{
+			Workspace: resolve.Workspace{ID: "w1", Slug: "s", Worktree: "/w"},
+		},
+		Session: controller.SessionSnapshot{State: controller.SessionAbsent},
+		Container: controller.ContainerSnapshot{Observed: &controller.ContainerObservation{
+			Health:      state.HealthPresent,
+			ContainerID: "c1",
+			// No Workdir: the discovery shape — running but unbound.
+		}},
+	}
+	if p := controller.BuildPlan(snap); p.Container != controller.ContainerActionAcquire {
+		t.Errorf("container action = %q, want %q", p.Container, controller.ContainerActionAcquire)
+	}
+	snap.Container.Observed.Workdir = "/workspaces/w"
+	if p := controller.BuildPlan(snap); p.Container != controller.ContainerActionNone {
+		t.Errorf("complete present binding: action = %q, want none", p.Container)
 	}
 }
