@@ -171,6 +171,10 @@ func (c *Controller) ensureContainer(ctx context.Context, d Desired, snap Snapsh
 	if action == ContainerActionProbeFirst {
 		// One retry of the observation kind that failed (spec §4): a
 		// stored binding re-probes; an unbound workspace re-discovers.
+		// This retry is read-only observation, so it runs deliberately
+		// even with a nil ContainerAct: the nil-actuator gate below
+		// applies only to mutating actions (start/acquire), never to
+		// resolving what a probe or discovery can tell us for free.
 		retried, err := c.retryContainerObservation(ctx, d, snap)
 		if err != nil {
 			c.recordFailure(d.Workspace.ID, "re-observing the container: "+err.Error())
@@ -196,7 +200,10 @@ func (c *Controller) ensureContainer(ctx context.Context, d Desired, snap Snapsh
 			c.recordStartFailure(d.Workspace.ID, err)
 			return nil, false, fmt.Errorf("starting the container: %w", err)
 		}
-		return &obs, true, nil
+		// Acquire is a no-op up on an already-running container: the
+		// container windows already in play were never replaced, so only a
+		// real start (the container was missing) makes them stale.
+		return &obs, action == ContainerActionStart, nil
 	}
 	return nil, false, fmt.Errorf("unexpected container action %q", action)
 }

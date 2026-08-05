@@ -113,6 +113,9 @@ config value passed per call; the field is a test override) bounds `up`.
     capitalize) → `missing`;
   - anything else — daemon unreachable, timeout, unrecognized output —
     → `unknown`. Uncertainty never converts to absence.
+  - Paused and restarting containers also classify as `missing` — not
+    running is what matters to open, and the idempotent `up` reconciles
+    them; a finer distinction is deliberately out of scope.
 - **`DiscoverContainer(ctx, ws, cfg)`** — for `auto` resolution and
   post-rebuild reacquisition:
   1. Devcontainer configuration on disk? Explicit `devcontainer.config`
@@ -181,8 +184,9 @@ type ContainerActuator interface {
 ```
 
 `Controller` gains `ContainerAct ContainerActuator`. Nil preserves
-today's behavior exactly: any non-`none` container action refuses with
-`ErrContainerActionUnsupported`.
+today's behavior exactly: any **mutating** container action
+(`start`/`acquire`) refuses with `ErrContainerActionUnsupported` after
+the read-only probe-first retry resolves what it can.
 
 **`ContainerObserver` gains `Applies(ctx, ws, cfg) (bool, error)`**, and
 `Observe`'s container step changes for `enabled: auto`: applicability is

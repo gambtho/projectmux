@@ -58,6 +58,55 @@ func errorStep(err error) func(controller.SessionQuery) (controller.SessionObser
 	}
 }
 
+// scriptedContainer returns one canned probe or discover result per call,
+// so a probe-first retry (which re-observes the same kind that failed) can
+// be scripted to succeed on the second call — fake.ContainerObserver
+// returns the same canned result every call, which cannot express that.
+type scriptedContainer struct {
+	probeSteps    []func(state.ContainerBinding) (controller.ContainerObservation, error)
+	discoverSteps []func(resolve.Workspace, config.Config) (*controller.ContainerObservation, error)
+}
+
+func (s *scriptedContainer) Applies(context.Context, resolve.Workspace, config.Config) (bool, error) {
+	return true, nil
+}
+
+func (s *scriptedContainer) ProbeContainer(_ context.Context, b state.ContainerBinding) (controller.ContainerObservation, error) {
+	if len(s.probeSteps) == 0 {
+		return controller.ContainerObservation{}, errors.New("scripted probe exhausted")
+	}
+	step := s.probeSteps[0]
+	s.probeSteps = s.probeSteps[1:]
+	return step(b)
+}
+
+func (s *scriptedContainer) DiscoverContainer(_ context.Context, ws resolve.Workspace, cfg config.Config) (*controller.ContainerObservation, error) {
+	if len(s.discoverSteps) == 0 {
+		return nil, errors.New("scripted discover exhausted")
+	}
+	step := s.discoverSteps[0]
+	s.discoverSteps = s.discoverSteps[1:]
+	return step(ws, cfg)
+}
+
+func probeErr(err error) func(state.ContainerBinding) (controller.ContainerObservation, error) {
+	return func(state.ContainerBinding) (controller.ContainerObservation, error) {
+		return controller.ContainerObservation{}, err
+	}
+}
+
+func probeOK(obs controller.ContainerObservation) func(state.ContainerBinding) (controller.ContainerObservation, error) {
+	return func(state.ContainerBinding) (controller.ContainerObservation, error) { return obs, nil }
+}
+
+func discoverErr(err error) func(resolve.Workspace, config.Config) (*controller.ContainerObservation, error) {
+	return func(resolve.Workspace, config.Config) (*controller.ContainerObservation, error) { return nil, err }
+}
+
+func discoverOK(obs *controller.ContainerObservation) func(resolve.Workspace, config.Config) (*controller.ContainerObservation, error) {
+	return func(resolve.Workspace, config.Config) (*controller.ContainerObservation, error) { return obs, nil }
+}
+
 func ensureWorkspace() resolve.Workspace {
 	return resolve.Workspace{
 		ID:          "w1",
@@ -482,12 +531,16 @@ func TestEnsureAcquireRunsIdempotentStart(t *testing.T) {
 			// No Workdir: the acquire shape.
 		},
 	}
-	if _, err := r.ctrl.Ensure(context.Background(), containerDesired(),
-		[]controller.WindowIntent{{Name: "shell"}}, r.lockDir, time.Second); err != nil {
+	res, err := r.ctrl.Ensure(context.Background(), containerDesired(),
+		[]controller.WindowIntent{{Name: "shell"}}, r.lockDir, time.Second)
+	if err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 	if len(r.actuatorC.Started) != 1 {
 		t.Errorf("acquire did not run the idempotent start (calls = %d)", len(r.actuatorC.Started))
+	}
+	if res.ContainerWindowsStale {
+		t.Error("acquire onto an already-running container must not report stale container windows")
 	}
 }
 
@@ -536,17 +589,16 @@ func TestEnsureProbeFirstRetriesBoundAndUnbound(t *testing.T) {
 		}, ensureTime); err != nil {
 			t.Fatal(err)
 		}
-		// First probe (inside Observe) errors -> probe-first; the retry succeeds.
+		// First probe (inside Observe) errors -> probe-first; fake.ContainerObserver
+		// returns the same canned ProbeErr on every call, so the retry fails
+		// again too. TestEnsureProbeFirstRetrySucceeds covers a retry that
+		// resolves, using scriptedContainer to vary the result per call.
 		obs := &fake.ContainerObserver{
 			AppliesResult: true,
 			ProbeErr:      errors.New("docker hiccup"),
 		}
 		r.ctrl.Containers = obs
 
-		// The retry must NOT reuse ProbeErr: clear it after Observe by
-		// scripting — the fake returns ProbeErr every call, so instead
-		// assert the failure path: a persistently failing probe fails
-		// Ensure without mutating.
 		_, err := r.ctrl.Ensure(context.Background(), containerDesired(),
 			[]controller.WindowIntent{{Name: "shell"}}, r.lockDir, time.Second)
 		if err == nil {
@@ -574,6 +626,121 @@ func TestEnsureProbeFirstRetriesBoundAndUnbound(t *testing.T) {
 		}
 		if got := len(obs.Discovered); got != 2 {
 			t.Errorf("discover calls = %d, want 2 (observe + one retry)", got)
+		}
+	})
+}
+
+// TestEnsureProbeFirstRetrySucceeds covers the spec §4 retry outcomes when
+// the retried observation succeeds, as opposed to
+// TestEnsureProbeFirstRetriesBoundAndUnbound, which only covers a retry
+// that fails again. Each case's initial observation errors (forcing
+// probe-first) and the retry then resolves per the case; the session is
+// already registered and allocated under its live name so the session
+// action is none and the container phase is isolated.
+func TestEnsureProbeFirstRetrySucceeds(t *testing.T) {
+	registerLive := func(t *testing.T, r *ensureRig) {
+		t.Helper()
+		if err := r.store.RegisterWorkspace(containerDesired().Workspace, "sha256:x", ensureTime); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.store.AllocateSessionName("w1", ensureTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("bound retry probe returns present with full binding", func(t *testing.T) {
+		r := newEnsureRig(t, liveStep(ownSession("slab"))).withContainerActuator()
+		registerLive(t, r)
+		if err := r.store.RecordContainerObservation("w1", state.ContainerObservation{
+			Kind: "devcontainer", ContainerID: "cid-1", ContainerUser: "vscode",
+			Workdir: "/workspaces/slab", Health: state.HealthPresent,
+		}, ensureTime); err != nil {
+			t.Fatal(err)
+		}
+		sc := &scriptedContainer{probeSteps: []func(state.ContainerBinding) (controller.ContainerObservation, error){
+			probeErr(errors.New("docker hiccup")),
+			probeOK(controller.ContainerObservation{
+				Kind: "devcontainer", ContainerID: "cid-1", ContainerUser: "vscode",
+				Workdir: "/workspaces/slab", Health: state.HealthPresent,
+			}),
+		}}
+		r.ctrl.Containers = sc
+
+		res, err := r.ctrl.Ensure(context.Background(), containerDesired(),
+			[]controller.WindowIntent{{Name: "shell"}}, r.lockDir, time.Second)
+		if err != nil {
+			t.Fatalf("Ensure: %v", err)
+		}
+		if len(r.actuatorC.Started) != 0 {
+			t.Errorf("StartContainer calls = %d, want 0 (already present and bound)", len(r.actuatorC.Started))
+		}
+		if res.Container == nil || res.Container.ContainerID != "cid-1" || res.Container.Workdir != "/workspaces/slab" {
+			t.Errorf("result container = %+v", res.Container)
+		}
+		rec, _ := r.store.Workspace("w1")
+		if rec.Container == nil || rec.Container.ContainerID != "cid-1" || rec.Container.Workdir != "/workspaces/slab" {
+			t.Errorf("committed binding = %+v", rec.Container)
+		}
+	})
+
+	t.Run("unbound retry discover returns present incomplete", func(t *testing.T) {
+		r := newEnsureRig(t, liveStep(ownSession("slab"))).withContainerActuator()
+		registerLive(t, r)
+		sc := &scriptedContainer{discoverSteps: []func(resolve.Workspace, config.Config) (*controller.ContainerObservation, error){
+			discoverErr(errors.New("docker hiccup")),
+			discoverOK(&controller.ContainerObservation{
+				Kind: "devcontainer", ContainerID: "cid-1", Health: state.HealthPresent,
+				// No Workdir: the discovery-acquire shape.
+			}),
+		}}
+		r.ctrl.Containers = sc
+
+		if _, err := r.ctrl.Ensure(context.Background(), containerDesired(),
+			[]controller.WindowIntent{{Name: "shell"}}, r.lockDir, time.Second); err != nil {
+			t.Fatalf("Ensure: %v", err)
+		}
+		if len(r.actuatorC.Started) != 1 {
+			t.Errorf("StartContainer calls = %d, want 1 (acquire)", len(r.actuatorC.Started))
+		}
+	})
+
+	t.Run("unbound retry discover returns missing", func(t *testing.T) {
+		r := newEnsureRig(t, liveStep(ownSession("slab"))).withContainerActuator()
+		registerLive(t, r)
+		sc := &scriptedContainer{discoverSteps: []func(resolve.Workspace, config.Config) (*controller.ContainerObservation, error){
+			discoverErr(errors.New("docker hiccup")),
+			discoverOK(&controller.ContainerObservation{Health: state.HealthMissing, Kind: "devcontainer"}),
+		}}
+		r.ctrl.Containers = sc
+
+		if _, err := r.ctrl.Ensure(context.Background(), containerDesired(),
+			[]controller.WindowIntent{{Name: "shell"}}, r.lockDir, time.Second); err != nil {
+			t.Fatalf("Ensure: %v", err)
+		}
+		if len(r.actuatorC.Started) != 1 {
+			t.Errorf("StartContainer calls = %d, want 1 (start)", len(r.actuatorC.Started))
+		}
+	})
+
+	t.Run("unbound retry discover returns none", func(t *testing.T) {
+		r := newEnsureRig(t, liveStep(ownSession("slab"))).withContainerActuator()
+		registerLive(t, r)
+		sc := &scriptedContainer{discoverSteps: []func(resolve.Workspace, config.Config) (*controller.ContainerObservation, error){
+			discoverErr(errors.New("docker hiccup")),
+			discoverOK(nil),
+		}}
+		r.ctrl.Containers = sc
+
+		res, err := r.ctrl.Ensure(context.Background(), containerDesired(),
+			[]controller.WindowIntent{{Name: "shell"}}, r.lockDir, time.Second)
+		if err != nil {
+			t.Fatalf("Ensure: %v", err)
+		}
+		if len(r.actuatorC.Started) != 0 {
+			t.Errorf("StartContainer calls = %d, want 0 (no container applies)", len(r.actuatorC.Started))
+		}
+		if res.Container != nil {
+			t.Errorf("result container = %+v, want nil", res.Container)
 		}
 	})
 }
