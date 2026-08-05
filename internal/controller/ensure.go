@@ -76,6 +76,7 @@ var ErrContainerActionUnsupported = errors.New(
 // followed by re-observation and a transactional commit. It returns
 // typed refusals and never mutates on uncertainty.
 func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowIntent, lockDir string, lockTimeout time.Duration) (EnsureResult, error) {
+	const opName = "open"
 	lk, err := lock.Acquire(ctx, lockDir, d.Workspace.ID, lockTimeout)
 	if err != nil {
 		return EnsureResult{}, err
@@ -91,24 +92,24 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowInte
 		// Best-effort: an Observe error is a store read failure, so this
 		// write may fail too, but status should explain the open when it
 		// can (open/attach spec §2).
-		c.recordFailure(d.Workspace.ID, "observing the workspace: "+err.Error())
+		c.recordFailure(d.Workspace.ID, opName, "observing the workspace: "+err.Error())
 		return EnsureResult{}, err
 	}
 	plan := BuildPlan(snap)
 
 	if plan.Session == SessionActionRefuse {
-		c.recordFailure(d.Workspace.ID, plan.Refusal)
+		c.recordFailure(d.Workspace.ID, opName, plan.Refusal)
 		return EnsureResult{}, &RefusalError{Reason: plan.Refusal}
 	}
 
-	containerObs, started, err := c.ensureContainer(ctx, d, snap, plan.Container)
+	containerObs, started, err := c.ensureContainer(ctx, d, snap, plan.Container, opName)
 	if err != nil {
 		return EnsureResult{}, err
 	}
 
 	windows, err := renderWindows(intents, d, containerObs, c.ContainerAct)
 	if err != nil {
-		c.recordFailure(d.Workspace.ID, err.Error())
+		c.recordFailure(d.Workspace.ID, opName, err.Error())
 		return EnsureResult{}, err
 	}
 
@@ -118,7 +119,7 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowInte
 
 	switch plan.Session {
 	case SessionActionNone:
-		if err := c.commitOutcome(d.Workspace.ID, containerObs); err != nil {
+		if err := c.commitOutcome(d.Workspace.ID, opName, containerObs); err != nil {
 			return EnsureResult{}, err
 		}
 		return EnsureResult{
@@ -136,13 +137,13 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowInte
 			if errors.As(err, &conflict) {
 				reason := fmt.Sprintf(
 					"session name %q is already recorded for another workspace; refusing to adopt it", name)
-				c.recordFailure(d.Workspace.ID, reason)
+				c.recordFailure(d.Workspace.ID, opName, reason)
 				return EnsureResult{}, &RefusalError{Reason: reason}
 			}
-			c.recordFailure(d.Workspace.ID, "recording the adopted session name: "+err.Error())
+			c.recordFailure(d.Workspace.ID, opName, "recording the adopted session name: "+err.Error())
 			return EnsureResult{}, fmt.Errorf("recording the adopted session name: %w", err)
 		}
-		if err := c.commitOutcome(d.Workspace.ID, containerObs); err != nil {
+		if err := c.commitOutcome(d.Workspace.ID, opName, containerObs); err != nil {
 			return EnsureResult{}, err
 		}
 		return EnsureResult{
@@ -169,7 +170,7 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowInte
 // play) plus whether a genuine start ran — an acquire's idempotent up
 // onto an already-running container reports false, so replacement
 // staleness is never claimed for it.
-func (c *Controller) ensureContainer(ctx context.Context, d Desired, snap Snapshot, action ContainerAction) (*ContainerObservation, bool, error) {
+func (c *Controller) ensureContainer(ctx context.Context, d Desired, snap Snapshot, action ContainerAction, opName string) (*ContainerObservation, bool, error) {
 	if action == ContainerActionProbeFirst {
 		// One retry of the observation kind that failed (spec §4): a
 		// stored binding re-probes; an unbound workspace re-discovers.
@@ -179,7 +180,7 @@ func (c *Controller) ensureContainer(ctx context.Context, d Desired, snap Snapsh
 		// resolving what a probe or discovery can tell us for free.
 		retried, err := c.retryContainerObservation(ctx, d, snap)
 		if err != nil {
-			c.recordFailure(d.Workspace.ID, "re-observing the container: "+err.Error())
+			c.recordFailure(d.Workspace.ID, opName, "re-observing the container: "+err.Error())
 			return nil, false, fmt.Errorf("re-observing the container: %w", err)
 		}
 		snap.Container = ContainerSnapshot{Observed: retried}
@@ -194,12 +195,12 @@ func (c *Controller) ensureContainer(ctx context.Context, d Desired, snap Snapsh
 		return nil, false, nil
 	case ContainerActionStart, ContainerActionAcquire:
 		if c.ContainerAct == nil {
-			c.recordFailure(d.Workspace.ID, ErrContainerActionUnsupported.Error())
+			c.recordFailure(d.Workspace.ID, opName, ErrContainerActionUnsupported.Error())
 			return nil, false, ErrContainerActionUnsupported
 		}
 		obs, err := c.ContainerAct.StartContainer(ctx, d.Workspace, d.Config)
 		if err != nil {
-			c.recordStartFailure(d.Workspace.ID, err)
+			c.recordStartFailure(d.Workspace.ID, opName, err)
 			return nil, false, fmt.Errorf("starting the container: %w", err)
 		}
 		// Acquire is a no-op up on an already-running container: the
@@ -278,10 +279,10 @@ func wantsContainerWindows(intents []WindowIntent, containerApplies bool) bool {
 	return false
 }
 
-// commitOutcome records a successful open, carrying the container
+// commitOutcome records a successful operation, carrying the container
 // observation into the same transaction when one exists.
-func (c *Controller) commitOutcome(workspaceID string, obs *ContainerObservation) error {
-	op := state.Operation{Name: "open", Outcome: state.OutcomeOK}
+func (c *Controller) commitOutcome(workspaceID, opName string, obs *ContainerObservation) error {
+	op := state.Operation{Name: opName, Outcome: state.OutcomeOK}
 	if obs == nil {
 		if err := c.Store.RecordOperation(workspaceID, op, c.Clock.Now()); err != nil {
 			return fmt.Errorf("recording the operation: %w", err)
@@ -312,8 +313,8 @@ func toStateObservation(obs *ContainerObservation) *state.ContainerObservation {
 
 // recordStartFailure persists a failed container start with the real
 // exit status and bounded stderr (design §9).
-func (c *Controller) recordStartFailure(workspaceID string, err error) {
-	op := state.Operation{Name: "open", Outcome: state.OutcomeFailed, ErrorSummary: err.Error()}
+func (c *Controller) recordStartFailure(workspaceID, opName string, err error) {
+	op := state.Operation{Name: opName, Outcome: state.OutcomeFailed, ErrorSummary: err.Error()}
 	var start *ContainerStartError
 	if errors.As(err, &start) {
 		code := start.ExitCode
@@ -326,10 +327,11 @@ func (c *Controller) recordStartFailure(workspaceID string, err error) {
 }
 
 func (c *Controller) createSession(ctx context.Context, d Desired, windows []WindowSpec, containerObs *ContainerObservation) (EnsureResult, error) {
+	const opName = "open"
 	id := d.Workspace.ID
 	name, err := c.Store.AllocateSessionName(id, c.Clock.Now())
 	if err != nil {
-		c.recordFailure(id, "allocating a session name: "+err.Error())
+		c.recordFailure(id, opName, "allocating a session name: "+err.Error())
 		return EnsureResult{}, fmt.Errorf("allocating a session name: %w", err)
 	}
 
@@ -343,14 +345,14 @@ func (c *Controller) createSession(ctx context.Context, d Desired, windows []Win
 	})
 	if err != nil {
 		reason := "tmux could not be observed before creating the session; refusing to act"
-		c.recordFailure(id, reason)
+		c.recordFailure(id, opName, reason)
 		return EnsureResult{}, &RefusalError{Reason: reason}
 	}
 	if len(occ.ByName) > 0 {
 		reason := fmt.Sprintf(
 			"session %q exists but does not belong to this workspace; refusing to create over it",
 			name)
-		c.recordFailure(id, reason)
+		c.recordFailure(id, opName, reason)
 		return EnsureResult{}, &RefusalError{Reason: reason}
 	}
 
@@ -363,7 +365,7 @@ func (c *Controller) createSession(ctx context.Context, d Desired, windows []Win
 		Windows:     windows,
 	}
 	if err := c.Actuator.CreateSession(ctx, spec); err != nil {
-		c.recordFailure(id, "creating the session: "+err.Error())
+		c.recordFailure(id, opName, "creating the session: "+err.Error())
 		return EnsureResult{}, fmt.Errorf("creating the session: %w", err)
 	}
 
@@ -372,11 +374,11 @@ func (c *Controller) createSession(ctx context.Context, d Desired, windows []Win
 	// so only the observed shape below proves the creation.
 	confirm, err := c.Observe(ctx, d)
 	if err != nil {
-		c.recordFailure(id, "confirming the created session: "+err.Error())
+		c.recordFailure(id, opName, "confirming the created session: "+err.Error())
 		return EnsureResult{}, err
 	}
 	if reason := confirmCreation(confirm, d, name); reason != "" {
-		c.recordFailure(id, reason)
+		c.recordFailure(id, opName, reason)
 		return EnsureResult{}, fmt.Errorf("the created session could not be confirmed: %s", reason)
 	}
 
@@ -386,7 +388,7 @@ func (c *Controller) createSession(ctx context.Context, d Desired, windows []Win
 		Container:     toStateObservation(containerObs),
 		Operation:     state.Operation{Name: "open", Outcome: state.OutcomeOK},
 	}, c.Clock.Now()); err != nil {
-		c.recordFailure(id, "committing the reconciliation: "+err.Error())
+		c.recordFailure(id, opName, "committing the reconciliation: "+err.Error())
 		return EnsureResult{}, fmt.Errorf("committing the reconciliation: %w", err)
 	}
 	return EnsureResult{Action: EnsureCreated, Session: name, Drifted: false}, nil
@@ -417,11 +419,11 @@ func confirmCreation(snap Snapshot, d Desired, allocated string) string {
 	return ""
 }
 
-// recordFailure best-effort records a failed open. The primary error is
+// recordFailure best-effort records a failed operation under opName. The primary error is
 // what the caller returns; a failing record write must not mask it.
-func (c *Controller) recordFailure(workspaceID, summary string) {
+func (c *Controller) recordFailure(workspaceID, opName, summary string) {
 	_ = c.Store.RecordOperation(workspaceID, state.Operation{
-		Name:         "open",
+		Name:         opName,
 		Outcome:      state.OutcomeFailed,
 		ErrorSummary: summary,
 	}, c.Clock.Now())
