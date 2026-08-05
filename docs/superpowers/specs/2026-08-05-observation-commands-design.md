@@ -191,8 +191,15 @@ A small utility, not a public package or domain boundary (design §5):
   than silently dropped.
 - A non-zero exit is **not** a Go error: the caller reads `ExitCode` and
   `Stderr`. The error return is reserved for failure to start, context
-  cancellation, and timeout. Cancellation kills the child process.
-- No shell interpretation anywhere; argv only (design §11).
+  cancellation, and timeout.
+- Cancellation kills the child's **process group** (the child starts in
+  its own group via `Setpgid`), not just the immediate process:
+  descendants holding the stdout/stderr pipes would otherwise keep `Run`
+  from returning at its deadline. A bounded `WaitDelay` backstops
+  descendants that survive the kill. Tested with a helper that spawns a
+  background grandchild.
+- No shell interpretation anywhere; argv only (design §11) — including a
+  test proving shell metacharacters in arguments stay literal.
 
 ## 5. `internal/tmux`
 
@@ -202,38 +209,40 @@ server; `Timeout` bounds every subprocess, the zero value meaning a
 5-second default, so a hung tmux cannot wedge unattended callers.
 Timeout propagation through `Sessions` is tested.
 
-- `Sessions(ctx) ([]controller.LiveSession, error)` runs exactly one
-  subprocess, with a **newline-safe keyed format** (four lines per
-  session; tmux formats expand user options — verified on tmux 3.4):
+- `Sessions(ctx) ([]controller.LiveSession, error)` uses **two-phase
+  observation with raw single-value transport**, so no in-band framing
+  exists for a value to forge (identity values are not newline-free —
+  the resolver imposes no such restriction, and tmux emits option
+  values verbatim in formats; all verified on tmux 3.4):
 
-  ```text
-  tmux [-L socket] list-sessions -F '#{session_id}\tname\t#{session_name}
-  #{session_id}\twsid\t#{@dev_workspace_id}
-  #{session_id}\tslug\t#{@dev_slug}
-  #{session_id}\ttree\t#{@dev_worktree}'
-  ```
+  1. `tmux [-L socket] list-sessions -F '#{session_id}'` — one line per
+     session. Every line must match `^\$[0-9]+$` exactly, with no
+     duplicates; anything else is an observation error. Session IDs are
+     tmux-generated and cannot be influenced by identity values.
+  2. Per session ID, four `tmux display-message -p -t <id> '<format>'`
+     calls, one each for `#{session_name}`, `#{@dev_workspace_id}`,
+     `#{@dev_slug}`, `#{@dev_worktree}`. The **entire output** of one
+     call is one raw value plus exactly one trailing newline added by
+     tmux; the decoder strips exactly that one newline. Embedded
+     newlines, tabs, and anchor-shaped content round-trip unmodified
+     because no parsing grammar exists to collide with.
 
-  Identity values are **not** newline-free (the resolver imposes no such
-  restriction, and tmux emits option values verbatim — verified: a
-  worktree containing a newline splits a naive record). The decoder is
-  defined as:
-
-  - a line matching `^\$[0-9]+\t(name|wsid|slug|tree)\t` starts a field;
-    `#{session_id}` is tmux-generated (`$N`) and cannot contain the
-    delimiter, and each line carries exactly one free-form value, last;
-  - any other line is a continuation of the previous field's value with
-    the `\n` restored — embedded newlines round-trip;
-  - every session must yield exactly one of each key; duplicate or
-    missing keys, or a session id appearing with inconsistent grouping,
-    is an observation error. A value line that itself matches the anchor
-    pattern would collide with the real session's keys and be caught by
-    this rule; the residual forgery window (a path injecting a complete
-    phantom session) is out of threat model — identity values come from
-    the local filesystem and configuration, not remote input.
-- **No server is absence, not failure:** exit 1 with stderr matching
-  `no server running` (older tmux) or `error connecting to` (3.x) returns
-  an empty list and nil error. Any other non-zero exit, start failure, or
-  parse failure returns an error, which `Observe` renders as
+  Validation: an empty session name is an observation error (real tmux
+  sessions cannot have empty names; a session vanishing between the two
+  phases surfaces this way — verified: a dead `-t` target can exit 0
+  with empty output). Observation therefore costs `1 + 4N` subprocesses,
+  each individually bounded by the client timeout; N is the live session
+  count and small in practice, and the trade is deliberate: correctness
+  of attribution over subprocess count.
+- **No server is absence, not failure — matched narrowly:** exit 1 with
+  stderr containing `no server running` (older tmux), or containing both
+  `error connecting to` **and** `No such file or directory` (3.x),
+  returns an empty list and nil error. `error connecting to` alone is
+  **not** absence: tmux emits that prefix for permission and other
+  socket failures (`Operation not permitted`), which must stay errors so
+  a denied socket never reads as "no sessions" and never lets planning
+  propose creation. Any other non-zero exit, start failure, or
+  validation failure returns an error, which `Observe` renders as
   `SessionUnknown` (a tmux outage is not absence — design §9).
 - `ObserveSession(ctx, q)` implements `controller.SessionObserver` by
   filtering `Sessions` output in-process: `ByIdentity` is the session
@@ -286,17 +295,22 @@ Timeout propagation through `Sessions` is tested.
 ## 8. Testing
 
 - `internal/run`: exit-status retention, bounded-capture truncation,
-  context cancellation kills the child, argv-only execution.
-- `internal/tmux`: pure decoder tests over fixture output (well-formed;
-  embedded newlines in every free-form field round-tripping; malformed,
-  duplicate-key, and missing-key records erroring; duplicate-identity
-  claims); no-server stderr classification for both known variants;
-  timeout propagation through `Sessions` (a hung fake subprocess is
-  killed at the client timeout); real-tmux integration tests on an
+  timeout and cancellation killing the whole process group (including a
+  backgrounded grandchild holding the pipes), shell metacharacters in
+  argv staying literal.
+- `internal/tmux`: session-ID validation tests (well-formed, malformed,
+  duplicate, empty); value round-trips through the raw single-value
+  transport, including embedded newlines and anchor-shaped content;
+  empty-session-name rejection; no-server stderr classification —
+  both absence variants accepted, `error connecting to … (Operation not
+  permitted)` and other failures rejected as errors; duplicate-identity
+  claims; timeout propagation through `Sessions` (a hung fake subprocess
+  is killed at the client timeout); real-tmux integration tests on an
   isolated `-L` socket (skipped when tmux is absent; CI's ubuntu-latest
   ships tmux): create sessions carrying the three `@dev_` user options —
-  including a worktree value containing a newline — observe, assert
-  identity and name matching and value round-trips.
+  including a worktree value containing a newline and an anchor-shaped
+  line — observe, assert identity and name matching and value
+  round-trips.
 - `internal/cli`: command tests over `Main` with fakes via the test seam:
   union rendering and ordering, unrecorded and conflict notes,
   duplicate-claim rendering (stored row unknown, claimants listed, no
@@ -334,18 +348,28 @@ no autostart, no schema changes, no daemon. Stale-record diagnosis
   last-observed metadata" is declined because nothing new is observed
   that the schema stores. `state.Open` may still initialize/migrate the
   database file.
-- One bulk `list-sessions -F` call with user-option format expansion is
-  the whole tmux surface; `ObserveSession` filters in-process.
-- The tmux format is a keyed multi-line frame anchored on
-  tmux-generated `#{session_id}`, with a defined decoder that restores
-  embedded newlines: identity values are not constrained to be
-  newline-free, and one odd-but-legal path must not poison the whole
-  observation. (Verified: tmux emits option values verbatim; `q:` does
-  not escape newlines.)
+- The tmux surface is two-phase: a strictly validated
+  `list-sessions -F '#{session_id}'` enumeration, then per-field
+  `display-message -p` calls whose entire output is one raw value.
+  In-band framing was rejected twice: a naive tab/newline frame splits
+  on legal newline-bearing values, and a keyed anchor frame is forgeable
+  by values containing anchor-shaped lines. Raw single-value transport
+  has no grammar to forge. (Verified on tmux 3.4: option values are
+  emitted verbatim in formats; `q:` does not escape newlines; the `s/…/`
+  modifier cannot match newlines; `show-options` quoting is
+  undocumented and inconsistent; session names are control-character-
+  sanitized by tmux at creation.) `ObserveSession` filters in-process.
 - Every tmux subprocess has a finite timeout (`Client.Timeout`, default
-  5s when zero); signal cancellation alone is not the hang defense.
-- No-server (both known stderr variants) is absence; every other tmux
-  failure is unknown. Unmatched failure never converts to absence.
+  5s when zero); signal cancellation alone is not the hang defense. One
+  observation costs `1 + 4N` subprocesses, each bounded.
+- No-server is absence only when matched narrowly: `no server running`,
+  or `error connecting to` together with `No such file or directory`.
+  Permission failures (`Operation not permitted`) and every other
+  failure stay unknown — a denied socket never reads as absence, so
+  planning can never propose creation from it.
+- Runner cancellation kills the child's process group with a bounded
+  `WaitDelay` backstop, so descendants holding pipes cannot wedge a
+  deadline.
 - Duplicate live claims on one workspace ID are an observation error in
   `ObserveSession` and render as consistent per-row uncertainty in
   `list`; no code path picks a claimant.

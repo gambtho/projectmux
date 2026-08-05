@@ -4,7 +4,7 @@
 
 **Goal:** Ship `projectmux list` and `projectmux status` backed by a minimal real tmux observer, the design-§5 runner utility, and the existing controller/state foundations.
 
-**Architecture:** A new `internal/run` package executes subprocesses with bounded capture and timeouts. A new `internal/tmux` package implements `controller.SessionObserver` over one `tmux list-sessions -F` call using a newline-safe keyed frame. `internal/cli` gains `list` (store ∪ live identity sessions, no config loading) and `status` (config → resolve → `controller.Observe` → `controller.BuildPlan`), both purely observational.
+**Architecture:** A new `internal/run` package executes subprocesses with bounded capture, timeouts, and process-group cancellation. A new `internal/tmux` package implements `controller.SessionObserver` via two-phase observation: a strictly validated `list-sessions -F '#{session_id}'` enumeration, then per-field `display-message -p` calls whose entire output is one raw value — no in-band framing exists for a value to forge. `internal/cli` gains `list` (store ∪ live identity sessions, no config loading) and `status` (config → resolve → `controller.Observe` → `controller.BuildPlan`), both purely observational.
 
 **Tech Stack:** Go (module `github.com/gambtho/projectmux`), stdlib only — no new dependencies. Spec: `docs/superpowers/specs/2026-08-05-observation-commands-design.md`.
 
@@ -16,8 +16,8 @@
 - JSON envelopes carry `schema_version` from the existing `OutputSchemaVersion = 1` (`internal/cli/config.go:22`). Human output is not a contract.
 - Observation commands must never mutate operational records: no `RegisterWorkspace`, `AllocateSessionName`, `RecordContainerObservation`, `RecordOperation`, or `CommitReconciliation` calls (design §8/§12). `state.Open` initializing/migrating the database file is allowed.
 - A stored container binding with `health=missing`/`unknown` must never render as a live container (design §8).
-- tmux identity values may contain newlines; the keyed frame decoder must round-trip them (spec §5).
-- Every tmux subprocess has a finite timeout (default 5s); no-server (`no server running` or `error connecting to` on stderr with exit 1) is absence, every other failure is unknown.
+- tmux identity values may contain newlines and anchor-shaped content; the raw single-value transport must round-trip them (spec §5).
+- Every tmux subprocess has a finite timeout (default 5s); no-server is absence only when matched narrowly (`no server running`, or `error connecting to` with `No such file or directory`, exit 1) — permission and other socket failures stay errors.
 - Commit messages and code comments must not mention Claude or AI assistance.
 
 ---
@@ -30,7 +30,7 @@
 
 **Interfaces:**
 - Consumes: nothing project-internal.
-- Produces: `run.Command{Argv []string, Dir string, Timeout time.Duration}`, `run.Result{Stdout, Stderr []byte, ExitCode int, StdoutTruncated, StderrTruncated bool}`, `run.Run(ctx context.Context, cmd run.Command) (run.Result, error)`, `run.MaxCaptureBytes = 64 * 1024`. A non-zero exit is not a Go error; the error return covers empty argv, start failure, cancellation, and timeout (wrapping `ctx.Err()` so `errors.Is` works).
+- Produces: `run.Command{Argv []string, Dir string, Timeout time.Duration}`, `run.Result{Stdout, Stderr []byte, ExitCode int, StdoutTruncated, StderrTruncated bool}`, `run.Run(ctx context.Context, cmd run.Command) (run.Result, error)`, `run.MaxCaptureBytes = 64 * 1024`. A non-zero exit is not a Go error; the error return covers empty argv, start failure, cancellation, and timeout (wrapping `ctx.Err()` so `errors.Is` works). Cancellation kills the child's whole process group (`Setpgid` + group `SIGKILL`), with a one-second `WaitDelay` backstop for descendants that survive and hold the pipes.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -108,6 +108,32 @@ func TestRunTimeoutKillsTheChild(t *testing.T) {
 	}
 }
 
+func TestRunTimeoutKillsDescendantsHoldingPipes(t *testing.T) {
+	start := time.Now()
+	_, err := Run(context.Background(), Command{
+		Argv:    []string{"/bin/sh", "-c", "sleep 30 & sleep 30"},
+		Timeout: 100 * time.Millisecond,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("Run took %v; the background grandchild outlived the group kill", elapsed)
+	}
+}
+
+func TestRunArgvMetacharactersStayLiteral(t *testing.T) {
+	res, err := Run(context.Background(), Command{
+		Argv: []string{"/bin/echo", "$HOME;`id`|&&"},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := string(res.Stdout); got != "$HOME;`id`|&&\n" {
+		t.Errorf("Stdout = %q; shell metacharacters were interpreted", got)
+	}
+}
+
 func TestRunCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -157,12 +183,17 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"syscall"
 	"time"
 )
 
 // MaxCaptureBytes bounds each captured stream so a chatty subprocess
 // cannot balloon memory; truncation is reported, never silent.
 const MaxCaptureBytes = 64 * 1024
+
+// waitDelay bounds how long Run waits, after the group kill, for
+// descendants that survived and still hold the output pipes.
+const waitDelay = time.Second
 
 // Command is one subprocess invocation. Argv is executed directly —
 // never through a shell (design §11).
@@ -217,6 +248,15 @@ func Run(ctx context.Context, cmd Command) (Result, error) {
 	c.Dir = cmd.Dir
 	c.Stdout = &stdout
 	c.Stderr = &stderr
+	// The child gets its own process group and cancellation kills the
+	// whole group: killing only the immediate process would leave a
+	// grandchild holding the pipes, keeping Wait from returning at the
+	// deadline. WaitDelay backstops anything that survives the kill.
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	c.Cancel = func() error {
+		return syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+	}
+	c.WaitDelay = waitDelay
 
 	err := c.Run()
 	if ctxErr := ctx.Err(); ctxErr != nil {
@@ -256,7 +296,7 @@ git commit -m "Add the bounded subprocess runner utility"
 
 ---
 
-### Task 2: `internal/tmux` — frame decoder, matcher, and no-server classifier
+### Task 2: `internal/tmux` — ID validation, value transport, matcher, and no-server classifier
 
 **Files:**
 - Create: `internal/tmux/decode.go`
@@ -264,7 +304,7 @@ git commit -m "Add the bounded subprocess runner utility"
 
 **Interfaces:**
 - Consumes: `controller.LiveSession{Name, WorkspaceID, Slug, Worktree string}`, `controller.SessionQuery{WorkspaceID string, CandidateNames []string}`, `controller.SessionObservation{ByIdentity *LiveSession, ByName []LiveSession}` (all from `internal/controller`).
-- Produces (package-private, used by Task 3): `sessionFormat` (the `-F` argument), `decodeSessions(out string) ([]controller.LiveSession, error)`, `matchSessions(live []controller.LiveSession, q controller.SessionQuery) (controller.SessionObservation, error)`, `isNoServer(stderr []byte) bool`.
+- Produces (package-private, used by Task 3): `fieldFormats [4]string` (per-field `display-message` formats: name, workspace ID, slug, worktree — in that order), `parseSessionIDs(out string) ([]string, error)`, `valueFromOutput(out []byte) string`, `matchSessions(live []controller.LiveSession, q controller.SessionQuery) (controller.SessionObservation, error)`, `isNoServer(stderr []byte) bool`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -274,95 +314,78 @@ Create `internal/tmux/decode_test.go`:
 package tmux
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/gambtho/projectmux/internal/controller"
 )
 
-func TestDecodeSessionsWellFormed(t *testing.T) {
-	out := "$0\tname\talpha\n" +
-		"$0\twsid\tw1\n" +
-		"$0\tslug\tproj\n" +
-		"$0\ttree\t/w/alpha\n" +
-		"$1\tname\tbeta\n" +
-		"$1\twsid\t\n" +
-		"$1\tslug\t\n" +
-		"$1\ttree\t\n"
-	live, err := decodeSessions(out)
+func TestParseSessionIDsWellFormed(t *testing.T) {
+	ids, err := parseSessionIDs("$0\n$3\n$12\n")
 	if err != nil {
-		t.Fatalf("decodeSessions: %v", err)
+		t.Fatalf("parseSessionIDs: %v", err)
 	}
-	want := []controller.LiveSession{
-		{Name: "alpha", WorkspaceID: "w1", Slug: "proj", Worktree: "/w/alpha"},
-		{Name: "beta"},
-	}
-	if len(live) != len(want) {
-		t.Fatalf("decoded %d sessions, want %d: %+v", len(live), len(want), live)
+	want := []string{"$0", "$3", "$12"}
+	if len(ids) != len(want) {
+		t.Fatalf("ids = %v, want %v", ids, want)
 	}
 	for i := range want {
-		if live[i] != want[i] {
-			t.Errorf("session %d = %+v, want %+v", i, live[i], want[i])
+		if ids[i] != want[i] {
+			t.Errorf("ids[%d] = %q, want %q", i, ids[i], want[i])
 		}
 	}
 }
 
-func TestDecodeSessionsRestoresEmbeddedNewlines(t *testing.T) {
-	out := "$0\tname\talpha\n" +
-		"$0\twsid\tw1\n" +
-		"$0\tslug\tproj\n" +
-		"$0\ttree\t/w/evil\n" +
-		"path\n"
-	live, err := decodeSessions(out)
-	if err != nil {
-		t.Fatalf("decodeSessions: %v", err)
-	}
-	if len(live) != 1 {
-		t.Fatalf("decoded %d sessions, want 1", len(live))
-	}
-	if got := live[0].Worktree; got != "/w/evil\npath" {
-		t.Errorf("Worktree = %q, want %q", got, "/w/evil\npath")
-	}
-}
-
-func TestDecodeSessionsEmbeddedNewlineMidRecord(t *testing.T) {
-	out := "$0\tname\talpha\n" +
-		"$0\twsid\tw1\n" +
-		"$0\tslug\tpro\n" +
-		"ject\n" +
-		"$0\ttree\t/w/alpha\n"
-	live, err := decodeSessions(out)
-	if err != nil {
-		t.Fatalf("decodeSessions: %v", err)
-	}
-	if got := live[0].Slug; got != "pro\nject" {
-		t.Errorf("Slug = %q, want %q", got, "pro\nject")
-	}
-}
-
-func TestDecodeSessionsEmptyOutput(t *testing.T) {
+func TestParseSessionIDsEmptyOutput(t *testing.T) {
 	for _, out := range []string{"", "\n"} {
-		live, err := decodeSessions(out)
+		ids, err := parseSessionIDs(out)
 		if err != nil {
-			t.Fatalf("decodeSessions(%q): %v", out, err)
+			t.Fatalf("parseSessionIDs(%q): %v", out, err)
 		}
-		if len(live) != 0 {
-			t.Errorf("decodeSessions(%q) = %+v, want none", out, live)
+		if len(ids) != 0 {
+			t.Errorf("parseSessionIDs(%q) = %v, want none", out, ids)
 		}
 	}
 }
 
-func TestDecodeSessionsMalformed(t *testing.T) {
+func TestParseSessionIDsRejectsMalformedOutput(t *testing.T) {
 	cases := map[string]string{
-		"leading unanchored line": "stray\n$0\tname\talpha\n",
-		"duplicate key": "$0\tname\talpha\n$0\tname\tagain\n" +
-			"$0\twsid\tw\n$0\tslug\ts\n$0\ttree\t/w\n",
-		"missing key": "$0\tname\talpha\n$0\twsid\tw\n$0\tslug\ts\n",
+		"not an id":            "alpha\n",
+		"trailing garbage":     "$0 extra\n",
+		"embedded blank line":  "$0\n\n$1\n",
+		"duplicate id":         "$0\n$0\n",
+		"anchor-shaped forger": "$0\n$999\tname\tforged\n",
 	}
 	for label, out := range cases {
-		if _, err := decodeSessions(out); err == nil {
-			t.Errorf("%s: decodeSessions accepted %q", label, out)
+		if _, err := parseSessionIDs(out); err == nil {
+			t.Errorf("%s: parseSessionIDs accepted %q", label, out)
 		}
+	}
+}
+
+func TestValueFromOutputRoundTrips(t *testing.T) {
+	cases := map[string]string{
+		"/w/alpha\n":                  "/w/alpha",
+		"/w/evil\npath\n":             "/w/evil\npath",
+		"/evil\n$999\tname\tforged\n": "/evil\n$999\tname\tforged",
+		"endswithnl\n\n":              "endswithnl\n",
+		"\n":                          "",
+	}
+	for raw, want := range cases {
+		if got := valueFromOutput([]byte(raw)); got != want {
+			t.Errorf("valueFromOutput(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestFieldFormatsOrderAndKeys(t *testing.T) {
+	want := [4]string{
+		"#{session_name}",
+		"#{" + controller.KeyWorkspaceID + "}",
+		"#{" + controller.KeySlug + "}",
+		"#{" + controller.KeyWorktree + "}",
+	}
+	if fieldFormats != want {
+		t.Errorf("fieldFormats = %v, want %v", fieldFormats, want)
 	}
 }
 
@@ -425,7 +448,7 @@ func TestMatchSessionsEmptyWorkspaceIDNeverMatchesKeyless(t *testing.T) {
 	}
 }
 
-func TestIsNoServer(t *testing.T) {
+func TestIsNoServerMatchesOnlyConfirmedAbsence(t *testing.T) {
 	for _, s := range []string{
 		"no server running on /tmp/tmux-1000/default",
 		"error connecting to /tmp/tmux-1000/bs (No such file or directory)",
@@ -434,21 +457,19 @@ func TestIsNoServer(t *testing.T) {
 			t.Errorf("isNoServer(%q) = false, want true", s)
 		}
 	}
-	for _, s := range []string{"lost server", "", "unknown option"} {
+	// "error connecting to" alone is not absence: tmux emits it for
+	// permission and other socket failures too. Reading those as
+	// absence would let planning propose creation on uncertainty.
+	for _, s := range []string{
+		"error connecting to /tmp/tmux-1000/bs (Operation not permitted)",
+		"error connecting to /tmp/tmux-1000/bs (Permission denied)",
+		"error connecting to /tmp/tmux-1000/bs (Connection refused)",
+		"lost server",
+		"",
+		"unknown option",
+	} {
 		if isNoServer([]byte(s)) {
 			t.Errorf("isNoServer(%q) = true, want false", s)
-		}
-	}
-}
-
-func TestSessionFormatShape(t *testing.T) {
-	lines := strings.Split(sessionFormat, "\n")
-	if len(lines) != 4 {
-		t.Fatalf("sessionFormat has %d lines, want 4: %q", len(lines), sessionFormat)
-	}
-	for _, key := range []string{"name", "wsid", "slug", "tree"} {
-		if !strings.Contains(sessionFormat, "\t"+key+"\t") {
-			t.Errorf("sessionFormat lacks key %q: %q", key, sessionFormat)
 		}
 	}
 }
@@ -457,7 +478,7 @@ func TestSessionFormatShape(t *testing.T) {
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/tmux/ -count=1`
-Expected: FAIL to build — `decodeSessions`, `matchSessions`, `isNoServer`, `sessionFormat` undefined.
+Expected: FAIL to build — `parseSessionIDs`, `valueFromOutput`, `matchSessions`, `isNoServer`, `fieldFormats` undefined.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -478,75 +499,49 @@ import (
 	"github.com/gambtho/projectmux/internal/controller"
 )
 
-// sessionFormat is the -F argument for list-sessions: four lines per
-// session, each anchored by the tmux-generated session id and a field
-// key, with the single free-form value last. tmux expands the @dev_*
-// user options in formats; values are emitted verbatim, so the decoder
-// below — not a newline-free assumption — provides framing (spec §5).
-const sessionFormat = "#{session_id}\tname\t#{session_name}\n" +
-	"#{session_id}\twsid\t#{" + controller.KeyWorkspaceID + "}\n" +
-	"#{session_id}\tslug\t#{" + controller.KeySlug + "}\n" +
-	"#{session_id}\ttree\t#{" + controller.KeyWorktree + "}"
+// sessionIDPattern is a full tmux session id: "$" plus digits. IDs are
+// tmux-generated and cannot be influenced by identity values, which is
+// what makes the enumeration phase trustworthy (spec §5).
+var sessionIDPattern = regexp.MustCompile(`^\$[0-9]+$`)
 
-// anchor recognizes a line that starts a field: "$<id>\t<key>\t". A
-// session id is "$" plus digits and cannot contain the delimiter.
-var anchor = regexp.MustCompile(`^\$[0-9]+\t(name|wsid|slug|tree)\t`)
+// fieldFormats queries one field per subprocess, in this fixed order:
+// name, workspace ID, slug, worktree. The whole output of one query is
+// one raw value, so no in-band framing exists for a value to forge —
+// tmux emits option values verbatim in formats, and identity values are
+// not newline-free (spec §5).
+var fieldFormats = [4]string{
+	"#{session_name}",
+	"#{" + controller.KeyWorkspaceID + "}",
+	"#{" + controller.KeySlug + "}",
+	"#{" + controller.KeyWorktree + "}",
+}
 
-// fieldKeys is every key a complete session record carries.
-var fieldKeys = []string{"name", "wsid", "slug", "tree"}
-
-// decodeSessions decodes list-sessions output produced with
-// sessionFormat. Lines not matching the anchor continue the previous
-// field's value with the newline restored, so embedded newlines
-// round-trip. Duplicate or missing keys are an observation error:
-// uncertainty, never a mis-attributed session.
-func decodeSessions(out string) ([]controller.LiveSession, error) {
+// parseSessionIDs validates enumeration output: one well-formed session
+// id per line, no duplicates. Anything else is an observation error —
+// uncertainty, never a guess about which sessions exist.
+func parseSessionIDs(out string) ([]string, error) {
 	out = strings.TrimSuffix(out, "\n")
 	if out == "" {
 		return nil, nil
 	}
-
-	fields := map[string]map[string]string{}
-	var order []string
-	lastID, lastKey := "", ""
+	var ids []string
 	for _, line := range strings.Split(out, "\n") {
-		m := anchor.FindStringSubmatch(line)
-		if m == nil {
-			if lastID == "" {
-				return nil, fmt.Errorf("tmux output begins with an unanchored line %q", line)
-			}
-			fields[lastID][lastKey] += "\n" + line
-			continue
+		if !sessionIDPattern.MatchString(line) {
+			return nil, fmt.Errorf("tmux emitted a malformed session id %q", line)
 		}
-		id := line[:strings.IndexByte(line, '\t')]
-		key := m[1]
-		if fields[id] == nil {
-			fields[id] = map[string]string{}
-			order = append(order, id)
+		if slices.Contains(ids, line) {
+			return nil, fmt.Errorf("tmux emitted a duplicate session id %q", line)
 		}
-		if _, dup := fields[id][key]; dup {
-			return nil, fmt.Errorf("tmux output repeats field %s for session %s", key, id)
-		}
-		fields[id][key] = line[len(m[0]):]
-		lastID, lastKey = id, key
+		ids = append(ids, line)
 	}
+	return ids, nil
+}
 
-	live := make([]controller.LiveSession, 0, len(order))
-	for _, id := range order {
-		f := fields[id]
-		for _, key := range fieldKeys {
-			if _, ok := f[key]; !ok {
-				return nil, fmt.Errorf("tmux output is missing field %s for session %s", key, id)
-			}
-		}
-		live = append(live, controller.LiveSession{
-			Name:        f["name"],
-			WorkspaceID: f["wsid"],
-			Slug:        f["slug"],
-			Worktree:    f["tree"],
-		})
-	}
-	return live, nil
+// valueFromOutput recovers one raw value from one display-message call:
+// tmux appends exactly one newline, which is stripped; everything else,
+// including embedded newlines and anchor-shaped content, is the value.
+func valueFromOutput(out []byte) string {
+	return strings.TrimSuffix(string(out), "\n")
 }
 
 // matchSessions filters a live-session list into the two halves of a
@@ -572,15 +567,20 @@ func matchSessions(live []controller.LiveSession, q controller.SessionQuery) (co
 	return obs, nil
 }
 
-// isNoServer reports whether stderr is tmux saying no server exists —
-// absence, not failure. Both known spellings are matched ("no server
-// running" from older tmux, "error connecting to" from 3.x); anything
-// else stays an error so an unrecognized failure never converts to
-// absence (design §9).
+// isNoServer reports whether stderr is tmux confirming no server exists
+// — absence, not failure. Matched narrowly: "no server running" (older
+// tmux), or "error connecting to" together with "No such file or
+// directory" (3.x). "error connecting to" alone also covers permission
+// and other socket failures, which must stay errors: an unreadable
+// socket never converts to absence (design §9), or planning could
+// propose creation on uncertainty.
 func isNoServer(stderr []byte) bool {
 	s := string(stderr)
-	return strings.Contains(s, "no server running") ||
-		strings.Contains(s, "error connecting to")
+	if strings.Contains(s, "no server running") {
+		return true
+	}
+	return strings.Contains(s, "error connecting to") &&
+		strings.Contains(s, "No such file or directory")
 }
 ```
 
@@ -595,7 +595,7 @@ Run: `gofmt -l .` (expect empty), `go vet ./...`, `go test ./... -count=1 -race`
 
 ```bash
 git add internal/tmux/
-git commit -m "Add the tmux frame decoder, session matcher, and no-server classifier"
+git commit -m "Add tmux session-id validation, value transport, matcher, and no-server classifier"
 ```
 
 ---
@@ -607,8 +607,8 @@ git commit -m "Add the tmux frame decoder, session matcher, and no-server classi
 - Test: `internal/tmux/client_test.go`
 
 **Interfaces:**
-- Consumes: Task 1's `run.Run`/`run.Command`; Task 2's `sessionFormat`, `decodeSessions`, `matchSessions`, `isNoServer`.
-- Produces: `tmux.Client{Socket string, Timeout time.Duration}` with `Sessions(ctx context.Context) ([]controller.LiveSession, error)` and `ObserveSession(ctx context.Context, q controller.SessionQuery) (controller.SessionObservation, error)`; `tmux.DefaultTimeout = 5 * time.Second`; package var `tmuxBinary = "tmux"` (test seam). `*tmux.Client` satisfies `controller.SessionObserver`.
+- Consumes: Task 1's `run.Run`/`run.Command`; Task 2's `fieldFormats`, `parseSessionIDs`, `valueFromOutput`, `matchSessions`, `isNoServer`.
+- Produces: `tmux.Client{Socket string, Timeout time.Duration}` with `Sessions(ctx context.Context) ([]controller.LiveSession, error)` and `ObserveSession(ctx context.Context, q controller.SessionQuery) (controller.SessionObservation, error)`; `tmux.DefaultTimeout = 5 * time.Second`; package var `tmuxBinary = "tmux"` (test seam). `*tmux.Client` satisfies `controller.SessionObserver`. One observation runs `1 + 4N` subprocesses (enumeration plus four per-field `display-message` calls per session), each bounded by the timeout.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -640,21 +640,67 @@ func fakeTmux(t *testing.T, script string) {
 	tmuxBinary = path
 }
 
-const frameScript = `#!/bin/sh
-printf '$0\tname\talpha\n$0\twsid\tw1\n$0\tslug\tproj\n$0\ttree\t/w/alpha\n'
+// oneSessionScript answers the two observation phases: enumeration
+// returns one session id, and each per-field display-message call
+// returns a canned value — the worktree deliberately spans lines to
+// prove raw values round-trip through the client untouched.
+const oneSessionScript = `#!/bin/sh
+while [ "$1" = "-L" ]; do shift 2; done
+cmd="$1"
+shift
+case "$cmd" in
+list-sessions)
+	printf '$0\n'
+	;;
+display-message)
+	# args: -p -t <target> <format>
+	case "$4" in
+	'#{session_name}') printf 'alpha\n' ;;
+	'#{@dev_workspace_id}') printf 'w1\n' ;;
+	'#{@dev_slug}') printf 'proj\n' ;;
+	'#{@dev_worktree}') printf '/w/evil\npath\n' ;;
+	*) exit 2 ;;
+	esac
+	;;
+*)
+	exit 2
+	;;
+esac
 `
 
-func TestSessionsDecodesFrames(t *testing.T) {
-	fakeTmux(t, frameScript)
+func TestSessionsObservesRawValues(t *testing.T) {
+	fakeTmux(t, oneSessionScript)
 	live, err := (&Client{}).Sessions(context.Background())
 	if err != nil {
 		t.Fatalf("Sessions: %v", err)
 	}
 	want := controller.LiveSession{
-		Name: "alpha", WorkspaceID: "w1", Slug: "proj", Worktree: "/w/alpha",
+		Name: "alpha", WorkspaceID: "w1", Slug: "proj", Worktree: "/w/evil\npath",
 	}
 	if len(live) != 1 || live[0] != want {
 		t.Errorf("Sessions = %+v, want [%+v]", live, want)
+	}
+}
+
+func TestSessionsRejectsEmptySessionName(t *testing.T) {
+	fakeTmux(t, `#!/bin/sh
+while [ "$1" = "-L" ]; do shift 2; done
+case "$1" in
+list-sessions) printf '$0\n' ;;
+display-message) printf '\n' ;;
+esac
+`)
+	if _, err := (&Client{}).Sessions(context.Background()); err == nil {
+		t.Fatal("Sessions accepted an empty session name (vanished session)")
+	}
+}
+
+func TestSessionsRejectsMalformedIDs(t *testing.T) {
+	fakeTmux(t, `#!/bin/sh
+printf 'not-an-id\n'
+`)
+	if _, err := (&Client{}).Sessions(context.Background()); err == nil {
+		t.Fatal("Sessions accepted a malformed session id")
 	}
 }
 
@@ -682,6 +728,16 @@ exit 1
 	}
 }
 
+func TestSessionsPermissionFailureIsAnErrorNotAbsence(t *testing.T) {
+	fakeTmux(t, `#!/bin/sh
+echo 'error connecting to /tmp/tmux-1000/default (Operation not permitted)' 1>&2
+exit 1
+`)
+	if _, err := (&Client{}).Sessions(context.Background()); err == nil {
+		t.Fatal("Sessions read a permission failure as an absent server")
+	}
+}
+
 func TestSessionsTimeoutPropagates(t *testing.T) {
 	fakeTmux(t, `#!/bin/sh
 sleep 10
@@ -697,7 +753,7 @@ sleep 10
 }
 
 func TestObserveSessionFiltersSessions(t *testing.T) {
-	fakeTmux(t, frameScript)
+	fakeTmux(t, oneSessionScript)
 	obs, err := (&Client{}).ObserveSession(context.Background(), controller.SessionQuery{
 		WorkspaceID:    "w1",
 		CandidateNames: []string{"alpha"},
@@ -759,24 +815,16 @@ type Client struct {
 var _ controller.SessionObserver = (*Client)(nil)
 
 // Sessions lists every live session with whatever identity keys it
-// carries, in one subprocess call. No server is absence: an empty list
-// and nil error. Any other failure — including output the decoder
-// rejects — is an error, which callers must render as uncertainty,
-// never as absence (design §9).
+// carries, in two phases: a strictly validated session-id enumeration,
+// then four per-field display-message calls per session whose entire
+// output is one raw value (spec §5) — no in-band framing exists for a
+// value to forge. No server is absence: an empty list and nil error.
+// Any other failure is an error, which callers must render as
+// uncertainty, never as absence (design §9).
 func (c *Client) Sessions(ctx context.Context) ([]controller.LiveSession, error) {
-	argv := []string{tmuxBinary}
-	if c.Socket != "" {
-		argv = append(argv, "-L", c.Socket)
-	}
-	argv = append(argv, "list-sessions", "-F", sessionFormat)
-
-	timeout := c.Timeout
-	if timeout <= 0 {
-		timeout = DefaultTimeout
-	}
-	res, err := run.Run(ctx, run.Command{Argv: argv, Timeout: timeout})
+	res, err := c.exec(ctx, "list-sessions", "-F", "#{session_id}")
 	if err != nil {
-		return nil, fmt.Errorf("observing tmux sessions: %w", err)
+		return nil, err
 	}
 	if res.ExitCode != 0 {
 		if isNoServer(res.Stderr) {
@@ -788,11 +836,70 @@ func (c *Client) Sessions(ctx context.Context) ([]controller.LiveSession, error)
 	if res.StdoutTruncated {
 		return nil, fmt.Errorf("tmux list-sessions output exceeded %d bytes", run.MaxCaptureBytes)
 	}
-	live, err := decodeSessions(string(res.Stdout))
+	ids, err := parseSessionIDs(string(res.Stdout))
 	if err != nil {
-		return nil, fmt.Errorf("decoding tmux sessions: %w", err)
+		return nil, err
+	}
+
+	live := make([]controller.LiveSession, 0, len(ids))
+	for _, id := range ids {
+		var values [4]string
+		for i, format := range fieldFormats {
+			value, err := c.field(ctx, id, format)
+			if err != nil {
+				return nil, err
+			}
+			values[i] = value
+		}
+		if values[0] == "" {
+			// Real sessions cannot have empty names. A session that
+			// vanished between the phases surfaces here: a dead -t
+			// target can exit 0 with empty output.
+			return nil, fmt.Errorf("tmux reported an empty name for session %s", id)
+		}
+		live = append(live, controller.LiveSession{
+			Name:        values[0],
+			WorkspaceID: values[1],
+			Slug:        values[2],
+			Worktree:    values[3],
+		})
 	}
 	return live, nil
+}
+
+// field reads one raw value for one session.
+func (c *Client) field(ctx context.Context, id, format string) (string, error) {
+	res, err := c.exec(ctx, "display-message", "-p", "-t", id, format)
+	if err != nil {
+		return "", err
+	}
+	if res.ExitCode != 0 {
+		return "", fmt.Errorf("tmux display-message for session %s exited %d: %s",
+			id, res.ExitCode, bytes.TrimSpace(res.Stderr))
+	}
+	if res.StdoutTruncated {
+		return "", fmt.Errorf("tmux display-message output exceeded %d bytes", run.MaxCaptureBytes)
+	}
+	return valueFromOutput(res.Stdout), nil
+}
+
+// exec runs one tmux subprocess with the client's socket and timeout.
+func (c *Client) exec(ctx context.Context, args ...string) (run.Result, error) {
+	argv := []string{tmuxBinary}
+	if c.Socket != "" {
+		argv = append(argv, "-L", c.Socket)
+	}
+	argv = append(argv, args...)
+
+	timeout := c.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+	res, err := run.Run(ctx, run.Command{Argv: argv, Timeout: timeout})
+	if err != nil {
+		return run.Result{}, fmt.Errorf("observing tmux: %w", err)
+	}
+	return res, nil
 }
 
 // ObserveSession implements controller.SessionObserver by filtering the
@@ -874,7 +981,7 @@ func TestIntegrationSessionsRoundTrip(t *testing.T) {
 	tmuxOK(t, socket, "new-session", "-d", "-s", "alpha")
 	tmuxOK(t, socket, "set-option", "-t", "alpha", controller.KeyWorkspaceID, "w1")
 	tmuxOK(t, socket, "set-option", "-t", "alpha", controller.KeySlug, "proj")
-	tmuxOK(t, socket, "set-option", "-t", "alpha", controller.KeyWorktree, "/w/evil\npath")
+	tmuxOK(t, socket, "set-option", "-t", "alpha", controller.KeyWorktree, "/w/evil\n$999\npath")
 	tmuxOK(t, socket, "new-session", "-d", "-s", "beta")
 
 	live, err := (&Client{Socket: socket}).Sessions(context.Background())
@@ -892,8 +999,9 @@ func TestIntegrationSessionsRoundTrip(t *testing.T) {
 	if alpha.WorkspaceID != "w1" || alpha.Slug != "proj" {
 		t.Errorf("alpha identity = %+v, want w1/proj", alpha)
 	}
-	if alpha.Worktree != "/w/evil\npath" {
-		t.Errorf("alpha worktree = %q; the embedded newline did not round-trip", alpha.Worktree)
+	if alpha.Worktree != "/w/evil\n$999\npath" {
+		t.Errorf("alpha worktree = %q; embedded newline or anchor-shaped content did not round-trip",
+			alpha.Worktree)
 	}
 	beta := byName["beta"]
 	if beta.WorkspaceID != "" || beta.Slug != "" || beta.Worktree != "" {
@@ -2393,20 +2501,44 @@ Run each and confirm:
 - `go test ./... -count=1 -race` → all packages PASS (including the real-tmux integration tests)
 - `CGO_ENABLED=0 go build ./cmd/projectmux` → builds
 
-- [ ] **Step 2: Manual smoke test against real tmux on an isolated socket**
+- [ ] **Step 2: Manual smoke test, fully isolated and exit-code-sensitive**
+
+Everything is isolated — state, config, and the tmux server (via
+`TMUX_TMPDIR`) — so the smoke test never observes or disturbs the user's
+real sessions, and every exit code is asserted explicitly:
 
 ```bash
-export PROJECTMUX_STATE_ROOT=$(mktemp -d)
-export PROJECTMUX_CONFIG_ROOT=$(mktemp -d)
+SMOKE=$(mktemp -d)
+export PROJECTMUX_STATE_ROOT="$SMOKE/state"
+export PROJECTMUX_CONFIG_ROOT="$SMOKE/config"
+export TMUX_TMPDIR="$SMOKE/tmux"
+mkdir -p "$PROJECTMUX_CONFIG_ROOT" "$TMUX_TMPDIR"
 printf 'version: 1\n' > "$PROJECTMUX_CONFIG_ROOT/defaults.yaml"
-go build -o /tmp/projectmux-smoke ./cmd/projectmux
-/tmp/projectmux-smoke list
-/tmp/projectmux-smoke list --json
-/tmp/projectmux-smoke status --json || true
-/tmp/projectmux-smoke status || true
+go build -o "$SMOKE/projectmux" ./cmd/projectmux
+
+"$SMOKE/projectmux" list;              echo "list exit: $?"          # want 0
+"$SMOKE/projectmux" list --json;       echo "list json exit: $?"     # want 0
+"$SMOKE/projectmux" status;            echo "status exit: $?"        # want 0
+"$SMOKE/projectmux" status --json;     echo "status json exit: $?"   # want 0
+"$SMOKE/projectmux" status no-such-ws; echo "unknown exit: $?"       # want 4
+
+tmux -f /dev/null new-session -d -s smoke-live
+tmux set-option -t smoke-live @dev_workspace_id 0000
+tmux set-option -t smoke-live @dev_slug smokeslug
+"$SMOKE/projectmux" list;              echo "list live exit: $?"     # want 0
+tmux kill-server
+
+"$SMOKE/projectmux" list --json > "$SMOKE/a.json"
+"$SMOKE/projectmux" list --json > "$SMOKE/b.json"
+diff "$SMOKE/a.json" "$SMOKE/b.json"; echo "idempotent: $?"          # want 0
 ```
 
-Expected: `list` reports no workspaces (or live identity sessions from the default tmux server, if any); `status` run inside the projectmux checkout reports an unregistered workspace with a plan, exit 0. No command writes anything to the store (re-run `list --json` and confirm identical output).
+Expected: every `want` matches; the empty database yields "no
+workspaces" initially; with the isolated server up, `list` shows the
+`smoke-live` session as `unrecorded`; after `kill-server`, absence again
+(the `TMUX_TMPDIR` server is the one the binary observes, since it
+inherits the variable); the double `list --json` diff proves observation
+performs no store writes.
 
 - [ ] **Step 3: Spec cross-check**
 
