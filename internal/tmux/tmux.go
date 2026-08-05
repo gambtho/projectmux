@@ -40,10 +40,10 @@ func (c *Client) Sessions(ctx context.Context) ([]controller.LiveSession, error)
 	if err != nil {
 		return nil, err
 	}
+	if res.ExitCode == 1 && isNoServer(res.Stderr) {
+		return nil, nil
+	}
 	if res.ExitCode != 0 {
-		if isNoServer(res.Stderr) {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("tmux list-sessions exited %d: %s",
 			res.ExitCode, bytes.TrimSpace(res.Stderr))
 	}

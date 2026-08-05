@@ -249,6 +249,7 @@ func writeStatusHuman(w io.Writer, env statusEnvelope) error {
 	fmt.Fprintf(tw, "workspace\t%s\n", env.Workspace.Slug)
 	fmt.Fprintf(tw, "worktree\t%s\n", env.Workspace.Worktree)
 	fmt.Fprintf(tw, "id\t%s\n", env.Workspace.ID)
+	fmt.Fprintf(tw, "primary\t%t\n", env.Workspace.IsPrimary)
 
 	if env.Registered {
 		recorded := env.Stored.ProposedSession + " (proposed, unassigned)"
@@ -256,6 +257,8 @@ func writeStatusHuman(w io.Writer, env statusEnvelope) error {
 			recorded = *env.Stored.ActualSession
 		}
 		fmt.Fprintf(tw, "recorded session\t%s\n", recorded)
+		fmt.Fprintf(tw, "registered\t%s\n", env.Stored.RegisteredAt)
+		fmt.Fprintf(tw, "updated\t%s\n", env.Stored.UpdatedAt)
 	} else {
 		fmt.Fprint(tw, "recorded session\tnot registered\n")
 	}
