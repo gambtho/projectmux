@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"github.com/gambtho/projectmux/internal/config"
 	"github.com/gambtho/projectmux/internal/container"
 	"github.com/gambtho/projectmux/internal/controller"
+	"github.com/gambtho/projectmux/internal/doctor"
 	runner "github.com/gambtho/projectmux/internal/run"
 	"github.com/gambtho/projectmux/internal/state"
 	"github.com/gambtho/projectmux/internal/tmux"
@@ -155,4 +157,74 @@ func attachTerminal(ctx context.Context, session string) error {
 		return switchClient(ctx, session)
 	}
 	return execAttach(session)
+}
+
+// sessionListerFunc adapts the liveSessions seam to doctor's bulk
+// enumeration interface.
+type sessionListerFunc func(ctx context.Context) ([]controller.LiveSession, error)
+
+func (f sessionListerFunc) Sessions(ctx context.Context) ([]controller.LiveSession, error) {
+	return f(ctx)
+}
+
+// inspectDatabase is doctor's database seam. It never returns an error:
+// every outcome — missing, unreadable, corrupt, drifted — is a finding
+// the report carries. The store is non-nil only when the view is safe to
+// query, and the returned close is always safe to call.
+//
+// Doctor deliberately does not go through openStore: state.Open creates
+// the file, enables WAL, and migrates, and a command that reports
+// "migrations pending" must not perform them in the same breath. The
+// database's own bytes are never written; SQLite may still materialize
+// the -shm/-wal sidecars any reader of a WAL database needs.
+var inspectDatabase = func(root string) (doctor.Database, doctor.Store, func()) {
+	db := doctor.Database{Path: state.DBPath(root), Supported: state.SchemaVersion}
+	ro, insp, err := state.OpenReadOnly(root)
+	if err != nil {
+		if state.IsMissingDatabase(err) {
+			// A fresh installation: nothing is registered, which is a
+			// fact rather than uncertainty.
+			db.Missing = true
+		} else {
+			db.OpenErr = err
+		}
+		return db, nil, func() {}
+	}
+	closeDB := func() { _ = ro.Close() }
+	db.IntegrityErr = insp.IntegrityErr
+	db.Version = insp.UserVersion
+	if insp.Usable() != nil {
+		return db, nil, closeDB
+	}
+	return db, ro, closeDB
+}
+
+// newVersionRunner is doctor's dependency-probe seam.
+var newVersionRunner = func() doctor.VersionRunner { return toolProbe{} }
+
+// toolProbe runs one tool's version command. PATH resolution is separate
+// from execution so an absent binary is reported as confirmed absence
+// rather than as an execution failure.
+type toolProbe struct{}
+
+func (toolProbe) Probe(ctx context.Context, argv ...string) (doctor.ProbeResult, error) {
+	if len(argv) == 0 {
+		return doctor.ProbeResult{}, errors.New("probe requires a command")
+	}
+	if _, err := exec.LookPath(argv[0]); err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return doctor.ProbeResult{}, nil
+		}
+		return doctor.ProbeResult{}, fmt.Errorf("finding %s: %w", argv[0], err)
+	}
+	res, err := runner.Run(ctx, runner.Command{Argv: argv, Timeout: tmux.DefaultTimeout})
+	if err != nil {
+		return doctor.ProbeResult{}, err
+	}
+	return doctor.ProbeResult{
+		Stdout:   string(bytes.TrimSpace(res.Stdout)),
+		Stderr:   string(bytes.TrimSpace(res.Stderr)),
+		ExitCode: res.ExitCode,
+		Found:    true,
+	}, nil
 }
