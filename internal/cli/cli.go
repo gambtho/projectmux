@@ -3,12 +3,16 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
 	"runtime/debug"
 	"strings"
+	"syscall"
 
 	"github.com/gambtho/projectmux/internal/config"
 	"github.com/gambtho/projectmux/internal/resolve"
@@ -35,6 +39,8 @@ usage: projectmux <command> [options]
 commands:
   config [--json] [--compact] [<workspace>]
         print the normalized, merged configuration for a workspace
+  list [--json] [--compact]
+        list recorded workspaces and live identity-carrying tmux sessions
   version
         print the projectmux version
   help
@@ -56,7 +62,10 @@ func usagef(format string, args ...any) error {
 // to stdout for a failing command, so callers can pipe stdout without having to
 // filter diagnostics out of it.
 func Main(args []string, stdout, stderr io.Writer) int {
-	err := dispatch(args, stdout)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	err := dispatch(ctx, args, stdout)
 	if err == nil {
 		return ExitOK
 	}
@@ -71,7 +80,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 
 // dispatch routes one command. Diagnostics are Main's responsibility, so
 // nothing below writes to stderr.
-func dispatch(args []string, stdout io.Writer) error {
+func dispatch(ctx context.Context, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
 		fmt.Fprint(stdout, usage)
 		return nil
@@ -87,6 +96,8 @@ func dispatch(args []string, stdout io.Writer) error {
 		return nil
 	case "config":
 		return runConfig(rest, stdout)
+	case "list":
+		return runList(ctx, rest, stdout)
 	default:
 		return usagef("unknown command %q", command)
 	}
