@@ -2,6 +2,8 @@ package state
 
 import (
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -110,5 +112,87 @@ func TestWorkspacesListsAllOrdered(t *testing.T) {
 	}
 	if len(all) != 2 || all[0].Slug != "alpha" || all[1].Slug != "bravo" {
 		t.Errorf("Workspaces = %+v, want ordered by slug", all)
+	}
+}
+
+func TestAllocateSessionNameAssignsTheProposedNameFirst(t *testing.T) {
+	s := openTestStore(t)
+	mustRegister(t, s, testWorkspace("w1"))
+
+	name, err := s.AllocateSessionName("w1", testTime)
+	if err != nil {
+		t.Fatalf("AllocateSessionName: %v", err)
+	}
+	if name != "slabledger" {
+		t.Errorf("name = %q, want the proposed name", name)
+	}
+
+	again, err := s.AllocateSessionName("w1", testTime.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("second AllocateSessionName: %v", err)
+	}
+	if again != name {
+		t.Errorf("reallocation = %q, want the stable assignment %q", again, name)
+	}
+}
+
+func TestAllocateSessionNameSuffixesOnCollision(t *testing.T) {
+	s := openTestStore(t)
+	mustRegister(t, s, testWorkspace("w1"))
+	mustRegister(t, s, testWorkspace("w2"))
+
+	first, err := s.AllocateSessionName("w1", testTime)
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	second, err := s.AllocateSessionName("w2", testTime)
+	if err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if first != "slabledger" || second != "slabledger-2" {
+		t.Errorf("names = %q, %q; want slabledger and slabledger-2", first, second)
+	}
+}
+
+func TestAllocateSessionNameForUnknownWorkspace(t *testing.T) {
+	s := openTestStore(t)
+	_, err := s.AllocateSessionName("absent", testTime)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestConcurrentAllocationYieldsDistinctNames is the design-§12 gate: the
+// database constraint, not application convention, prevents duplicates.
+func TestConcurrentAllocationYieldsDistinctNames(t *testing.T) {
+	s := openTestStore(t)
+	const n = 8
+	for i := 0; i < n; i++ {
+		mustRegister(t, s, testWorkspace(fmt.Sprintf("w%d", i)))
+	}
+
+	names := make([]string, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			names[i], errs[i] = s.AllocateSessionName(fmt.Sprintf("w%d", i), testTime)
+		}(i)
+	}
+	wg.Wait()
+
+	seen := map[string]int{}
+	for i := 0; i < n; i++ {
+		if errs[i] != nil {
+			t.Fatalf("allocation %d: %v", i, errs[i])
+		}
+		seen[names[i]]++
+	}
+	for name, count := range seen {
+		if count != 1 {
+			t.Errorf("name %q assigned %d times", name, count)
+		}
 	}
 }

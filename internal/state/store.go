@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/gambtho/projectmux/internal/resolve"
+	sqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 func encodeTime(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
@@ -177,4 +179,66 @@ func nullable(s sql.NullString) *string {
 	}
 	v := s.String
 	return &v
+}
+
+// maxNameCandidates bounds the collision scan; hitting it means something
+// is systematically wrong, not that the loop should keep going.
+const maxNameCandidates = 100
+
+func isUniqueViolation(err error) bool {
+	var se *sqlite.Error
+	return errors.As(err, &se) && se.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE
+}
+
+// AllocateSessionName assigns the workspace's actual session name inside
+// one immediate transaction. The proposed name is tried first, then
+// numbered variants; the UNIQUE constraint on actual_session is the
+// collision-prevention mechanism — there is deliberately no
+// SELECT-then-INSERT check (design §7). An already-assigned workspace gets
+// its existing name back.
+func (s *Store) AllocateSessionName(workspaceID string, now time.Time) (string, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", fmt.Errorf("beginning a transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var proposed string
+	var actual sql.NullString
+	err = tx.QueryRow(
+		"SELECT proposed_session, actual_session FROM workspaces WHERE id = ?",
+		workspaceID).Scan(&proposed, &actual)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("workspace %s: %w", workspaceID, ErrNotFound)
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading workspace %s: %w", workspaceID, err)
+	}
+	if actual.Valid {
+		return actual.String, tx.Commit()
+	}
+
+	for i := 1; i <= maxNameCandidates; i++ {
+		candidate := proposed
+		if i > 1 {
+			candidate = fmt.Sprintf("%s-%d", proposed, i)
+		}
+		_, err := tx.Exec(
+			"UPDATE workspaces SET actual_session = ?, updated_at = ? WHERE id = ?",
+			candidate, encodeTime(now), workspaceID)
+		if isUniqueViolation(err) {
+			// SQLite rolls back only the failed statement; the
+			// transaction stays usable for the next candidate.
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("assigning session name %q: %w", candidate, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return "", fmt.Errorf("committing the session name: %w", err)
+		}
+		return candidate, nil
+	}
+	return "", fmt.Errorf(
+		"no free session name near %q after %d candidates", proposed, maxNameCandidates)
 }
