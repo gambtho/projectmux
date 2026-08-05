@@ -95,7 +95,7 @@ func buildAttach(ctx context.Context, name string) (attachEnvelope, string, erro
 	ctrl := controller.Controller{
 		Store:      st,
 		Sessions:   newSessionObserver(),
-		Containers: unprobedObserver{},
+		Containers: newContainerObserver(),
 		Clock:      systemClock{},
 	}
 	snap, err := ctrl.Observe(ctx, controller.Desired{
@@ -117,7 +117,7 @@ func buildAttach(ctx context.Context, name string) (attachEnvelope, string, erro
 	}
 
 	live := snap.Session.ByIdentity
-	if live.WorkspaceID != ws.ID || live.Slug != ws.Slug || live.Worktree != ws.Worktree {
+	if !controller.SessionBelongsTo(*live, ws) {
 		return zero, "", &controller.RefusalError{Reason: fmt.Sprintf(
 			"session %q carries contradictory identity keys; refusing to attach to it", live.Name)}
 	}

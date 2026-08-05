@@ -490,6 +490,17 @@ func TestValidationRejects(t *testing.T) {
 			wants:     []string{"shell", "kubernetes", "location"},
 		},
 		{
+			name:      "a fully numeric window name",
+			workspace: "version: 1\nwindows:\n  - name: \"3\"\n    shell: true\n",
+			// tmux resolves a numeric token as a window index before a name.
+			wants: []string{"3", "fully numeric"},
+		},
+		{
+			name:      "a container window with devcontainer disabled",
+			workspace: "version: 1\ndevcontainer:\n  enabled: false\nwindows:\n  - name: shell\n    shell: true\n    location: container\n",
+			wants:     []string{"shell", "devcontainer.enabled is false"},
+		},
+		{
 			name:      "an unsupported schema version",
 			workspace: "version: 2\n",
 			wants:     []string{"version", "2"},
@@ -591,14 +602,15 @@ func TestValidationRejects(t *testing.T) {
 
 func TestValidConfigurationsAreAccepted(t *testing.T) {
 	cases := map[string]string{
-		"nested relative cwd":     "version: 1\nwindows:\n  - name: docs\n    shell: true\n    cwd: sub/dir\n",
-		"dot-relative cwd":        "version: 1\nwindows:\n  - name: docs\n    shell: true\n    cwd: ./sub\n",
-		"descend then return":     "version: 1\nwindows:\n  - name: docs\n    shell: true\n    cwd: sub/../other\n",
-		"devcontainer enabled on": "version: 1\ndevcontainer:\n  enabled: true\n",
-		"devcontainer disabled":   "version: 1\ndevcontainer:\n  enabled: false\n",
-		"nested devcontainer cfg": "version: 1\ndevcontainer:\n  config: .devcontainer/devcontainer.json\n",
-		"no windows at all":       "version: 1\n",
-		"portable name charset":   "version: 1\nwindows:\n  - name: a.b_c-1\n    shell: true\n",
+		"nested relative cwd":                            "version: 1\nwindows:\n  - name: docs\n    shell: true\n    cwd: sub/dir\n",
+		"dot-relative cwd":                               "version: 1\nwindows:\n  - name: docs\n    shell: true\n    cwd: ./sub\n",
+		"descend then return":                            "version: 1\nwindows:\n  - name: docs\n    shell: true\n    cwd: sub/../other\n",
+		"devcontainer enabled on":                        "version: 1\ndevcontainer:\n  enabled: true\n",
+		"devcontainer disabled":                          "version: 1\ndevcontainer:\n  enabled: false\n",
+		"nested devcontainer cfg":                        "version: 1\ndevcontainer:\n  config: .devcontainer/devcontainer.json\n",
+		"no windows at all":                              "version: 1\n",
+		"portable name charset":                          "version: 1\nwindows:\n  - name: a.b_c-1\n    shell: true\n",
+		"name with a leading digit is not fully numeric": "version: 1\nwindows:\n  - name: v3\n    shell: true\n",
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {

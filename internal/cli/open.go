@@ -33,11 +33,20 @@ const lockTimeout = 10 * time.Second
 
 // openEnvelope is the versioned JSON structure for projectmux open.
 type openEnvelope struct {
-	SchemaVersion int           `json:"schema_version"`
-	Workspace     workspaceInfo `json:"workspace"`
-	Action        string        `json:"action"`
-	Session       string        `json:"session"`
-	Drifted       bool          `json:"drifted"`
+	SchemaVersion         int                `json:"schema_version"`
+	Workspace             workspaceInfo      `json:"workspace"`
+	Action                string             `json:"action"`
+	Session               string             `json:"session"`
+	Drifted               bool               `json:"drifted"`
+	Container             *openContainerInfo `json:"container,omitempty"`
+	ContainerWindowsStale bool               `json:"container_windows_stale,omitempty"`
+}
+
+// openContainerInfo is the ensured container as reported by open.
+type openContainerInfo struct {
+	Kind        string `json:"kind"`
+	ContainerID string `json:"container_id"`
+	Health      string `json:"health"`
 }
 
 func runOpen(ctx context.Context, args []string, stdout io.Writer) error {
@@ -69,7 +78,7 @@ func runOpen(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 
 	if *asJSON {
-		return writeJSON(stdout, openEnvelope{
+		env := openEnvelope{
 			SchemaVersion: OutputSchemaVersion,
 			Workspace: workspaceInfo{
 				ID:          ws.ID,
@@ -78,13 +87,28 @@ func runOpen(ctx context.Context, args []string, stdout io.Writer) error {
 				SessionName: ws.SessionName,
 				IsPrimary:   ws.IsPrimary,
 			},
-			Action:  string(res.Action),
-			Session: res.Session,
-			Drifted: res.Drifted,
-		}, *compact)
+			Action:                string(res.Action),
+			Session:               res.Session,
+			Drifted:               res.Drifted,
+			ContainerWindowsStale: res.ContainerWindowsStale,
+		}
+		if res.Container != nil {
+			env.Container = &openContainerInfo{
+				Kind:        res.Container.Kind,
+				ContainerID: res.Container.ContainerID,
+				Health:      string(res.Container.Health),
+			}
+		}
+		return writeJSON(stdout, env, *compact)
 	}
 
 	fmt.Fprintf(stdout, "session %s (%s)\n", res.Session, res.Action)
+	if res.Container != nil {
+		fmt.Fprintf(stdout, "container %s (%s)\n", res.Container.ContainerID, res.Container.Health)
+	}
+	if res.ContainerWindowsStale {
+		fmt.Fprintln(stdout, "container replaced; existing session keeps its old windows — run `projectmux stop` (once available) or kill the session and reopen to rebuild them")
+	}
 	if res.Drifted {
 		fmt.Fprintln(stdout, "configuration has drifted; run `projectmux status` for details")
 	}
@@ -118,10 +142,7 @@ func ensureWorkspace(ctx context.Context, name string) (controller.EnsureResult,
 	if err != nil {
 		return zero, ws, err
 	}
-	windows, err := windowSpecs(effective.Config, ws.Worktree)
-	if err != nil {
-		return zero, ws, err
-	}
+	intents := windowIntents(effective.Config)
 
 	st, err := openStore()
 	if err != nil {
@@ -134,16 +155,17 @@ func ensureWorkspace(ctx context.Context, name string) (controller.EnsureResult,
 		return zero, ws, err
 	}
 	ctrl := controller.Controller{
-		Store:      st,
-		Sessions:   newSessionObserver(),
-		Containers: hostOnlyContainerObserver{},
-		Clock:      systemClock{},
-		Actuator:   newSessionActuator(),
+		Store:        st,
+		Sessions:     newSessionObserver(),
+		Containers:   newContainerObserver(),
+		Clock:        systemClock{},
+		Actuator:     newSessionActuator(),
+		ContainerAct: newContainerActuator(),
 	}
 	res, err := ctrl.Ensure(ctx, controller.Desired{
 		Workspace: ws,
 		Config:    effective.Config,
 		Digest:    effective.Digest,
-	}, windows, filepath.Join(stateRoot, "locks"), lockTimeout)
+	}, intents, filepath.Join(stateRoot, "locks"), lockTimeout)
 	return res, ws, err
 }

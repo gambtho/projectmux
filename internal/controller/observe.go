@@ -21,6 +21,9 @@ type Controller struct {
 	// Actuator performs session mutations for Ensure. Nil in
 	// observation-only wiring.
 	Actuator SessionActuator
+	// ContainerAct performs container mutations for Ensure. Nil refuses
+	// any container action (the pre-adapter capability gate).
+	ContainerAct ContainerActuator
 }
 
 // Desired is everything the configuration and resolver slices established
@@ -103,8 +106,24 @@ func (c *Controller) Observe(ctx context.Context, d Desired) (Snapshot, error) {
 func (c *Controller) observeContainer(ctx context.Context, d Desired, stored *state.Record) ContainerSnapshot {
 	// Observe only on "auto" or "true"; anything else — including "false"
 	// and the unnormalized zero value "" — is treated as disabled.
-	if d.Config.DevContainer.Enabled != "auto" && d.Config.DevContainer.Enabled != "true" {
+	enabled := d.Config.DevContainer.Enabled
+	if enabled != "auto" && enabled != "true" {
 		return ContainerSnapshot{}
+	}
+	if enabled == "auto" {
+		// Applicability precedes the stored binding under auto: deleting
+		// the devcontainer configuration must de-containerize the
+		// workspace even while a binding is retained (spec §4).
+		applies, err := c.Containers.Applies(ctx, d.Workspace, d.Config)
+		if err != nil {
+			return ContainerSnapshot{
+				Observed: &ContainerObservation{Health: state.HealthUnknown},
+				Err:      err,
+			}
+		}
+		if !applies {
+			return ContainerSnapshot{}
+		}
 	}
 	if stored != nil && stored.Container != nil {
 		obs, err := c.Containers.ProbeContainer(ctx, *stored.Container)

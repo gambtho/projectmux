@@ -23,10 +23,6 @@ failures, resolved either from <workspace> or from the current directory.
   --compact  emit the JSON on a single line (implies --json)
 `
 
-// unprobedReason is the fixed observation outcome while no container
-// adapter exists (spec §3).
-const unprobedReason = "probe-not-implemented"
-
 // statusEnvelope is the versioned JSON structure for projectmux status.
 type statusEnvelope struct {
 	SchemaVersion int            `json:"schema_version"`
@@ -64,8 +60,13 @@ type containerInfo struct {
 	Observation containerObservationInfo `json:"observation"`
 }
 
+// containerObservationInfo is the live observation's outcome: Attempted
+// with Health/Error after a real probe or discovery, Reason for
+// not-applicable cases.
 type containerObservationInfo struct {
 	Attempted bool   `json:"attempted"`
+	Health    string `json:"health,omitempty"`
+	Error     string `json:"error,omitempty"`
 	Reason    string `json:"reason,omitempty"`
 }
 
@@ -154,7 +155,7 @@ func buildStatus(ctx context.Context, name string) (statusEnvelope, error) {
 	ctrl := controller.Controller{
 		Store:      st,
 		Sessions:   newSessionObserver(),
-		Containers: unprobedObserver{},
+		Containers: newContainerObserver(),
 		Clock:      systemClock{},
 	}
 	snap, err := ctrl.Observe(ctx, controller.Desired{
@@ -193,7 +194,7 @@ func statusEnvelopeFrom(ws resolve.Workspace, effective config.Effective, snap c
 		name := live.Name
 		env.Session.Name = &name
 		verdict := "conflict"
-		if live.WorkspaceID == ws.ID && live.Slug == ws.Slug && live.Worktree == ws.Worktree {
+		if controller.SessionBelongsTo(*live, ws) {
 			verdict = "match"
 		}
 		env.Session.Identity = &verdict
@@ -229,14 +230,20 @@ func statusEnvelopeFrom(ws resolve.Workspace, effective config.Effective, snap c
 	env.Config.Drifted = env.Config.AppliedDigest == nil ||
 		*env.Config.AppliedDigest != effective.Digest
 
-	if storedBinding != nil || snap.Container.Observed != nil {
-		env.Container = &containerInfo{
-			Stored: storedBinding,
-			Observation: containerObservationInfo{
-				Attempted: false,
-				Reason:    unprobedReason,
-			},
+	if storedBinding != nil || snap.Container.Observed != nil || snap.Container.Err != nil {
+		obs := containerObservationInfo{}
+		if snap.Container.Observed != nil || snap.Container.Err != nil {
+			obs.Attempted = true
+			if snap.Container.Observed != nil {
+				obs.Health = string(snap.Container.Observed.Health)
+			}
+			if snap.Container.Err != nil {
+				obs.Error = snap.Container.Err.Error()
+			}
+		} else {
+			obs.Reason = "no container applies to this workspace"
 		}
+		env.Container = &containerInfo{Stored: storedBinding, Observation: obs}
 	}
 	return env
 }
@@ -277,7 +284,17 @@ func writeStatusHuman(w io.Writer, env statusEnvelope) error {
 		if c := env.Container.Stored; c != nil {
 			stored = fmt.Sprintf("%s %s (as of %s)", c.Health, c.ContainerID, c.ObservedAt)
 		}
-		fmt.Fprintf(tw, "container\t%s; not probed: container probing is not implemented in this build\n", stored)
+		obs := env.Container.Observation
+		var live string
+		switch {
+		case obs.Attempted && obs.Error != "":
+			live = "observation failed: " + obs.Error
+		case obs.Attempted:
+			live = "observed " + obs.Health
+		default:
+			live = obs.Reason
+		}
+		fmt.Fprintf(tw, "container\t%s; %s\n", stored, live)
 	}
 
 	drift := "in sync"

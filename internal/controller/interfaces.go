@@ -52,6 +52,42 @@ type SessionObserver interface {
 type ContainerObserver interface {
 	ProbeContainer(ctx context.Context, binding state.ContainerBinding) (ContainerObservation, error)
 	DiscoverContainer(ctx context.Context, ws resolve.Workspace, cfg config.Config) (*ContainerObservation, error)
+	// Applies reports whether a container applies to the workspace at
+	// all — enabled true always applies; auto applies when a
+	// devcontainer configuration exists on disk. Observe consults it
+	// before probing stored bindings under auto, so removing the
+	// configuration de-containerizes the workspace.
+	Applies(ctx context.Context, ws resolve.Workspace, cfg config.Config) (bool, error)
+}
+
+// ContainerActuator performs container mutations and renders container
+// execution requests (design §5). StartContainer is the idempotent
+// devcontainer up; ExecCommand is pure rendering from the stored
+// binding.
+type ContainerActuator interface {
+	StartContainer(ctx context.Context, ws resolve.Workspace, cfg config.Config) (ContainerObservation, error)
+	ExecCommand(binding state.ContainerBinding, command, relDir string, env map[string]string) string
+}
+
+// WindowLocation is a window's configured placement. The zero value is
+// auto: container when one applies to the workspace, host otherwise.
+type WindowLocation string
+
+const (
+	WindowAuto      WindowLocation = ""
+	WindowHost      WindowLocation = "host"
+	WindowContainer WindowLocation = "container"
+)
+
+// WindowIntent is a window as configuration describes it, before the
+// container binding is known. Ensure renders intents into concrete
+// WindowSpecs after its container phase.
+type WindowIntent struct {
+	Name     string
+	Command  string // empty => shell window
+	RelDir   string // config cwd, relative; "" => workspace root
+	Focus    bool
+	Location WindowLocation
 }
 
 // Clock supplies the timestamps the store persists.

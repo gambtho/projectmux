@@ -11,6 +11,7 @@ import (
 	"github.com/gambtho/projectmux/internal/controller"
 	"github.com/gambtho/projectmux/internal/controller/fake"
 	"github.com/gambtho/projectmux/internal/resolve"
+	"github.com/gambtho/projectmux/internal/state"
 )
 
 // openTestStore lets open mutate a fake store (guardedStore is for
@@ -91,6 +92,9 @@ func openWorkspace(t *testing.T) resolve.Workspace {
 		"workspaces/slabledger.yaml": validConfig,
 	})
 	t.Setenv("PROJECTMUX_STATE_ROOT", t.TempDir())
+	// Container-free by default; container tests install their own
+	// observer explicitly.
+	installContainerObserver(t, &fake.ContainerObserver{})
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
@@ -247,40 +251,28 @@ func TestOpenRefusalExitsSix(t *testing.T) {
 	}
 }
 
-func TestOpenContainerWindowIsRejectedBeforeAnyMutation(t *testing.T) {
+// TestOpenContainerWindowWithoutContainerFails: an explicit container
+// window on a workspace where no container applies (auto resolved to
+// none) fails inside the locked loop with a failed op recorded — the
+// session actuator never runs.
+func TestOpenContainerWindowWithoutContainerFails(t *testing.T) {
 	workspace(t, map[string]string{
 		"defaults.yaml": "version: 1\n",
 		"workspaces/slabledger.yaml": "version: 1\nwindows:\n" +
 			"  - name: agent-1\n    agent: claude\n    location: container\n",
 	})
 	t.Setenv("PROJECTMUX_STATE_ROOT", t.TempDir())
+	installContainerObserver(t, &fake.ContainerObserver{})
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	ws, err := resolve.Resolve("", nil, cwd)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
 	s := fake.NewStore()
 	installOpenStore(t, s)
-	actuator := installFakeActuator(t)
-
-	code, _, stderr := run(t, "open", "--json")
-	if code != ExitError {
-		t.Fatalf("exit %d, want %d", code, ExitError)
-	}
-	if !strings.Contains(stderr, "container support is not implemented") {
-		t.Errorf("stderr = %q", stderr)
-	}
-	if len(actuator.Created) != 0 {
-		t.Error("a container-located window reached the actuator")
-	}
-	if recs, _ := s.Workspaces(); len(recs) != 0 {
-		t.Errorf("derivation failure mutated the store: %+v", recs)
-	}
-}
-
-func TestOpenEnabledTrueIsUnsupported(t *testing.T) {
-	workspace(t, map[string]string{
-		"defaults.yaml": "version: 1\n",
-		"workspaces/slabledger.yaml": "version: 1\ndevcontainer:\n  enabled: true\n" +
-			"windows:\n  - name: shell\n    shell: true\n",
-	})
-	t.Setenv("PROJECTMUX_STATE_ROOT", t.TempDir())
-	installOpenStore(t, fake.NewStore())
 	actuator := installFakeActuator(t)
 	installScriptedSessions(t, cliAbsent())
 
@@ -288,11 +280,18 @@ func TestOpenEnabledTrueIsUnsupported(t *testing.T) {
 	if code != ExitError {
 		t.Fatalf("exit %d, want %d (stderr %s)", code, ExitError, stderr)
 	}
-	if !strings.Contains(stderr, "container support") {
+	if !strings.Contains(stderr, "requires a container") {
 		t.Errorf("stderr = %q", stderr)
 	}
 	if len(actuator.Created) != 0 {
-		t.Error("unsupported container plan reached the actuator")
+		t.Error("a container-located window reached the actuator")
+	}
+	rec, err := s.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	if rec.LastOperation == nil || rec.LastOperation.Outcome != state.OutcomeFailed {
+		t.Errorf("last operation = %+v, want open/failed", rec.LastOperation)
 	}
 }
 
@@ -305,5 +304,68 @@ func TestBareWorkspaceDispatchesToOpen(t *testing.T) {
 	code, _, stderr := run(t, "no-such-workspace-name")
 	if code != ExitUnknownWorkspace {
 		t.Fatalf("exit %d, want %d (stderr: %s)", code, ExitUnknownWorkspace, stderr)
+	}
+}
+
+func TestOpenStartsContainerAndReportsIt(t *testing.T) {
+	ws := openWorkspace(t)
+	s := fake.NewStore()
+	installOpenStore(t, s)
+	installFakeActuator(t)
+	actC := installContainerActuator(t)
+	installContainerObserver(t, &fake.ContainerObserver{
+		AppliesResult:  true,
+		DiscoverResult: &controller.ContainerObservation{Health: state.HealthMissing, Kind: "devcontainer"},
+	})
+	installScriptedSessions(t,
+		cliAbsent(), cliAbsent(), cliLive(ownLive(ws, ws.SessionName)))
+
+	code, stdout, stderr := run(t, "open", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	env := decodeOpen(t, stdout)
+	if env.Container == nil || env.Container.ContainerID != "cid-1" ||
+		env.Container.Health != "present" {
+		t.Errorf("container block = %+v", env.Container)
+	}
+	if env.ContainerWindowsStale {
+		t.Error("fresh creation reported stale windows")
+	}
+	if len(actC.Started) != 1 {
+		t.Errorf("StartContainer calls = %d, want 1", len(actC.Started))
+	}
+	rec, _ := s.Workspace(ws.ID)
+	if rec.Container == nil || rec.Container.ContainerUser != "vscode" {
+		t.Errorf("committed binding = %+v", rec.Container)
+	}
+}
+
+func TestOpenReplacementReportsStaleWindows(t *testing.T) {
+	ws := openWorkspace(t)
+	s := fake.NewStore()
+	if err := s.RegisterWorkspace(ws, "sha256:seed", cliTestTime); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := s.AllocateSessionName(ws.ID, cliTestTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installOpenStore(t, s)
+	installFakeActuator(t)
+	installContainerActuator(t)
+	installContainerObserver(t, &fake.ContainerObserver{
+		AppliesResult:  true,
+		DiscoverResult: &controller.ContainerObservation{Health: state.HealthMissing, Kind: "devcontainer"},
+	})
+	installScriptedSessions(t, cliLive(ownLive(ws, actual)))
+
+	code, stdout, _ := run(t, "open", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	env := decodeOpen(t, stdout)
+	if env.Action != "already-running" || !env.ContainerWindowsStale {
+		t.Errorf("envelope = %+v, want already-running with stale container windows", env)
 	}
 }

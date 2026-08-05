@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gambtho/projectmux/internal/config"
 	"github.com/gambtho/projectmux/internal/controller"
 	"github.com/gambtho/projectmux/internal/resolve"
 	"github.com/gambtho/projectmux/internal/state"
@@ -220,5 +221,43 @@ func TestFakeSessionActuatorRecordsSpecs(t *testing.T) {
 	a.Err = errors.New("boom")
 	if err := a.CreateSession(context.Background(), spec); err == nil {
 		t.Error("configured error was not returned")
+	}
+}
+
+func TestFakeContainerObserverApplies(t *testing.T) {
+	o := &ContainerObserver{AppliesResult: true}
+	ok, err := o.Applies(context.Background(), resolve.Workspace{}, config.Config{})
+	if err != nil || !ok {
+		t.Errorf("Applies = (%t, %v), want (true, nil)", ok, err)
+	}
+	o.AppliesErr = errors.New("stat exploded")
+	if _, err := o.Applies(context.Background(), resolve.Workspace{}, config.Config{}); err == nil {
+		t.Error("configured Applies error was not returned")
+	}
+}
+
+func TestFakeContainerActuator(t *testing.T) {
+	a := &ContainerActuator{
+		StartResult: controller.ContainerObservation{
+			Health: state.HealthPresent, ContainerID: "c1", Workdir: "/workspaces/w",
+		},
+	}
+	obs, err := a.StartContainer(context.Background(),
+		resolve.Workspace{ID: "w1"}, config.Config{})
+	if err != nil || obs.ContainerID != "c1" {
+		t.Errorf("StartContainer = (%+v, %v)", obs, err)
+	}
+	if len(a.Started) != 1 || a.Started[0] != "w1" {
+		t.Errorf("Started = %v", a.Started)
+	}
+	cmd := a.ExecCommand(state.ContainerBinding{ContainerID: "c1", Workdir: "/workspaces/w"},
+		"make", "sub", map[string]string{"A": "1"})
+	if cmd != `fake-exec c1 /workspaces/w/sub "make" env=1` {
+		t.Errorf("ExecCommand = %q", cmd)
+	}
+
+	a.StartErr = errors.New("boom")
+	if _, err := a.StartContainer(context.Background(), resolve.Workspace{}, config.Config{}); err == nil {
+		t.Error("configured start error was not returned")
 	}
 }

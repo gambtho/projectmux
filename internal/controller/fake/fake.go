@@ -8,6 +8,7 @@ package fake
 import (
 	"context"
 	"fmt"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ var (
 	_ controller.ContainerObserver = (*ContainerObserver)(nil)
 	_ controller.Clock             = (*Clock)(nil)
 	_ controller.SessionActuator   = (*SessionActuator)(nil)
+	_ controller.ContainerActuator = (*ContainerActuator)(nil)
 )
 
 // Clock returns a fixed time.
@@ -57,8 +59,17 @@ type ContainerObserver struct {
 	ProbeErr       error
 	DiscoverResult *controller.ContainerObservation
 	DiscoverErr    error
+	AppliesResult  bool
+	AppliesErr     error
 	Probed         []state.ContainerBinding
 	Discovered     []string
+}
+
+func (o *ContainerObserver) Applies(_ context.Context, _ resolve.Workspace, _ config.Config) (bool, error) {
+	if o.AppliesErr != nil {
+		return false, o.AppliesErr
+	}
+	return o.AppliesResult, nil
 }
 
 func (o *ContainerObserver) ProbeContainer(_ context.Context, binding state.ContainerBinding) (controller.ContainerObservation, error) {
@@ -316,4 +327,34 @@ func (s *Store) AdoptSessionName(workspaceID, name string, now time.Time) error 
 	rec.ActualSession = &adopted
 	rec.UpdatedAt = now
 	return nil
+}
+
+// ContainerActuator records starts and renders a deterministic exec
+// marker so command tests can assert container windows without real
+// docker argv. ExecResult, when set, replaces the marker — lifecycle
+// tests use a runnable command there, since a real tmux pane running
+// the marker would exit immediately and close its window.
+type ContainerActuator struct {
+	StartResult controller.ContainerObservation
+	StartErr    error
+	ExecResult  string
+	Started     []string
+	Execs       []string
+}
+
+func (a *ContainerActuator) StartContainer(_ context.Context, ws resolve.Workspace, _ config.Config) (controller.ContainerObservation, error) {
+	a.Started = append(a.Started, ws.ID)
+	if a.StartErr != nil {
+		return controller.ContainerObservation{}, a.StartErr
+	}
+	return a.StartResult, nil
+}
+
+func (a *ContainerActuator) ExecCommand(b state.ContainerBinding, command, relDir string, env map[string]string) string {
+	a.Execs = append(a.Execs, command)
+	if a.ExecResult != "" {
+		return a.ExecResult
+	}
+	return fmt.Sprintf("fake-exec %s %s %q env=%d",
+		b.ContainerID, path.Join(b.Workdir, relDir), command, len(env))
 }
