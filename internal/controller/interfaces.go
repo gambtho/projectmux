@@ -125,7 +125,9 @@ type SessionSpec struct {
 // counterpart of SessionObserver; adapters implement both.
 type SessionActuator interface {
 	CreateSession(ctx context.Context, spec SessionSpec) error
-	// KillSession ends the named session. A session that vanished
+	// KillSession ends one session. The target is the observed tmux
+	// session ID when available ("$"-prefixed, immune to name reuse)
+	// and the exact session name otherwise. A session that vanished
 	// before the kill is success: stop is idempotent.
-	KillSession(ctx context.Context, name string) error
+	KillSession(ctx context.Context, target string) error
 }

@@ -72,6 +72,7 @@ func (c *Client) Sessions(ctx context.Context) ([]controller.LiveSession, error)
 			return nil, fmt.Errorf("tmux reported an empty name for session %s", id)
 		}
 		live = append(live, controller.LiveSession{
+			ID:          id,
 			Name:        values[0],
 			WorkspaceID: values[1],
 			Slug:        values[2],

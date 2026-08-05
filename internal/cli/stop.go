@@ -149,7 +149,9 @@ func runStop(ctx context.Context, args []string, stdout io.Writer) error {
 			case res.ContainerStopped:
 				fmt.Fprintf(stdout, "stopped container %s\n", res.ContainerID)
 			case stopErr != nil:
-				fmt.Fprintln(stdout, "container stop failed; see error below")
+				// The failure's origin may be persistence rather than
+				// the stop itself; the error line below carries it.
+				fmt.Fprintln(stdout, "container not stopped; see error below")
 			default:
 				fmt.Fprintln(stdout, "no bound container to stop")
 			}

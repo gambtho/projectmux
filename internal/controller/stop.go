@@ -73,7 +73,14 @@ func (c *Controller) Stop(ctx context.Context, d Desired, stopContainer bool, lo
 			}
 			return StopResult{}, &RefusalError{Reason: reason}
 		}
-		if err := c.Actuator.KillSession(ctx, live.Name); err != nil {
+		// Kill by the observed session ID when the observer provides
+		// one: a replacement session reusing the name between
+		// observation and kill must survive.
+		target := live.ID
+		if target == "" {
+			target = live.Name
+		}
+		if err := c.Actuator.KillSession(ctx, target); err != nil {
 			if registered {
 				c.recordFailure(d.Workspace.ID, opName, "killing the session: "+err.Error())
 			}

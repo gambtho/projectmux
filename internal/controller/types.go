@@ -25,8 +25,12 @@ const (
 )
 
 // LiveSession is one live tmux session and whatever identity keys it
-// carries; the strings are empty when the key is absent.
+// carries; the strings are empty when the key is absent. ID is the
+// server-assigned tmux session ID (e.g. "$3") — unlike Name, it can
+// never be reused by a replacement session, so destructive actions
+// target it when present.
 type LiveSession struct {
+	ID          string
 	Name        string
 	WorkspaceID string
 	Slug        string

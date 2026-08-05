@@ -58,7 +58,7 @@ func TestSessionsObservesRawValues(t *testing.T) {
 		t.Fatalf("Sessions: %v", err)
 	}
 	want := controller.LiveSession{
-		Name: "alpha", WorkspaceID: "w1", Slug: "proj", Worktree: "/w/evil\npath",
+		ID: "$0", Name: "alpha", WorkspaceID: "w1", Slug: "proj", Worktree: "/w/evil\npath",
 	}
 	if len(live) != 1 || live[0] != want {
 		t.Errorf("Sessions = %+v, want [%+v]", live, want)

@@ -48,7 +48,9 @@ is success, and nothing is ever destroyed on uncertainty:
 
 No arguments. Iterates **registered primary** workspaces straight from
 the store — no filesystem resolution; identity comes from the stored
-record, and a vanished worktree simply fails that entry's config load:
+record. The command stats the stored worktree **before** loading
+configuration; stat and config-load failures both produce `failed`
+entries (see §Codex-review amendments below):
 
 - **Eligible** = `is_primary` AND config `autostart: true` AND a
   container applies (`enabled: true`, or `auto` with a devcontainer
@@ -64,7 +66,9 @@ record, and a vanished worktree simply fails that entry's config load:
   autostart false; no container applies), or `failed` (+error — config
   load failures count as failed so boot logs surface them, not as
   silent skips). Recorded operations use the name `autostart`.
-- Exit 0 when every *eligible* workspace succeeded; 1 when any failed.
+- Exit 0 when no workspace entry failed (skipped entries never fail the
+  batch); 1 when any entry failed — stat, config-load, or container
+  failures alike.
   JSON envelope: `{"schema_version": 1, "workspaces": [{"id", "slug",
   "outcome", "reason"?, "container_id"?}]}`.
 

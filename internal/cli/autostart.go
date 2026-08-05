@@ -106,7 +106,13 @@ func runAutostart(ctx context.Context, args []string, stdout io.Writer) error {
 		// skip (spec §3, Codex review finding).
 		if _, statErr := os.Stat(rec.Worktree); statErr != nil {
 			entry.Outcome = "failed"
-			entry.Reason = "worktree no longer exists: " + rec.Worktree
+			// Only confirmed absence may claim the worktree is gone;
+			// permission or I/O failures keep their own story.
+			if errors.Is(statErr, os.ErrNotExist) {
+				entry.Reason = "worktree no longer exists: " + rec.Worktree
+			} else {
+				entry.Reason = "statting the worktree: " + statErr.Error()
+			}
 			failed++
 			env.Workspaces = append(env.Workspaces, entry)
 			continue

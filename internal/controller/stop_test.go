@@ -210,3 +210,24 @@ func TestStopContainerFailureReportsPartial(t *testing.T) {
 		t.Errorf("last operation = %+v, want stop/failed", op)
 	}
 }
+
+func TestStopKillsByObservedSessionID(t *testing.T) {
+	live := ownSession("slab")
+	live.ID = "$7"
+	r := newEnsureRig(t, liveStep(live))
+	registerStopFixture(t, r)
+
+	res, err := r.stop(t, ensureDesired(), false)
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if !res.SessionStopped || res.SessionName != "slab" {
+		t.Errorf("result = %+v", res)
+	}
+	// The kill must bind to the observed session, not its reusable
+	// name: a replacement session taking the name between observation
+	// and kill has a different ID and survives.
+	if len(r.actuator.Killed) != 1 || r.actuator.Killed[0] != "$7" {
+		t.Errorf("Killed = %v, want the session ID", r.actuator.Killed)
+	}
+}
