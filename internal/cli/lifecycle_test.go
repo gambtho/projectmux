@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/gambtho/projectmux/internal/controller"
+	"github.com/gambtho/projectmux/internal/controller/fake"
 	"github.com/gambtho/projectmux/internal/resolve"
+	"github.com/gambtho/projectmux/internal/state"
 	"github.com/gambtho/projectmux/internal/tmux"
 )
 
@@ -41,6 +44,7 @@ func lifecycleRig(t *testing.T, label string) (resolve.Workspace, string) {
 	newSessionActuator = func() controller.SessionActuator {
 		return &tmux.Client{Socket: socket}
 	}
+	installContainerObserver(t, &fake.ContainerObserver{})
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -183,5 +187,102 @@ func TestLifecycleConcurrentOpensCreateExactlyOnce(t *testing.T) {
 	}
 	if len(live) != 1 || live[0].WorkspaceID != ws.ID {
 		t.Errorf("live = %+v, want exactly one session", live)
+	}
+}
+
+// TestLifecycleContainerWorkspace: real tmux, fake container tooling
+// (design §12): open ensures the container, the container window's
+// command is the rendered exec request, reopen is idempotent (no second
+// start), and a failing start creates no session.
+func TestLifecycleContainerWorkspace(t *testing.T) {
+	ws, socket := lifecycleRig(t, "container")
+	actC := installContainerActuator(t)
+	// The default fake marker is not runnable; a real pane would exit
+	// and close its window. Substitute a long-running command so the
+	// rendered container windows survive for assertion, and assert the
+	// original commands through the actuator's Execs record.
+	actC.ExecResult = "sleep 300"
+	obs := &fake.ContainerObserver{
+		AppliesResult:  true,
+		DiscoverResult: &controller.ContainerObservation{Health: state.HealthMissing, Kind: "devcontainer"},
+	}
+	installContainerObserver(t, obs)
+
+	env := openJSON(t)
+	if env.Action != "created" {
+		t.Fatalf("open = %+v", env)
+	}
+	if env.Container == nil || env.Container.Health != "present" {
+		t.Fatalf("container block = %+v", env.Container)
+	}
+	if len(actC.Started) != 1 {
+		t.Fatalf("StartContainer calls = %d, want 1", len(actC.Started))
+	}
+
+	// The auto windows rendered through the container actuator: the
+	// windows exist in real tmux (running the substituted command), and
+	// the Execs record carries the original config commands.
+	out, err := exec.Command("tmux", "-L", socket, "list-windows", "-t", ws.SessionName,
+		"-F", "#{window_name}").Output()
+	if err != nil {
+		t.Fatalf("list-windows: %v", err)
+	}
+	if !strings.Contains(string(out), "agent-1") {
+		t.Errorf("windows = %q", out)
+	}
+	foundClaude := false
+	for _, cmd := range actC.Execs {
+		if cmd == "claude" {
+			foundClaude = true
+		}
+	}
+	if !foundClaude {
+		t.Errorf("Execs = %v; the agent window's command never reached ExecCommand", actC.Execs)
+	}
+
+	// Reopen: the stored binding probes present -> no second start.
+	obs.ProbeResult = controller.ContainerObservation{
+		Health: state.HealthPresent, Kind: "devcontainer", ContainerID: "cid-1",
+		ContainerUser: "vscode", Workdir: "/workspaces/slabledger",
+	}
+	env = openJSON(t)
+	if env.Action != "already-running" {
+		t.Fatalf("reopen = %+v", env)
+	}
+	if len(actC.Started) != 1 {
+		t.Errorf("reopen started the container again (calls = %d)", len(actC.Started))
+	}
+}
+
+func TestLifecycleContainerStartFailureCreatesNoSession(t *testing.T) {
+	_, socket := lifecycleRig(t, "cfail")
+	actC := installContainerActuator(t)
+	actC.StartErr = &controller.ContainerStartError{
+		ExitCode: 3, Stderr: "boom", Reason: "devcontainer up exited 3",
+	}
+	installContainerObserver(t, &fake.ContainerObserver{
+		AppliesResult:  true,
+		DiscoverResult: &controller.ContainerObservation{Health: state.HealthMissing, Kind: "devcontainer"},
+	})
+
+	code, _, stderr := run(t, "open", "--json")
+	if code != ExitError {
+		t.Fatalf("exit %d, want %d (stderr %s)", code, ExitError, stderr)
+	}
+	live, err := (&tmux.Client{Socket: socket}).Sessions(context.Background())
+	if err != nil {
+		t.Fatalf("Sessions: %v", err)
+	}
+	if len(live) != 0 {
+		t.Errorf("a session exists despite the failed container start: %+v", live)
+	}
+
+	code, stdout, _ := run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("status exit %d", code)
+	}
+	if !strings.Contains(stdout, `"exit_status": 3`) &&
+		!strings.Contains(stdout, `"exit_status":3`) {
+		t.Errorf("status does not carry the start's exit status: %s", stdout)
 	}
 }

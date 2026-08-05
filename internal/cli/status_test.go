@@ -22,6 +22,7 @@ func statusWorkspace(t *testing.T) resolve.Workspace {
 		"defaults.yaml":              "version: 1\n",
 		"workspaces/slabledger.yaml": validConfig,
 	})
+	installContainerObserver(t, &fake.ContainerObserver{})
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
@@ -60,6 +61,12 @@ func TestStatusLiveMatchingSession(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 	installFakeStore(t, s)
+	// validConfig enables devcontainer: auto; a failing discovery makes
+	// the live observation honest uncertainty.
+	installContainerObserver(t, &fake.ContainerObserver{
+		AppliesResult: true,
+		DiscoverErr:   errors.New("docker down"),
+	})
 	live := controller.LiveSession{
 		Name: actual, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.Worktree,
 	}
@@ -97,16 +104,15 @@ func TestStatusLiveMatchingSession(t *testing.T) {
 	if env.LastOperation == nil || env.LastOperation.Operation != "open" {
 		t.Errorf("last_operation = %+v", env.LastOperation)
 	}
-	// validConfig enables devcontainer: auto; nothing is bound, and the
-	// observer is honest about not probing.
 	if env.Container == nil {
 		t.Fatal("container section missing while devcontainer is enabled")
 	}
 	if env.Container.Stored != nil {
 		t.Errorf("container.stored = %+v, want none", env.Container.Stored)
 	}
-	if env.Container.Observation.Attempted {
-		t.Error("container.observation.attempted = true; no probe exists in this build")
+	if !env.Container.Observation.Attempted || env.Container.Observation.Error == "" {
+		t.Errorf("observation = %+v, want an attempted observation carrying the failure",
+			env.Container.Observation)
 	}
 	if env.Plan.Container != "probe-first" {
 		t.Errorf("plan.container = %q, want probe-first", env.Plan.Container)
@@ -154,6 +160,12 @@ func TestStatusStoredBindingNeverRendersAsLive(t *testing.T) {
 		t.Fatalf("mark missing: %v", err)
 	}
 	installFakeStore(t, s)
+	// A failing live probe: the stored binding must still never render
+	// as live, and the observation must carry the failure.
+	installContainerObserver(t, &fake.ContainerObserver{
+		AppliesResult: true,
+		ProbeErr:      errors.New("docker down"),
+	})
 	installSessionObserver(t, controller.SessionObservation{}, nil)
 
 	code, stdout, _ := run(t, "status", "--json")
@@ -167,16 +179,17 @@ func TestStatusStoredBindingNeverRendersAsLive(t *testing.T) {
 	if env.Container.Stored.Health != "missing" || env.Container.Stored.ContainerID != "c1" {
 		t.Errorf("container.stored = %+v, want retained missing c1", env.Container.Stored)
 	}
-	if env.Container.Observation.Attempted {
-		t.Error("container.observation.attempted = true; no probe exists in this build")
+	if !env.Container.Observation.Attempted || env.Container.Observation.Error == "" {
+		t.Errorf("observation = %+v, want an attempted observation carrying the failure",
+			env.Container.Observation)
 	}
 
 	code, human, _ := run(t, "status")
 	if code != 0 {
 		t.Fatalf("human exit %d", code)
 	}
-	if !strings.Contains(human, "missing") || !strings.Contains(human, "not probed") {
-		t.Errorf("human output hides the missing/unprobed truth: %s", human)
+	if !strings.Contains(human, "missing") || !strings.Contains(human, "observation failed") {
+		t.Errorf("human output hides the missing/failed-observation truth: %s", human)
 	}
 }
 
@@ -218,5 +231,36 @@ func TestStatusRejectsExtraArguments(t *testing.T) {
 	code, _, _ := run(t, "status", "one", "two")
 	if code != ExitUsage {
 		t.Errorf("exit %d, want %d", code, ExitUsage)
+	}
+}
+
+func TestStatusLiveProbeContradictsStalePresent(t *testing.T) {
+	ws := statusWorkspace(t)
+	s := fake.NewStore()
+	if err := s.RegisterWorkspace(ws, "sha256:seed", cliTestTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordContainerObservation(ws.ID, state.ContainerObservation{
+		Kind: "devcontainer", ContainerID: "c1", Health: state.HealthPresent,
+	}, cliTestTime); err != nil {
+		t.Fatal(err)
+	}
+	installFakeStore(t, s)
+	installSessionObserver(t, controller.SessionObservation{}, nil)
+	installContainerObserver(t, &fake.ContainerObserver{
+		AppliesResult: true,
+		ProbeResult:   controller.ContainerObservation{Health: state.HealthMissing},
+	})
+
+	code, stdout, _ := run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	env := decodeStatus(t, stdout)
+	if env.Container.Stored == nil || env.Container.Stored.Health != "present" {
+		t.Fatalf("stored = %+v (last-observed present)", env.Container.Stored)
+	}
+	if !env.Container.Observation.Attempted || env.Container.Observation.Health != "missing" {
+		t.Errorf("observation = %+v, want an attempted live missing", env.Container.Observation)
 	}
 }
