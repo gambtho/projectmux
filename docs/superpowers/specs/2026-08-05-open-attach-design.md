@@ -224,9 +224,12 @@ Order of operations, all under the workspace lock:
         name equals the **allocated** name. Anything else — `unknown`,
         `absent`, or a contradictory/mismatched session — commits
         `open`/`failed` naming the actual outcome and returns a typed
-        error. The next `open` recovers by adopting via the identity
-        keys (§9 crash recovery; the same path covers a crash between
-        create and commit). All three failure shapes are tested.
+        error. The next `open` converges via the identity keys (§9
+        crash recovery): with the allocation already persisted the plan
+        is `none` (already-running, drift honest because no applied
+        digest was recorded); with a lost or stale record it is
+        `adopt`. All three failure shapes are tested, as is
+        post-crash convergence.
      5. Confirmed: commit `CommitReconciliation{AppliedDigest: &digest,
         Operation: open/ok}`. The applied digest is recorded only here —
         creation is the only moment the whole desired document (windows
