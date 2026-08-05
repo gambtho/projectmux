@@ -1,0 +1,38 @@
+version: 2
+
+updates:
+  # Go module dependencies (go.mod / go.sum at the repository root).
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      # Restricting the group to minor and patch means every grouped PR is
+      # non-major by construction, which is exactly the set the auto-merge
+      # workflow is allowed to merge. Major bumps fall outside the group and
+      # arrive as individual PRs that need a human.
+      go-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Action versions pinned in .github/workflows/*.yml.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      actions-minor-and-patch:
+        update-types:
+          - minor
+          - patch

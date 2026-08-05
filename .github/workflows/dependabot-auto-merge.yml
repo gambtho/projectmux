@@ -1,0 +1,43 @@
+name: dependabot auto-merge
+
+# Turns on GitHub's native auto-merge for low-risk Dependabot PRs. The merge
+# itself still waits for the required status checks on main, so this only
+# removes the manual click, never the CI gate.
+
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    # Both checks matter: github.actor is who triggered the run, and
+    # pull_request.user.login is who opened the PR.
+    if: >-
+      github.actor == 'dependabot[bot]' &&
+      github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        # Pinned to an immutable commit rather than the mutable v3 tag: this
+        # action is handed a token with contents:write. Dependabot keeps the
+        # pin current via the github-actions ecosystem.
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Major bumps are deliberately excluded — they are the ones that break
+      # builds and deserve a human. For grouped PRs, fetch-metadata reports the
+      # highest update-type across the group, so a group is merged only if
+      # every member is minor or patch.
+      - name: Enable auto-merge for minor and patch updates
+        if: >-
+          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+          steps.meta.outputs.update-type == 'version-update:semver-minor'
+        # Squash is the only merge method the main ruleset allows.
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
