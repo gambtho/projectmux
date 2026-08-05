@@ -94,11 +94,14 @@ func TestHelpIsSuccessfulAndListsImplementedCommands(t *testing.T) {
 }
 
 func TestUnknownCommandIsAUsageError(t *testing.T) {
-	code, _, stderr := run(t, "frobnicate")
+	// A bare non-flag token is the design-§8 workspace shorthand and
+	// resolves as a workspace name (exit 4, covered in open_test.go);
+	// only flag-shaped tokens still reach the unknown-command path.
+	code, _, stderr := run(t, "--frobnicate")
 	if code != ExitUsage {
 		t.Errorf("exit = %d, want %d", code, ExitUsage)
 	}
-	if !strings.Contains(stderr, "frobnicate") {
+	if !strings.Contains(stderr, "--frobnicate") {
 		t.Errorf("stderr %q should name the unknown command", stderr)
 	}
 }

@@ -39,6 +39,10 @@ const usage = `projectmux - declarative tmux workspaces, optionally backed by De
 usage: projectmux <command> [options]
 
 commands:
+  <workspace>
+        shorthand for: open <workspace>
+  open [--no-attach] [--json] [--compact] [<workspace>]
+        observe, ensure, record, and attach the workspace session
   config [--json] [--compact] [<workspace>]
         print the normalized, merged configuration for a workspace
   list [--json] [--compact]
@@ -98,6 +102,8 @@ func dispatch(ctx context.Context, args []string, stdout io.Writer) error {
 	case "version", "--version":
 		fmt.Fprintln(stdout, versionString())
 		return nil
+	case "open":
+		return runOpen(ctx, rest, stdout)
 	case "config":
 		return runConfig(rest, stdout)
 	case "list":
@@ -105,6 +111,12 @@ func dispatch(ctx context.Context, args []string, stdout io.Writer) error {
 	case "status":
 		return runStatus(ctx, rest, stdout)
 	default:
+		if !strings.HasPrefix(command, "-") {
+			// Design §8: `projectmux <workspace>` is shorthand for
+			// open. A mistyped command therefore resolves as a
+			// workspace name and exits 4, not 2 — the documented trade.
+			return runOpen(ctx, append([]string{command}, rest...), stdout)
+		}
 		return usagef("unknown command %q", command)
 	}
 }
