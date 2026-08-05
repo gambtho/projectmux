@@ -3,9 +3,21 @@ package state
 import (
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
+	"time"
+
+	"modernc.org/sqlite"
 )
+
+// sqliteBusy is SQLite's standard SQLITE_BUSY result code.
+const sqliteBusy = 5
+
+// migrationBusyBudget bounds how long a cold-start migration retries
+// SQLITE_BUSY. It mirrors the DSN's busy_timeout(5000): see
+// beginMigrationTx for why a retry is still needed on top of it.
+const migrationBusyBudget = 5 * time.Second
 
 // SchemaVersion is the newest schema this build understands.
 const SchemaVersion = 1
@@ -43,7 +55,7 @@ func migrate(db *sql.DB) error {
 }
 
 func applyNext(db *sql.DB) (done bool, err error) {
-	tx, err := db.Begin()
+	tx, err := beginMigrationTx(db)
 	if err != nil {
 		return false, fmt.Errorf("beginning a migration transaction: %w", err)
 	}
@@ -84,4 +96,26 @@ func applyNext(db *sql.DB) (done bool, err error) {
 		return false, fmt.Errorf("committing migration %d: %w", next, err)
 	}
 	return false, nil
+}
+
+// beginMigrationTx opens the migration transaction, retrying on
+// SQLITE_BUSY. The DSN's busy_timeout pragma handles contention against
+// an already-created database, but two connections racing to create the
+// database file (and its WAL) for the first time can each get
+// SQLITE_BUSY back immediately, bypassing the busy handler entirely.
+// Retrying here keeps "concurrent opens serialize and never replay a
+// migration" true for a cold state directory too.
+func beginMigrationTx(db *sql.DB) (*sql.Tx, error) {
+	deadline := time.Now().Add(migrationBusyBudget)
+	for {
+		tx, err := db.Begin()
+		if err == nil {
+			return tx, nil
+		}
+		var sqliteErr *sqlite.Error
+		if !errors.As(err, &sqliteErr) || sqliteErr.Code() != sqliteBusy || time.Now().After(deadline) {
+			return nil, err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
