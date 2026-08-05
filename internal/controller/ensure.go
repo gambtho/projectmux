@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/gambtho/projectmux/internal/lock"
@@ -22,9 +23,11 @@ const (
 // EnsureResult reports a successful Ensure. Drifted mirrors the digest
 // comparison at observation time; a fresh creation is never drifted.
 type EnsureResult struct {
-	Action  EnsureAction
-	Session string
-	Drifted bool
+	Action                EnsureAction
+	Session               string
+	Drifted               bool
+	Container             *ContainerObservation // nil when no container is in play
+	ContainerWindowsStale bool
 }
 
 // RefusalError carries a refusal out of Ensure or attach; the CLI maps
@@ -33,6 +36,33 @@ type EnsureResult struct {
 type RefusalError struct{ Reason string }
 
 func (e *RefusalError) Error() string { return e.Reason }
+
+// ContainerStartError preserves what design §9 requires the recorded
+// operation to keep: the real exit status, a bounded stderr summary, and
+// whether the start timed out. The container adapter returns it; the
+// controller persists it.
+type ContainerStartError struct {
+	ExitCode int
+	Stderr   string
+	TimedOut bool
+	Reason   string
+}
+
+func (e *ContainerStartError) Error() string {
+	if e.TimedOut {
+		return "devcontainer up timed out: " + e.Reason
+	}
+	return fmt.Sprintf("devcontainer up failed (exit %d): %s", e.ExitCode, e.Reason)
+}
+
+// ContainerWindowError reports a window demanding a container when none
+// applies to the workspace.
+type ContainerWindowError struct{ Window string }
+
+func (e *ContainerWindowError) Error() string {
+	return fmt.Sprintf(
+		"window %q requires a container, but no container applies to this workspace", e.Window)
+}
 
 // ErrContainerActionUnsupported reports a plan requiring container
 // support this build does not have. The gate is capability-shaped: a
@@ -45,7 +75,7 @@ var ErrContainerActionUnsupported = errors.New(
 // observation under the lock, plan, then at most one external mutation
 // followed by re-observation and a transactional commit. It returns
 // typed refusals and never mutates on uncertainty.
-func (c *Controller) Ensure(ctx context.Context, d Desired, windows []WindowSpec, lockDir string, lockTimeout time.Duration) (EnsureResult, error) {
+func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowIntent, lockDir string, lockTimeout time.Duration) (EnsureResult, error) {
 	lk, err := lock.Acquire(ctx, lockDir, d.Workspace.ID, lockTimeout)
 	if err != nil {
 		return EnsureResult{}, err
@@ -70,25 +100,33 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, windows []WindowSpec
 		c.recordFailure(d.Workspace.ID, plan.Refusal)
 		return EnsureResult{}, &RefusalError{Reason: plan.Refusal}
 	}
-	if plan.Container != ContainerActionNone {
-		// No container actuator exists in this build (open/attach spec
-		// §5 step 6); the container slice executes these instead.
-		c.recordFailure(d.Workspace.ID, ErrContainerActionUnsupported.Error())
-		return EnsureResult{}, ErrContainerActionUnsupported
+
+	containerObs, started, err := c.ensureContainer(ctx, d, snap, plan.Container)
+	if err != nil {
+		return EnsureResult{}, err
+	}
+
+	windows, err := renderWindows(intents, d, containerObs, c.ContainerAct)
+	if err != nil {
+		c.recordFailure(d.Workspace.ID, err.Error())
+		return EnsureResult{}, err
 	}
 
 	drifted := snap.Stored == nil || snap.Stored.AppliedDigest == nil ||
 		*snap.Stored.AppliedDigest != d.Digest
+	stale := started && wantsContainerWindows(intents, containerObs != nil)
 
 	switch plan.Session {
 	case SessionActionNone:
-		if err := c.recordOK(d.Workspace.ID); err != nil {
+		if err := c.commitOutcome(d.Workspace.ID, containerObs); err != nil {
 			return EnsureResult{}, err
 		}
 		return EnsureResult{
-			Action:  EnsureAlreadyRunning,
-			Session: snap.Session.ByIdentity.Name,
-			Drifted: drifted,
+			Action:                EnsureAlreadyRunning,
+			Session:               snap.Session.ByIdentity.Name,
+			Drifted:               drifted,
+			Container:             containerObs,
+			ContainerWindowsStale: stale,
 		}, nil
 
 	case SessionActionAdopt:
@@ -104,18 +142,181 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, windows []WindowSpec
 			c.recordFailure(d.Workspace.ID, "recording the adopted session name: "+err.Error())
 			return EnsureResult{}, fmt.Errorf("recording the adopted session name: %w", err)
 		}
-		if err := c.recordOK(d.Workspace.ID); err != nil {
+		if err := c.commitOutcome(d.Workspace.ID, containerObs); err != nil {
 			return EnsureResult{}, err
 		}
-		return EnsureResult{Action: EnsureAdopted, Session: name, Drifted: drifted}, nil
+		return EnsureResult{
+			Action:                EnsureAdopted,
+			Session:               name,
+			Drifted:               drifted,
+			Container:             containerObs,
+			ContainerWindowsStale: stale,
+		}, nil
 
 	case SessionActionCreate:
-		return c.createSession(ctx, d, windows)
+		res, err := c.createSession(ctx, d, windows, containerObs)
+		if err != nil {
+			return EnsureResult{}, err
+		}
+		res.Container = containerObs
+		return res, nil
 	}
 	return EnsureResult{}, fmt.Errorf("unexpected session action %q", plan.Session)
 }
 
-func (c *Controller) createSession(ctx context.Context, d Desired, windows []WindowSpec) (EnsureResult, error) {
+// ensureContainer executes the plan's container action and returns the
+// observation the rest of the pass uses (nil when no container is in
+// play) plus whether devcontainer up ran.
+func (c *Controller) ensureContainer(ctx context.Context, d Desired, snap Snapshot, action ContainerAction) (*ContainerObservation, bool, error) {
+	if action == ContainerActionProbeFirst {
+		// One retry of the observation kind that failed (spec §4): a
+		// stored binding re-probes; an unbound workspace re-discovers.
+		retried, err := c.retryContainerObservation(ctx, d, snap)
+		if err != nil {
+			c.recordFailure(d.Workspace.ID, "re-observing the container: "+err.Error())
+			return nil, false, fmt.Errorf("re-observing the container: %w", err)
+		}
+		snap.Container = ContainerSnapshot{Observed: retried}
+		action = containerAction(snap)
+	}
+
+	switch action {
+	case ContainerActionNone:
+		if o := snap.Container.Observed; o != nil && o.Health == state.HealthPresent {
+			return o, false, nil
+		}
+		return nil, false, nil
+	case ContainerActionStart, ContainerActionAcquire:
+		if c.ContainerAct == nil {
+			c.recordFailure(d.Workspace.ID, ErrContainerActionUnsupported.Error())
+			return nil, false, ErrContainerActionUnsupported
+		}
+		obs, err := c.ContainerAct.StartContainer(ctx, d.Workspace, d.Config)
+		if err != nil {
+			c.recordStartFailure(d.Workspace.ID, err)
+			return nil, false, fmt.Errorf("starting the container: %w", err)
+		}
+		return &obs, true, nil
+	}
+	return nil, false, fmt.Errorf("unexpected container action %q", action)
+}
+
+func (c *Controller) retryContainerObservation(ctx context.Context, d Desired, snap Snapshot) (*ContainerObservation, error) {
+	if snap.Stored != nil && snap.Stored.Container != nil {
+		obs, err := c.Containers.ProbeContainer(ctx, *snap.Stored.Container)
+		if err != nil {
+			return nil, err
+		}
+		return &obs, nil
+	}
+	return c.Containers.DiscoverContainer(ctx, d.Workspace, d.Config)
+}
+
+// renderWindows turns intents into concrete window specs, now that the
+// binding (if any) exists. Auto follows the container; an explicit
+// container demand without one is a typed error.
+func renderWindows(intents []WindowIntent, d Desired, container *ContainerObservation, act ContainerActuator) ([]WindowSpec, error) {
+	specs := make([]WindowSpec, 0, len(intents))
+	for _, in := range intents {
+		inContainer := false
+		switch in.Location {
+		case WindowContainer:
+			if container == nil {
+				return nil, &ContainerWindowError{Window: in.Name}
+			}
+			inContainer = true
+		case WindowAuto:
+			inContainer = container != nil
+		}
+		if inContainer {
+			if act == nil {
+				return nil, ErrContainerActionUnsupported
+			}
+			binding := state.ContainerBinding{
+				Kind:          container.Kind,
+				ContainerID:   container.ContainerID,
+				ContainerUser: container.ContainerUser,
+				Workdir:       container.Workdir,
+			}
+			specs = append(specs, WindowSpec{
+				Name:    in.Name,
+				Command: act.ExecCommand(binding, in.Command, in.RelDir, d.Config.Environment),
+				Dir:     d.Workspace.Worktree,
+				Focus:   in.Focus,
+			})
+			continue
+		}
+		dir := d.Workspace.Worktree
+		if in.RelDir != "" {
+			dir = filepath.Join(d.Workspace.Worktree, in.RelDir)
+		}
+		specs = append(specs, WindowSpec{
+			Name: in.Name, Command: in.Command, Dir: dir, Focus: in.Focus,
+		})
+	}
+	return specs, nil
+}
+
+// wantsContainerWindows reports whether any intent resolves to the
+// container, given whether one applies.
+func wantsContainerWindows(intents []WindowIntent, containerApplies bool) bool {
+	for _, in := range intents {
+		if in.Location == WindowContainer ||
+			(in.Location == WindowAuto && containerApplies) {
+			return true
+		}
+	}
+	return false
+}
+
+// commitOutcome records a successful open, carrying the container
+// observation into the same transaction when one exists.
+func (c *Controller) commitOutcome(workspaceID string, obs *ContainerObservation) error {
+	op := state.Operation{Name: "open", Outcome: state.OutcomeOK}
+	if obs == nil {
+		if err := c.Store.RecordOperation(workspaceID, op, c.Clock.Now()); err != nil {
+			return fmt.Errorf("recording the operation: %w", err)
+		}
+		return nil
+	}
+	if err := c.Store.CommitReconciliation(workspaceID, state.ReconciliationResult{
+		Container: toStateObservation(obs),
+		Operation: op,
+	}, c.Clock.Now()); err != nil {
+		return fmt.Errorf("committing the outcome: %w", err)
+	}
+	return nil
+}
+
+func toStateObservation(obs *ContainerObservation) *state.ContainerObservation {
+	if obs == nil {
+		return nil
+	}
+	return &state.ContainerObservation{
+		Kind:          obs.Kind,
+		ContainerID:   obs.ContainerID,
+		ContainerUser: obs.ContainerUser,
+		Workdir:       obs.Workdir,
+		Health:        obs.Health,
+	}
+}
+
+// recordStartFailure persists a failed container start with the real
+// exit status and bounded stderr (design §9).
+func (c *Controller) recordStartFailure(workspaceID string, err error) {
+	op := state.Operation{Name: "open", Outcome: state.OutcomeFailed, ErrorSummary: err.Error()}
+	var start *ContainerStartError
+	if errors.As(err, &start) {
+		code := start.ExitCode
+		op.ExitStatus = &code
+		if start.Stderr != "" {
+			op.ErrorSummary = start.Reason + ": " + start.Stderr
+		}
+	}
+	_ = c.Store.RecordOperation(workspaceID, op, c.Clock.Now())
+}
+
+func (c *Controller) createSession(ctx context.Context, d Desired, windows []WindowSpec, containerObs *ContainerObservation) (EnsureResult, error) {
 	id := d.Workspace.ID
 	name, err := c.Store.AllocateSessionName(id, c.Clock.Now())
 	if err != nil {
@@ -173,6 +374,7 @@ func (c *Controller) createSession(ctx context.Context, d Desired, windows []Win
 	digest := d.Digest
 	if err := c.Store.CommitReconciliation(id, state.ReconciliationResult{
 		AppliedDigest: &digest,
+		Container:     toStateObservation(containerObs),
 		Operation:     state.Operation{Name: "open", Outcome: state.OutcomeOK},
 	}, c.Clock.Now()); err != nil {
 		c.recordFailure(id, "committing the reconciliation: "+err.Error())
@@ -214,14 +416,4 @@ func (c *Controller) recordFailure(workspaceID, summary string) {
 		Outcome:      state.OutcomeFailed,
 		ErrorSummary: summary,
 	}, c.Clock.Now())
-}
-
-func (c *Controller) recordOK(workspaceID string) error {
-	if err := c.Store.RecordOperation(workspaceID, state.Operation{
-		Name:    "open",
-		Outcome: state.OutcomeOK,
-	}, c.Clock.Now()); err != nil {
-		return fmt.Errorf("recording the operation: %w", err)
-	}
-	return nil
 }
