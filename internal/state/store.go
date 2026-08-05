@@ -242,3 +242,77 @@ func (s *Store) AllocateSessionName(workspaceID string, now time.Time) (string, 
 	return "", fmt.Errorf(
 		"no free session name near %q after %d candidates", proposed, maxNameCandidates)
 }
+
+// txExecer is the slice of *sql.Tx the record helpers need, so
+// CommitReconciliation can reuse them inside its own transaction.
+type txExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// RecordContainerObservation upserts the container binding. A present
+// observation replaces the binding; missing and unknown update health and
+// freshness while retaining the stored identity (design §7). With no
+// existing binding, missing and unknown record nothing.
+func (s *Store) RecordContainerObservation(workspaceID string, obs ContainerObservation, now time.Time) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning a transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if err := recordContainer(tx, workspaceID, obs, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func recordContainer(tx txExecer, workspaceID string, obs ContainerObservation, now time.Time) error {
+	if err := requireWorkspace(tx, workspaceID); err != nil {
+		return err
+	}
+	switch obs.Health {
+	case HealthPresent:
+		if obs.ContainerID == "" {
+			return errors.New("a present container observation must carry a container ID")
+		}
+		_, err := tx.Exec(`
+			INSERT INTO container_bindings
+				(workspace_id, kind, container_id, container_user, workdir, health, observed_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(workspace_id) DO UPDATE SET
+				kind           = excluded.kind,
+				container_id   = excluded.container_id,
+				container_user = excluded.container_user,
+				workdir        = excluded.workdir,
+				health         = excluded.health,
+				observed_at    = excluded.observed_at`,
+			workspaceID, obs.Kind, obs.ContainerID, obs.ContainerUser,
+			obs.Workdir, string(obs.Health), encodeTime(now))
+		if err != nil {
+			return fmt.Errorf("recording the container binding: %w", err)
+		}
+		return nil
+	case HealthMissing, HealthUnknown:
+		_, err := tx.Exec(
+			"UPDATE container_bindings SET health = ?, observed_at = ? WHERE workspace_id = ?",
+			string(obs.Health), encodeTime(now), workspaceID)
+		if err != nil {
+			return fmt.Errorf("recording container health: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("invalid container health %q", obs.Health)
+	}
+}
+
+func requireWorkspace(tx txExecer, workspaceID string) error {
+	var n int
+	if err := tx.QueryRow(
+		"SELECT COUNT(*) FROM workspaces WHERE id = ?", workspaceID).Scan(&n); err != nil {
+		return fmt.Errorf("checking workspace %s: %w", workspaceID, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("workspace %s: %w", workspaceID, ErrNotFound)
+	}
+	return nil
+}

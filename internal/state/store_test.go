@@ -196,3 +196,115 @@ func TestConcurrentAllocationYieldsDistinctNames(t *testing.T) {
 		}
 	}
 }
+
+func presentObservation(id string) ContainerObservation {
+	return ContainerObservation{
+		Kind:          "devcontainer",
+		ContainerID:   id,
+		ContainerUser: "vscode",
+		Workdir:       "/workspaces/slabledger",
+		Health:        HealthPresent,
+	}
+}
+
+func TestContainerObservationRoundTrips(t *testing.T) {
+	s := openTestStore(t)
+	mustRegister(t, s, testWorkspace("w1"))
+
+	if err := s.RecordContainerObservation("w1", presentObservation("c-1"), testTime); err != nil {
+		t.Fatalf("RecordContainerObservation: %v", err)
+	}
+	rec, err := s.Workspace("w1")
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	b := rec.Container
+	if b == nil || b.ContainerID != "c-1" || b.Health != HealthPresent ||
+		b.Kind != "devcontainer" || b.ContainerUser != "vscode" ||
+		!b.ObservedAt.Equal(testTime) {
+		t.Errorf("binding = %+v", b)
+	}
+}
+
+// TestMissingAndUnknownRetainTheBinding is the design-§7 tri-state gate:
+// neither confirmed absence nor a failed probe erases the identity needed
+// for repair.
+func TestMissingAndUnknownRetainTheBinding(t *testing.T) {
+	for _, health := range []Health{HealthMissing, HealthUnknown} {
+		t.Run(string(health), func(t *testing.T) {
+			s := openTestStore(t)
+			mustRegister(t, s, testWorkspace("w1"))
+			if err := s.RecordContainerObservation("w1", presentObservation("c-1"), testTime); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+
+			later := testTime.Add(time.Hour)
+			err := s.RecordContainerObservation("w1", ContainerObservation{Health: health}, later)
+			if err != nil {
+				t.Fatalf("record %s: %v", health, err)
+			}
+			rec, err := s.Workspace("w1")
+			if err != nil {
+				t.Fatalf("Workspace: %v", err)
+			}
+			b := rec.Container
+			if b == nil || b.ContainerID != "c-1" || b.Kind != "devcontainer" {
+				t.Fatalf("identity was not retained: %+v", b)
+			}
+			if b.Health != health || !b.ObservedAt.Equal(later) {
+				t.Errorf("health/freshness not updated: %+v", b)
+			}
+		})
+	}
+}
+
+func TestReplacementOverwritesTheBinding(t *testing.T) {
+	s := openTestStore(t)
+	mustRegister(t, s, testWorkspace("w1"))
+	if err := s.RecordContainerObservation("w1", presentObservation("c-1"), testTime); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := s.RecordContainerObservation("w1", ContainerObservation{Health: HealthMissing}, testTime); err != nil {
+		t.Fatalf("missing: %v", err)
+	}
+
+	if err := s.RecordContainerObservation("w1", presentObservation("c-2"), testTime.Add(time.Hour)); err != nil {
+		t.Fatalf("replacement: %v", err)
+	}
+	rec, err := s.Workspace("w1")
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.Container == nil || rec.Container.ContainerID != "c-2" ||
+		rec.Container.Health != HealthPresent {
+		t.Errorf("binding = %+v, want the replacement c-2", rec.Container)
+	}
+}
+
+func TestObservationsForNeverBoundAndUnknownWorkspaces(t *testing.T) {
+	s := openTestStore(t)
+	mustRegister(t, s, testWorkspace("w1"))
+
+	// missing/unknown with no existing binding record nothing: there is no
+	// identity to retain and none to invent.
+	if err := s.RecordContainerObservation("w1", ContainerObservation{Health: HealthMissing}, testTime); err != nil {
+		t.Fatalf("missing on never-bound: %v", err)
+	}
+	rec, err := s.Workspace("w1")
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.Container != nil {
+		t.Errorf("never-bound workspace grew a binding: %+v", rec.Container)
+	}
+
+	err = s.RecordContainerObservation("absent", presentObservation("c-1"), testTime)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown workspace error = %v, want ErrNotFound", err)
+	}
+
+	err = s.RecordContainerObservation("w1", ContainerObservation{Health: HealthPresent}, testTime)
+	if err == nil {
+		t.Error("present without a container ID should be rejected")
+	}
+}
