@@ -404,3 +404,46 @@ func (s *Store) CommitReconciliation(workspaceID string, r ReconciliationResult,
 	}
 	return tx.Commit()
 }
+
+// AdoptSessionName records a live session's observed name as the
+// workspace's actual session inside one transaction. The UNIQUE
+// constraint still governs: a name recorded for another workspace is a
+// typed conflict, never an overwrite. Re-adopting the workspace's own
+// current name is a no-op; adopting over a stale assignment repairs the
+// record to match reality (design §9 crash recovery, §13 step 7
+// adoption).
+func (s *Store) AdoptSessionName(workspaceID, name string, now time.Time) error {
+	if name == "" {
+		return fmt.Errorf("adopting an empty session name for workspace %s", workspaceID)
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning a transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var current sql.NullString
+	err = tx.QueryRow(
+		"SELECT actual_session FROM workspaces WHERE id = ?",
+		workspaceID).Scan(&current)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("workspace %s: %w", workspaceID, ErrNotFound)
+	}
+	if err != nil {
+		return fmt.Errorf("reading workspace %s: %w", workspaceID, err)
+	}
+	if current.Valid && current.String == name {
+		return tx.Commit()
+	}
+
+	_, err = tx.Exec(
+		"UPDATE workspaces SET actual_session = ?, updated_at = ? WHERE id = ?",
+		name, encodeTime(now), workspaceID)
+	if isUniqueViolation(err) {
+		return &SessionNameConflictError{Name: name}
+	}
+	if err != nil {
+		return fmt.Errorf("adopting session name %q: %w", name, err)
+	}
+	return tx.Commit()
+}

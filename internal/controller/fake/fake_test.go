@@ -1,10 +1,12 @@
 package fake
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
 
+	"github.com/gambtho/projectmux/internal/controller"
 	"github.com/gambtho/projectmux/internal/resolve"
 	"github.com/gambtho/projectmux/internal/state"
 )
@@ -162,5 +164,61 @@ func TestFakeStoreCommitReconciliationIsAllOrNothing(t *testing.T) {
 	}
 	if rec.LastOperation != nil {
 		t.Errorf("operation = %+v, want none after the failed commit", rec.LastOperation)
+	}
+}
+
+func TestFakeStoreAdoptSessionName(t *testing.T) {
+	s := NewStore()
+	if err := s.RegisterWorkspace(testWorkspace("w1", "slab"), "sha256:a", testTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := s.RegisterWorkspace(testWorkspace("w2", "other"), "sha256:a", testTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	if err := s.AdoptSessionName("w1", "slab--live", testTime); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	rec, err := s.Workspace("w1")
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	if rec.ActualSession == nil || *rec.ActualSession != "slab--live" {
+		t.Errorf("ActualSession = %v, want slab--live", rec.ActualSession)
+	}
+	if err := s.AdoptSessionName("w1", "slab--live", testTime); err != nil {
+		t.Errorf("re-adopting the same name: %v", err)
+	}
+
+	err = s.AdoptSessionName("w2", "slab--live", testTime)
+	var conflict *state.SessionNameConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("err = %v, want *state.SessionNameConflictError", err)
+	}
+	if err := s.AdoptSessionName("nope", "x", testTime); !errors.Is(err, state.ErrNotFound) {
+		t.Errorf("unknown workspace err = %v, want ErrNotFound", err)
+	}
+	if err := s.AdoptSessionName("w1", "", testTime); err == nil {
+		t.Error("an empty session name was accepted")
+	}
+}
+
+func TestFakeSessionActuatorRecordsSpecs(t *testing.T) {
+	a := &SessionActuator{}
+	spec := controller.SessionSpec{
+		Name:        "slab",
+		WorkspaceID: "w1",
+		Windows:     []controller.WindowSpec{{Name: "shell"}},
+	}
+	if err := a.CreateSession(context.Background(), spec); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if len(a.Created) != 1 || a.Created[0].Name != "slab" {
+		t.Errorf("Created = %+v", a.Created)
+	}
+
+	a.Err = errors.New("boom")
+	if err := a.CreateSession(context.Background(), spec); err == nil {
+		t.Error("configured error was not returned")
 	}
 }

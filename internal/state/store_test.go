@@ -423,3 +423,78 @@ func TestCommitReconciliationForUnknownWorkspace(t *testing.T) {
 		t.Errorf("error = %v, want ErrNotFound", err)
 	}
 }
+
+func TestAdoptSessionNameRecordsTheLiveName(t *testing.T) {
+	s := openTestStore(t)
+	mustRegister(t, s, testWorkspace("w1"))
+
+	if err := s.AdoptSessionName("w1", "slab--old", testTime); err != nil {
+		t.Fatalf("AdoptSessionName: %v", err)
+	}
+	rec, err := s.Workspace("w1")
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.ActualSession == nil || *rec.ActualSession != "slab--old" {
+		t.Errorf("ActualSession = %v, want slab--old", rec.ActualSession)
+	}
+}
+
+func TestAdoptSessionNameIsIdempotent(t *testing.T) {
+	s := openTestStore(t)
+	mustRegister(t, s, testWorkspace("w1"))
+	if err := s.AdoptSessionName("w1", "slabledger", testTime); err != nil {
+		t.Fatalf("first adopt: %v", err)
+	}
+	if err := s.AdoptSessionName("w1", "slabledger", testTime); err != nil {
+		t.Fatalf("re-adopting the same name: %v", err)
+	}
+}
+
+func TestAdoptSessionNameRepairsAStaleAssignment(t *testing.T) {
+	s := openTestStore(t)
+	mustRegister(t, s, testWorkspace("w1"))
+	if _, err := s.AllocateSessionName("w1", testTime); err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	if err := s.AdoptSessionName("w1", "slab--live", testTime); err != nil {
+		t.Fatalf("adopting over a stale assignment: %v", err)
+	}
+	rec, _ := s.Workspace("w1")
+	if rec.ActualSession == nil || *rec.ActualSession != "slab--live" {
+		t.Errorf("ActualSession = %v, want slab--live", rec.ActualSession)
+	}
+}
+
+func TestAdoptSessionNameConflictIsTypedAndHarmless(t *testing.T) {
+	s := openTestStore(t)
+	mustRegister(t, s, testWorkspace("w1"))
+	mustRegister(t, s, testWorkspace("w2"))
+	if err := s.AdoptSessionName("w2", "slabledger", testTime); err != nil {
+		t.Fatalf("seeding w2: %v", err)
+	}
+
+	err := s.AdoptSessionName("w1", "slabledger", testTime)
+	var conflict *SessionNameConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("err = %v, want *SessionNameConflictError", err)
+	}
+	if conflict.Name != "slabledger" {
+		t.Errorf("conflict.Name = %q", conflict.Name)
+	}
+	rec, _ := s.Workspace("w1")
+	if rec.ActualSession != nil {
+		t.Errorf("conflicting adopt changed the record: %v", *rec.ActualSession)
+	}
+}
+
+func TestAdoptSessionNameRejectsUnknownWorkspaceAndEmptyName(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.AdoptSessionName("nope", "x", testTime); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown workspace err = %v, want ErrNotFound", err)
+	}
+	mustRegister(t, s, testWorkspace("w1"))
+	if err := s.AdoptSessionName("w1", "", testTime); err == nil {
+		t.Error("an empty session name was accepted")
+	}
+}

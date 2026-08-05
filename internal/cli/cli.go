@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/gambtho/projectmux/internal/config"
+	"github.com/gambtho/projectmux/internal/controller"
 	"github.com/gambtho/projectmux/internal/resolve"
 )
 
@@ -27,6 +28,7 @@ const (
 	ExitAmbiguous        = 3 // a workspace name matched more than one worktree
 	ExitUnknownWorkspace = 4
 	ExitInvalidConfig    = 5
+	ExitRefused          = 6 // the plan refused: conflict or uncertainty, do not blindly retry
 )
 
 // version is overridden at release time with -ldflags "-X ...cli.version=v1.2.3".
@@ -37,6 +39,12 @@ const usage = `projectmux - declarative tmux workspaces, optionally backed by De
 usage: projectmux <command> [options]
 
 commands:
+  <workspace>
+        shorthand for: open <workspace>
+  open [--no-attach] [--json] [--compact] [<workspace>]
+        observe, ensure, record, and attach the workspace session
+  attach [--json] [--compact] [<workspace>]
+        attach to the live workspace session; never creates one
   config [--json] [--compact] [<workspace>]
         print the normalized, merged configuration for a workspace
   list [--json] [--compact]
@@ -96,6 +104,10 @@ func dispatch(ctx context.Context, args []string, stdout io.Writer) error {
 	case "version", "--version":
 		fmt.Fprintln(stdout, versionString())
 		return nil
+	case "open":
+		return runOpen(ctx, rest, stdout)
+	case "attach":
+		return runAttach(ctx, rest, stdout)
 	case "config":
 		return runConfig(rest, stdout)
 	case "list":
@@ -103,6 +115,12 @@ func dispatch(ctx context.Context, args []string, stdout io.Writer) error {
 	case "status":
 		return runStatus(ctx, rest, stdout)
 	default:
+		if !strings.HasPrefix(command, "-") {
+			// Design §8: `projectmux <workspace>` is shorthand for
+			// open. A mistyped command therefore resolves as a
+			// workspace name and exits 4, not 2 — the documented trade.
+			return runOpen(ctx, append([]string{command}, rest...), stdout)
+		}
 		return usagef("unknown command %q", command)
 	}
 }
@@ -113,6 +131,7 @@ func exitCode(err error) int {
 		ambiguous  *resolve.AmbiguousError
 		unknown    *resolve.UnknownWorkspaceError
 		invalidCfg *config.InvalidConfigError
+		refusal    *controller.RefusalError
 	)
 	switch {
 	case errors.As(err, &usageErr):
@@ -123,6 +142,8 @@ func exitCode(err error) int {
 		return ExitUnknownWorkspace
 	case errors.As(err, &invalidCfg):
 		return ExitInvalidConfig
+	case errors.As(err, &refusal):
+		return ExitRefused
 	default:
 		return ExitError
 	}

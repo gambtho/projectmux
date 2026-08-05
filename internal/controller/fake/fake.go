@@ -24,6 +24,7 @@ var (
 	_ controller.SessionObserver   = (*SessionObserver)(nil)
 	_ controller.ContainerObserver = (*ContainerObserver)(nil)
 	_ controller.Clock             = (*Clock)(nil)
+	_ controller.SessionActuator   = (*SessionActuator)(nil)
 )
 
 // Clock returns a fixed time.
@@ -276,4 +277,43 @@ func copyRecord(rec *state.Record) state.Record {
 		}
 	}
 	return out
+}
+
+// SessionActuator records the session specs it was asked to create and
+// fails on demand.
+type SessionActuator struct {
+	Err     error
+	Created []controller.SessionSpec
+}
+
+func (a *SessionActuator) CreateSession(_ context.Context, spec controller.SessionSpec) error {
+	a.Created = append(a.Created, spec)
+	return a.Err
+}
+
+// AdoptSessionName mirrors the real store: typed conflict on a name
+// another workspace holds, no-op on the workspace's own current name,
+// repair of a stale assignment otherwise.
+func (s *Store) AdoptSessionName(workspaceID, name string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.records[workspaceID]
+	if !ok {
+		return fmt.Errorf("workspace %s: %w", workspaceID, state.ErrNotFound)
+	}
+	if name == "" {
+		return fmt.Errorf("adopting an empty session name for workspace %s", workspaceID)
+	}
+	if rec.ActualSession != nil && *rec.ActualSession == name {
+		return nil
+	}
+	for id, other := range s.records {
+		if id != workspaceID && other.ActualSession != nil && *other.ActualSession == name {
+			return &state.SessionNameConflictError{Name: name}
+		}
+	}
+	adopted := name
+	rec.ActualSession = &adopted
+	rec.UpdatedAt = now
+	return nil
 }

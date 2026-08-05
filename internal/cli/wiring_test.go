@@ -3,6 +3,9 @@ package cli
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,6 +50,10 @@ func (g guardedStore) RecordOperation(string, state.Operation, time.Time) error 
 
 func (g guardedStore) CommitReconciliation(string, state.ReconciliationResult, time.Time) error {
 	return g.forbidden("CommitReconciliation")
+}
+
+func (g guardedStore) AdoptSessionName(string, string, time.Time) error {
+	return g.forbidden("AdoptSessionName")
 }
 
 func installFakeStore(t *testing.T, s *fake.Store) {
@@ -102,5 +109,160 @@ func TestStoredContainerRendersTimestampsUTC(t *testing.T) {
 	}
 	if storedContainer(nil) != nil {
 		t.Error("storedContainer(nil) should be nil")
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+func TestWindowSpecsDerivation(t *testing.T) {
+	cfg := config.Config{
+		Windows: []config.Window{
+			{Name: "agent-1", Agent: strPtr("claude"), Focus: true},
+			{Name: "build", Command: strPtr("make watch"), Cwd: strPtr("sub")},
+			{Name: "shell", Shell: true},
+		},
+	}
+	specs, err := windowSpecs(cfg, "/w/slab")
+	if err != nil {
+		t.Fatalf("windowSpecs: %v", err)
+	}
+	want := []controller.WindowSpec{
+		{Name: "agent-1", Command: "claude", Dir: "/w/slab", Focus: true},
+		{Name: "build", Command: "make watch", Dir: "/w/slab/sub"},
+		{Name: "shell", Dir: "/w/slab"},
+	}
+	if len(specs) != len(want) {
+		t.Fatalf("specs = %+v", specs)
+	}
+	for i := range want {
+		if specs[i] != want[i] {
+			t.Errorf("spec %d = %+v, want %+v", i, specs[i], want[i])
+		}
+	}
+}
+
+func TestWindowSpecsImplicitShellWindow(t *testing.T) {
+	specs, err := windowSpecs(config.Config{}, "/w/slab")
+	if err != nil {
+		t.Fatalf("windowSpecs: %v", err)
+	}
+	if len(specs) != 1 || specs[0].Name != "shell" || specs[0].Dir != "/w/slab" ||
+		specs[0].Command != "" {
+		t.Errorf("specs = %+v, want one implicit shell window", specs)
+	}
+}
+
+func TestWindowSpecsRejectContainerLocation(t *testing.T) {
+	cfg := config.Config{
+		Windows: []config.Window{
+			{Name: "agent-1", Agent: strPtr("claude"), Location: strPtr("container")},
+		},
+	}
+	_, err := windowSpecs(cfg, "/w/slab")
+	var cw *containerWindowError
+	if !errors.As(err, &cw) {
+		t.Fatalf("err = %v, want *containerWindowError", err)
+	}
+	if !strings.Contains(err.Error(), "agent-1") {
+		t.Errorf("error %q does not name the window", err)
+	}
+}
+
+func TestHostOnlyContainerObserver(t *testing.T) {
+	observer := hostOnlyContainerObserver{}
+	worktree := t.TempDir()
+	ws := resolve.Workspace{ID: "w1", Worktree: worktree}
+	auto := config.Config{DevContainer: config.DevContainer{Enabled: "auto"}}
+
+	// auto with no devcontainer configuration: no container applies.
+	obs, err := observer.DiscoverContainer(context.Background(), ws, auto)
+	if err != nil || obs != nil {
+		t.Errorf("auto/no-config = (%v, %v), want (nil, nil)", obs, err)
+	}
+
+	// auto with a devcontainer.json on disk: unsupported (error funnel).
+	if err := os.MkdirAll(filepath.Join(worktree, ".devcontainer"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".devcontainer", "devcontainer.json"),
+		[]byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := observer.DiscoverContainer(context.Background(), ws, auto); err == nil {
+		t.Error("auto with a devcontainer config discovered nothing to refuse")
+	}
+
+	// enabled true is unsupported regardless of files.
+	if _, err := observer.DiscoverContainer(context.Background(),
+		resolve.Workspace{Worktree: t.TempDir()},
+		config.Config{DevContainer: config.DevContainer{Enabled: "true"}}); err == nil {
+		t.Error("enabled true discovered nothing to refuse")
+	}
+
+	// A stored binding cannot be probed in this build.
+	if _, err := observer.ProbeContainer(context.Background(),
+		state.ContainerBinding{ContainerID: "c1"}); err == nil {
+		t.Error("ProbeContainer pretended to probe")
+	}
+}
+
+func TestHostOnlyContainerObserverUnreadableParentIsUnprobed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions; the exclusion cannot be exercised")
+	}
+	observer := hostOnlyContainerObserver{}
+	parent := t.TempDir()
+	worktree := filepath.Join(parent, "worktree")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+
+	ws := resolve.Workspace{ID: "w1", Worktree: worktree}
+	auto := config.Config{DevContainer: config.DevContainer{Enabled: "auto"}}
+	obs, err := observer.DiscoverContainer(context.Background(), ws, auto)
+	if err == nil {
+		t.Fatalf("DiscoverContainer over an unreadable parent = (%v, nil), want errUnprobed", obs)
+	}
+	if !errors.Is(err, errUnprobed) {
+		t.Errorf("err = %v, want errUnprobed", err)
+	}
+}
+
+func TestAttachTerminalChoosesByTmuxEnv(t *testing.T) {
+	var execCalls, switchCalls []string
+	origExec, origSwitch, origInside := execAttach, switchClient, insideTmux
+	t.Cleanup(func() { execAttach, switchClient, insideTmux = origExec, origSwitch, origInside })
+	execAttach = func(session string) error {
+		execCalls = append(execCalls, session)
+		return nil
+	}
+	switchClient = func(_ context.Context, session string) error {
+		switchCalls = append(switchCalls, session)
+		return nil
+	}
+
+	insideTmux = func() bool { return false }
+	if err := attachTerminal(context.Background(), "slab"); err != nil {
+		t.Fatalf("attachTerminal: %v", err)
+	}
+	insideTmux = func() bool { return true }
+	if err := attachTerminal(context.Background(), "slab"); err != nil {
+		t.Fatalf("attachTerminal: %v", err)
+	}
+	if len(execCalls) != 1 || len(switchCalls) != 1 {
+		t.Errorf("execCalls = %v, switchCalls = %v; want one each", execCalls, switchCalls)
+	}
+}
+
+func TestRefusalErrorMapsToExitRefused(t *testing.T) {
+	if got := exitCode(&controller.RefusalError{Reason: "nope"}); got != ExitRefused {
+		t.Errorf("exitCode(RefusalError) = %d, want %d", got, ExitRefused)
+	}
+	if ExitRefused != 6 {
+		t.Errorf("ExitRefused = %d, want 6", ExitRefused)
 	}
 }
