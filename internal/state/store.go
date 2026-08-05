@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gambtho/projectmux/internal/resolve"
@@ -315,4 +316,91 @@ func requireWorkspace(tx txExecer, workspaceID string) error {
 		return fmt.Errorf("workspace %s: %w", workspaceID, ErrNotFound)
 	}
 	return nil
+}
+
+// boundedSummary enforces the 4 KiB error-summary bound, trimming any
+// UTF-8 rune the byte cut split.
+func boundedSummary(s string) string {
+	if len(s) <= MaxErrorSummaryBytes {
+		return s
+	}
+	return strings.ToValidUTF8(s[:MaxErrorSummaryBytes], "")
+}
+
+// RecordOperation upserts the workspace's last operation outcome. The
+// store sets finished_at from now.
+func (s *Store) RecordOperation(workspaceID string, op Operation, now time.Time) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning a transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if err := recordOperation(tx, workspaceID, op, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func recordOperation(tx txExecer, workspaceID string, op Operation, now time.Time) error {
+	if err := requireWorkspace(tx, workspaceID); err != nil {
+		return err
+	}
+	var exit any
+	if op.ExitStatus != nil {
+		exit = *op.ExitStatus
+	}
+	_, err := tx.Exec(`
+		INSERT INTO last_operations
+			(workspace_id, operation, outcome, exit_status, error_summary, finished_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(workspace_id) DO UPDATE SET
+			operation     = excluded.operation,
+			outcome       = excluded.outcome,
+			exit_status   = excluded.exit_status,
+			error_summary = excluded.error_summary,
+			finished_at   = excluded.finished_at`,
+		workspaceID, op.Name, string(op.Outcome), exit,
+		boundedSummary(op.ErrorSummary), encodeTime(now))
+	if err != nil {
+		return fmt.Errorf("recording the operation outcome: %w", err)
+	}
+	return nil
+}
+
+// CommitReconciliation is design §9 step 5 as one transaction: the applied
+// digest (only when the desired configuration was fully applied), any
+// container observation, and the operation outcome commit together. A nil
+// AppliedDigest leaves applied_digest untouched, so a failed
+// reconciliation never clears recorded drift.
+func (s *Store) CommitReconciliation(workspaceID string, r ReconciliationResult, now time.Time) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning a transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if r.AppliedDigest != nil {
+		res, err := tx.Exec(
+			"UPDATE workspaces SET applied_digest = ?, updated_at = ? WHERE id = ?",
+			*r.AppliedDigest, encodeTime(now), workspaceID)
+		if err != nil {
+			return fmt.Errorf("recording the applied digest: %w", err)
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("recording the applied digest: %w", err)
+		}
+		if affected == 0 {
+			return fmt.Errorf("workspace %s: %w", workspaceID, ErrNotFound)
+		}
+	}
+	if r.Container != nil {
+		if err := recordContainer(tx, workspaceID, *r.Container, now); err != nil {
+			return err
+		}
+	}
+	if err := recordOperation(tx, workspaceID, r.Operation, now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

@@ -3,6 +3,7 @@ package state
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -306,5 +307,119 @@ func TestObservationsForNeverBoundAndUnknownWorkspaces(t *testing.T) {
 	err = s.RecordContainerObservation("w1", ContainerObservation{Health: HealthPresent}, testTime)
 	if err == nil {
 		t.Error("present without a container ID should be rejected")
+	}
+}
+
+func TestRecordOperationRoundTripsAndTruncates(t *testing.T) {
+	s := openTestStore(t)
+	mustRegister(t, s, testWorkspace("w1"))
+
+	exit := 7
+	op := Operation{
+		Name:         "open",
+		Outcome:      OutcomeFailed,
+		ExitStatus:   &exit,
+		ErrorSummary: strings.Repeat("x", MaxErrorSummaryBytes+100),
+	}
+	if err := s.RecordOperation("w1", op, testTime); err != nil {
+		t.Fatalf("RecordOperation: %v", err)
+	}
+	rec, err := s.Workspace("w1")
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	got := rec.LastOperation
+	if got == nil || got.Name != "open" || got.Outcome != OutcomeFailed ||
+		got.ExitStatus == nil || *got.ExitStatus != 7 ||
+		!got.FinishedAt.Equal(testTime) {
+		t.Fatalf("operation = %+v", got)
+	}
+	if len(got.ErrorSummary) != MaxErrorSummaryBytes {
+		t.Errorf("summary length = %d, want the %d-byte bound", len(got.ErrorSummary), MaxErrorSummaryBytes)
+	}
+
+	// The row is an upsert: the next operation replaces it.
+	if err := s.RecordOperation("w1", Operation{Name: "stop", Outcome: OutcomeOK}, testTime.Add(time.Hour)); err != nil {
+		t.Fatalf("second RecordOperation: %v", err)
+	}
+	rec, err = s.Workspace("w1")
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.LastOperation.Name != "stop" || rec.LastOperation.ExitStatus != nil {
+		t.Errorf("operation = %+v, want the replacement", rec.LastOperation)
+	}
+}
+
+func TestCommitReconciliationAppliesEverythingAtomically(t *testing.T) {
+	s := openTestStore(t)
+	mustRegister(t, s, testWorkspace("w1"))
+
+	digest := "sha256:aaaa"
+	obs := presentObservation("c-1")
+	err := s.CommitReconciliation("w1", ReconciliationResult{
+		AppliedDigest: &digest,
+		Container:     &obs,
+		Operation:     Operation{Name: "open", Outcome: OutcomeOK},
+	}, testTime)
+	if err != nil {
+		t.Fatalf("CommitReconciliation: %v", err)
+	}
+
+	rec, err := s.Workspace("w1")
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.AppliedDigest == nil || *rec.AppliedDigest != digest {
+		t.Errorf("applied digest = %v, want %q", rec.AppliedDigest, digest)
+	}
+	if rec.Container == nil || rec.Container.ContainerID != "c-1" {
+		t.Errorf("container = %+v", rec.Container)
+	}
+	if rec.LastOperation == nil || rec.LastOperation.Outcome != OutcomeOK {
+		t.Errorf("operation = %+v", rec.LastOperation)
+	}
+}
+
+// TestFailedReconciliationLeavesDriftRecorded is the spec-§4 gate: a
+// failure commits its outcome without advancing applied_digest.
+func TestFailedReconciliationLeavesDriftRecorded(t *testing.T) {
+	s := openTestStore(t)
+	mustRegister(t, s, testWorkspace("w1"))
+	seeded := "sha256:old"
+	if err := s.CommitReconciliation("w1", ReconciliationResult{
+		AppliedDigest: &seeded,
+		Operation:     Operation{Name: "open", Outcome: OutcomeOK},
+	}, testTime); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	err := s.CommitReconciliation("w1", ReconciliationResult{
+		AppliedDigest: nil,
+		Operation:     Operation{Name: "open", Outcome: OutcomeFailed, ErrorSummary: "devcontainer up timed out"},
+	}, testTime.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("failed reconciliation: %v", err)
+	}
+
+	rec, err := s.Workspace("w1")
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.AppliedDigest == nil || *rec.AppliedDigest != seeded {
+		t.Errorf("applied digest = %v, want the seeded %q untouched", rec.AppliedDigest, seeded)
+	}
+	if rec.LastOperation == nil || rec.LastOperation.Outcome != OutcomeFailed {
+		t.Errorf("operation = %+v, want the failure recorded", rec.LastOperation)
+	}
+}
+
+func TestCommitReconciliationForUnknownWorkspace(t *testing.T) {
+	s := openTestStore(t)
+	err := s.CommitReconciliation("absent", ReconciliationResult{
+		Operation: Operation{Name: "open", Outcome: OutcomeOK},
+	}, testTime)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
 	}
 }
