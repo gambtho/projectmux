@@ -18,6 +18,9 @@ type Controller struct {
 	Sessions   SessionObserver
 	Containers ContainerObserver
 	Clock      Clock
+	// Actuator performs session mutations for Ensure. Nil in
+	// observation-only wiring.
+	Actuator SessionActuator
 }
 
 // Desired is everything the configuration and resolver slices established
