@@ -129,12 +129,12 @@ func buildEnvelope(name string) (envelope, error) {
 	}, nil
 }
 
-func writeJSON(w io.Writer, env envelope, compact bool) error {
+func writeJSON(w io.Writer, v any, compact bool) error {
 	enc := json.NewEncoder(w)
 	if !compact {
 		enc.SetIndent("", "  ")
 	}
-	if err := enc.Encode(env); err != nil {
+	if err := enc.Encode(v); err != nil {
 		return fmt.Errorf("writing JSON: %w", err)
 	}
 	return nil
