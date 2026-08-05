@@ -111,6 +111,28 @@ func TestCreateArgvEscapesTrailingSemicolons(t *testing.T) {
 	}
 }
 
+func TestCreateArgvEscapesSessionNameInTargets(t *testing.T) {
+	spec := actuateSpec()
+	spec.Name = "slab;"
+	argv := createArgv(spec)
+	joined := strings.Join(argv, " ")
+
+	for _, want := range []string{
+		`-s slab\;`,
+		`set-option -t slab\; @dev_workspace_id`,
+		`set-option -t slab\; @dev_slug`,
+		`set-option -t slab\; @dev_worktree`,
+		`new-window -d -t slab\;`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("argv %q\nmissing %q", joined, want)
+		}
+	}
+	if strings.Contains(joined, "-s slab;") || strings.Contains(joined, "-t slab;") {
+		t.Errorf("argv %q carries an unescaped session name in a -s/-t position", joined)
+	}
+}
+
 func TestCreateSessionRejectsZeroWindows(t *testing.T) {
 	c := &Client{}
 	err := c.CreateSession(context.Background(), controller.SessionSpec{Name: "x"})
@@ -227,4 +249,42 @@ func TestIntegrationCreateSessionEnvValueEndingInSemicolon(t *testing.T) {
 		exec.Command("sleep", "0.1").Run()
 	}
 	t.Error("env value ending in ';' did not reach the pane verbatim")
+}
+
+// TestIntegrationCreateSessionNameEndingInSemicolon proves the target
+// escaping fix on real tmux: a session name ending in ";" (as arises from
+// an unsanitized workspace slug derived from a directory legally named
+// e.g. "myproject;") must not break the chained new-session invocation,
+// and the created session must be observable under its exact name with
+// its identity keys intact (open/attach spec §4).
+func TestIntegrationCreateSessionNameEndingInSemicolon(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	socket := fmt.Sprintf("projectmux-actuate-nsemi-%d", os.Getpid())
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	})
+
+	dir := t.TempDir()
+	spec := controller.SessionSpec{
+		Name:        "slab;",
+		WorkspaceID: "w1",
+		Slug:        "proj",
+		Worktree:    dir,
+		Windows:     []controller.WindowSpec{{Name: "first", Dir: dir, Focus: true}},
+	}
+	c := &Client{Socket: socket}
+	if err := c.CreateSession(context.Background(), spec); err != nil {
+		t.Fatalf("CreateSession with a semicolon-terminated name: %v", err)
+	}
+
+	live, err := c.Sessions(context.Background())
+	if err != nil {
+		t.Fatalf("Sessions: %v", err)
+	}
+	if len(live) != 1 || live[0].Name != "slab;" || live[0].WorkspaceID != "w1" ||
+		live[0].Slug != "proj" || live[0].Worktree != dir {
+		t.Fatalf("observed = %+v, want one session named \"slab;\" with matching identity", live)
+	}
 }

@@ -41,10 +41,13 @@ func (c *Client) CreateSession(ctx context.Context, spec controller.SessionSpec)
 // tmux shell-command arguments: tmux runs them in the pane's default
 // shell; nothing here interpolates into a shell (design §11).
 func createArgv(spec controller.SessionSpec) []string {
-	target := spec.Name
+	// target is used as every mid-chain -t value (set-option, new-window);
+	// it must be escaped exactly like -s, since those are ordinary argv
+	// elements subject to the same trailing-";" chain-parsing rule.
+	target := escapeChainArg(spec.Name)
 	first := spec.Windows[0]
 
-	argv := []string{"new-session", "-d", "-s", escapeChainArg(spec.Name), "-n", escapeChainArg(first.Name),
+	argv := []string{"new-session", "-d", "-s", target, "-n", escapeChainArg(first.Name),
 		"-c", escapeChainArg(windowDir(first, spec))}
 	argv = append(argv, envArgs(spec.Env)...)
 	if first.Command != "" {
