@@ -132,11 +132,30 @@ retry) → commit (operation `autostart` + the observation). Outcomes:
 `none-applies` (reported as skipped); `start`/`acquire` → `started`
 after the idempotent `up`.
 
+**Operation-name plumbing (a prerequisite refactor):** the container
+phase's persistence helpers currently hard-code the operation name
+`"open"` (`recordFailure`, `recordStartFailure`, `commitOutcome` in
+ensure.go). `ensureContainer` and those helpers gain an operation-name
+parameter (or the name becomes a field threaded through the call):
+`Ensure` passes `"open"`, `Stop` passes `"stop"`, and
+`StartWorkspaceContainer` passes `"autostart"`, so every recorded
+operation — including retry and start failures inside the shared
+container phase — carries the command that ran it. Reusing
+`ensureContainer` "verbatim" is explicitly not possible without this.
+
 Autostart (CLI) iterates `store.Workspaces()`, filters `IsPrimary`,
 builds `Desired` from the stored record (`resolve.Workspace{ID, Slug,
-Worktree, SessionName: ProposedSession, IsPrimary}`), loads config by
-slug (failure → `failed` entry), checks `autostart`, and calls
-`StartWorkspaceContainer`.
+Worktree, SessionName: ProposedSession, IsPrimary}`), and per workspace:
+
+1. **Stat the stored worktree first.** Config loading reads only
+   config-root files (load.go) and the adapter's `Applies` treats
+   absent devcontainer files under `auto` as "does not apply" — so a
+   vanished worktree would otherwise sail through as a silent skip.
+   A missing worktree is reported as `failed` ("worktree no longer
+   exists"), giving boot logs the visibility this spec promises.
+2. Load config by slug (failure → `failed` entry).
+3. Check `autostart: true` (false → skipped).
+4. Call `StartWorkspaceContainer`.
 
 ## 4. Adapter additions
 
@@ -162,6 +181,22 @@ slug (failure → `failed` entry), checks `autostart`, and calls
 - Dispatch cases + usage entries; the bare-form fallback is unaffected
   (`stop`/`autostart` are matched before the workspace fallback).
 - Exit codes unchanged (0–6); autostart's any-failure → 1.
+- **Deliberate amendment to the no-stdout-on-failure contract**
+  (cli.go's `Main` doc: "writes nothing to stdout for a failing
+  command"): that invariant assumed single-operation commands, where a
+  failure means the output would be garbage. Autostart is a
+  multi-workspace batch and `stop --container` can partially succeed —
+  for these two commands the structured report (JSON or human) **is**
+  the output and is written to stdout even when the command exits
+  nonzero; the failure detail lives inside the report. Mechanically:
+  the command writes its report, then returns a typed sentinel error
+  (`errPartialFailure`-style, carrying only a one-line summary) that
+  `Main` prints to stderr and maps to exit 1 — nothing further is
+  written to stdout after the report. `Main`'s doc comment is amended
+  to state the exception explicitly, and every single-operation command
+  keeps the old contract unchanged. Automation contract: check the exit
+  code, then parse stdout — which now works for both total success and
+  partial failure.
 
 ## 6. Testing
 
@@ -215,3 +250,14 @@ parallel autostart.
   grace is 10s — verified; the 5s probe default would false-fail).
 - The systemd template ships without enablement logic; `%h/.local/bin`
   path with an adjust-comment (user units don't search PATH portably).
+- The container phase's persistence helpers take an operation name
+  (open/stop/autostart) — hard-coded `"open"` made verbatim reuse
+  impossible (Codex review finding).
+- Autostart stats the stored worktree before config load: a vanished
+  worktree is a `failed` boot-log entry, never a silent skip — config
+  loading never touches the worktree, and `auto`'s applicability check
+  would misread absence as "does not apply" (Codex review finding).
+- The no-stdout-on-failure contract is deliberately amended for the two
+  commands whose report is the output (autostart, partial stop): report
+  on stdout, typed summary error to stderr, exit 1 (Codex review
+  finding).
