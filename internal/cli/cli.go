@@ -41,6 +41,8 @@ commands:
         print the normalized, merged configuration for a workspace
   list [--json] [--compact]
         list recorded workspaces and live identity-carrying tmux sessions
+  status [--json] [--compact] [<workspace>]
+        observe one workspace and explain drift and dependency failures
   version
         print the projectmux version
   help
@@ -98,6 +100,8 @@ func dispatch(ctx context.Context, args []string, stdout io.Writer) error {
 		return runConfig(rest, stdout)
 	case "list":
 		return runList(ctx, rest, stdout)
+	case "status":
+		return runStatus(ctx, rest, stdout)
 	default:
 		return usagef("unknown command %q", command)
 	}

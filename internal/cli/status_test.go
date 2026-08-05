@@ -1,0 +1,222 @@
+package cli
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/gambtho/projectmux/internal/controller"
+	"github.com/gambtho/projectmux/internal/controller/fake"
+	"github.com/gambtho/projectmux/internal/resolve"
+	"github.com/gambtho/projectmux/internal/state"
+)
+
+// statusWorkspace builds the standard test repository and returns its
+// resolved identity so store seeding and live-session fixtures agree
+// with what buildStatus will resolve.
+func statusWorkspace(t *testing.T) resolve.Workspace {
+	t.Helper()
+	workspace(t, map[string]string{
+		"defaults.yaml":              "version: 1\n",
+		"workspaces/slabledger.yaml": validConfig,
+	})
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	ws, err := resolve.Resolve("", nil, cwd)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	return ws
+}
+
+func decodeStatus(t *testing.T, stdout string) statusEnvelope {
+	t.Helper()
+	var env statusEnvelope
+	if err := json.Unmarshal([]byte(stdout), &env); err != nil {
+		t.Fatalf("decoding status JSON: %v\n%s", err, stdout)
+	}
+	return env
+}
+
+func TestStatusLiveMatchingSession(t *testing.T) {
+	ws := statusWorkspace(t)
+	s := fake.NewStore()
+	if err := s.RegisterWorkspace(ws, "sha256:seed", cliTestTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	actual, err := s.AllocateSessionName(ws.ID, cliTestTime)
+	if err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	applied := "sha256:stale"
+	if err := s.CommitReconciliation(ws.ID, state.ReconciliationResult{
+		AppliedDigest: &applied,
+		Operation:     state.Operation{Name: "open", Outcome: state.OutcomeOK},
+	}, cliTestTime); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	installFakeStore(t, s)
+	live := controller.LiveSession{
+		Name: actual, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.Worktree,
+	}
+	installSessionObserver(t, controller.SessionObservation{
+		ByIdentity: &live,
+		ByName:     []controller.LiveSession{live},
+	}, nil)
+
+	code, stdout, stderr := run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	env := decodeStatus(t, stdout)
+	if !env.Registered || env.Stored == nil {
+		t.Fatalf("registered = %t, stored = %+v", env.Registered, env.Stored)
+	}
+	if env.Session.State != "live" {
+		t.Errorf("session.state = %q", env.Session.State)
+	}
+	if env.Session.Identity == nil || *env.Session.Identity != "match" {
+		t.Errorf("session.identity = %v, want match", env.Session.Identity)
+	}
+	if env.Plan.Session != "none" {
+		t.Errorf("plan.session = %q, want none", env.Plan.Session)
+	}
+	if !env.Config.Drifted {
+		t.Error("config.drifted = false; the applied digest is stale")
+	}
+	if env.Config.AppliedDigest == nil || *env.Config.AppliedDigest != applied {
+		t.Errorf("config.applied_digest = %v", env.Config.AppliedDigest)
+	}
+	if !env.Plan.Reapply {
+		t.Error("plan.reapply = false, want true")
+	}
+	if env.LastOperation == nil || env.LastOperation.Operation != "open" {
+		t.Errorf("last_operation = %+v", env.LastOperation)
+	}
+	// validConfig enables devcontainer: auto; nothing is bound, and the
+	// observer is honest about not probing.
+	if env.Container == nil {
+		t.Fatal("container section missing while devcontainer is enabled")
+	}
+	if env.Container.Stored != nil {
+		t.Errorf("container.stored = %+v, want none", env.Container.Stored)
+	}
+	if env.Container.Observation.Attempted {
+		t.Error("container.observation.attempted = true; no probe exists in this build")
+	}
+	if env.Plan.Container != "probe-first" {
+		t.Errorf("plan.container = %q, want probe-first", env.Plan.Container)
+	}
+}
+
+func TestStatusUnknownSessionRefuses(t *testing.T) {
+	statusWorkspace(t)
+	installFakeStore(t, fake.NewStore())
+	installSessionObserver(t, controller.SessionObservation{}, errors.New("tmux exploded"))
+
+	code, stdout, stderr := run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	env := decodeStatus(t, stdout)
+	if env.Session.State != "unknown" {
+		t.Errorf("session.state = %q, want unknown", env.Session.State)
+	}
+	if env.Session.Identity != nil {
+		t.Errorf("session.identity = %v; an unobserved session has no verdict", env.Session.Identity)
+	}
+	if env.Plan.Session != "refuse" || env.Plan.Refusal == "" {
+		t.Errorf("plan = %+v, want a refusal", env.Plan)
+	}
+	if env.Registered {
+		t.Error("registered = true for an empty store")
+	}
+}
+
+func TestStatusStoredBindingNeverRendersAsLive(t *testing.T) {
+	ws := statusWorkspace(t)
+	s := fake.NewStore()
+	if err := s.RegisterWorkspace(ws, "sha256:seed", cliTestTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := s.RecordContainerObservation(ws.ID, state.ContainerObservation{
+		Kind: "devcontainer", ContainerID: "c1", Health: state.HealthPresent,
+	}, cliTestTime); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	if err := s.RecordContainerObservation(ws.ID, state.ContainerObservation{
+		Health: state.HealthMissing,
+	}, cliTestTime); err != nil {
+		t.Fatalf("mark missing: %v", err)
+	}
+	installFakeStore(t, s)
+	installSessionObserver(t, controller.SessionObservation{}, nil)
+
+	code, stdout, _ := run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	env := decodeStatus(t, stdout)
+	if env.Container == nil || env.Container.Stored == nil {
+		t.Fatalf("container = %+v, want a stored binding", env.Container)
+	}
+	if env.Container.Stored.Health != "missing" || env.Container.Stored.ContainerID != "c1" {
+		t.Errorf("container.stored = %+v, want retained missing c1", env.Container.Stored)
+	}
+	if env.Container.Observation.Attempted {
+		t.Error("container.observation.attempted = true; no probe exists in this build")
+	}
+
+	code, human, _ := run(t, "status")
+	if code != 0 {
+		t.Fatalf("human exit %d", code)
+	}
+	if !strings.Contains(human, "missing") || !strings.Contains(human, "not probed") {
+		t.Errorf("human output hides the missing/unprobed truth: %s", human)
+	}
+}
+
+func TestStatusForeignOccupantRefuses(t *testing.T) {
+	ws := statusWorkspace(t)
+	installFakeStore(t, fake.NewStore())
+	installSessionObserver(t, controller.SessionObservation{
+		ByName: []controller.LiveSession{{Name: ws.SessionName}},
+	}, nil)
+
+	code, stdout, _ := run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	env := decodeStatus(t, stdout)
+	if env.Plan.Session != "refuse" {
+		t.Errorf("plan.session = %q, want refuse", env.Plan.Session)
+	}
+	if !strings.Contains(env.Plan.Refusal, ws.SessionName) {
+		t.Errorf("refusal %q does not name the occupant", env.Plan.Refusal)
+	}
+}
+
+func TestStatusUnknownWorkspaceExitCode(t *testing.T) {
+	statusWorkspace(t)
+	installFakeStore(t, fake.NewStore())
+	installSessionObserver(t, controller.SessionObservation{}, nil)
+
+	code, stdout, _ := run(t, "status", "no-such-workspace")
+	if code != ExitUnknownWorkspace {
+		t.Errorf("exit %d, want %d", code, ExitUnknownWorkspace)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty on failure", stdout)
+	}
+}
+
+func TestStatusRejectsExtraArguments(t *testing.T) {
+	code, _, _ := run(t, "status", "one", "two")
+	if code != ExitUsage {
+		t.Errorf("exit %d, want %d", code, ExitUsage)
+	}
+}
