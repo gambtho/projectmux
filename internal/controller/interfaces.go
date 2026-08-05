@@ -67,6 +67,9 @@ type ContainerObserver interface {
 type ContainerActuator interface {
 	StartContainer(ctx context.Context, ws resolve.Workspace, cfg config.Config) (ContainerObservation, error)
 	ExecCommand(binding state.ContainerBinding, command, relDir string, env map[string]string) string
+	// StopContainer stops the bound container. Already-stopped and
+	// removed containers are success: the goal state holds.
+	StopContainer(ctx context.Context, containerID string) error
 }
 
 // WindowLocation is a window's configured placement. The zero value is
@@ -122,4 +125,7 @@ type SessionSpec struct {
 // counterpart of SessionObserver; adapters implement both.
 type SessionActuator interface {
 	CreateSession(ctx context.Context, spec SessionSpec) error
+	// KillSession ends the named session. A session that vanished
+	// before the kill is success: stop is idempotent.
+	KillSession(ctx context.Context, name string) error
 }

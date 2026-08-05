@@ -190,3 +190,25 @@ func TestStartContainerSuccessAndFailures(t *testing.T) {
 		t.Errorf("timeout StartError = %+v; partial stderr must be preserved", start)
 	}
 }
+
+func TestStopContainerClassifications(t *testing.T) {
+	a := &Adapter{}
+
+	fakeBinary(t, &dockerBinary, "#!/bin/sh\nexit 0\n")
+	if err := a.StopContainer(context.Background(), "c1"); err != nil {
+		t.Fatalf("StopContainer: %v", err)
+	}
+
+	// A removed container is the goal state (verified docker error shape).
+	fakeBinary(t, &dockerBinary,
+		"#!/bin/sh\necho 'Error response from daemon: No such container: c1' 1>&2\nexit 1\n")
+	if err := a.StopContainer(context.Background(), "c1"); err != nil {
+		t.Fatalf("removed-container stop = %v, want nil", err)
+	}
+
+	fakeBinary(t, &dockerBinary,
+		"#!/bin/sh\necho 'Cannot connect to the Docker daemon' 1>&2\nexit 1\n")
+	if err := a.StopContainer(context.Background(), "c1"); err == nil {
+		t.Fatal("a daemon failure was swallowed")
+	}
+}

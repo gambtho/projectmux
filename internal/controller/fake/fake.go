@@ -294,12 +294,19 @@ func copyRecord(rec *state.Record) state.Record {
 // fails on demand.
 type SessionActuator struct {
 	Err     error
+	KillErr error
 	Created []controller.SessionSpec
+	Killed  []string
 }
 
 func (a *SessionActuator) CreateSession(_ context.Context, spec controller.SessionSpec) error {
 	a.Created = append(a.Created, spec)
 	return a.Err
+}
+
+func (a *SessionActuator) KillSession(_ context.Context, name string) error {
+	a.Killed = append(a.Killed, name)
+	return a.KillErr
 }
 
 // AdoptSessionName mirrors the real store: typed conflict on a name
@@ -337,8 +344,10 @@ func (s *Store) AdoptSessionName(workspaceID, name string, now time.Time) error 
 type ContainerActuator struct {
 	StartResult controller.ContainerObservation
 	StartErr    error
+	StopErr     error
 	ExecResult  string
 	Started     []string
+	Stopped     []string
 	Execs       []string
 }
 
@@ -357,4 +366,9 @@ func (a *ContainerActuator) ExecCommand(b state.ContainerBinding, command, relDi
 	}
 	return fmt.Sprintf("fake-exec %s %s %q env=%d",
 		b.ContainerID, path.Join(b.Workdir, relDir), command, len(env))
+}
+
+func (a *ContainerActuator) StopContainer(_ context.Context, containerID string) error {
+	a.Stopped = append(a.Stopped, containerID)
+	return a.StopErr
 }

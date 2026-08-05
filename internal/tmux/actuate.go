@@ -125,3 +125,24 @@ func windowDir(w controller.WindowSpec, spec controller.SessionSpec) string {
 	}
 	return spec.Worktree
 }
+
+// KillSession ends the named session with an exact-match target
+// (kill-session is a target-session command, where "=" is valid). A
+// session that vanished first ("can't find session", verified shape) is
+// success: stop is idempotent and the goal state holds. Killing the
+// last session exits the tmux server, which later observation correctly
+// reads as absence.
+func (c *Client) KillSession(ctx context.Context, name string) error {
+	res, err := c.exec(ctx, "kill-session", "-t", "="+name)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		if strings.Contains(strings.ToLower(string(res.Stderr)), "can't find session") {
+			return nil
+		}
+		return fmt.Errorf("tmux kill-session exited %d: %s",
+			res.ExitCode, bytes.TrimSpace(res.Stderr))
+	}
+	return nil
+}

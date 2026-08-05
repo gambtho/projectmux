@@ -292,3 +292,22 @@ func TestIntegrationCreateSessionNameEndingInSemicolon(t *testing.T) {
 		t.Fatalf("observed = %+v, want one session named \"slab;\" with matching identity", live)
 	}
 }
+
+func TestKillSessionSuccessAndIdempotency(t *testing.T) {
+	fakeTmux(t, "#!/bin/sh\nexit 0\n")
+	if err := (&Client{}).KillSession(context.Background(), "slab"); err != nil {
+		t.Fatalf("KillSession: %v", err)
+	}
+
+	// A session that vanished first is success: stop is idempotent and
+	// the goal state holds (verified tmux error shape).
+	fakeTmux(t, "#!/bin/sh\necho \"can't find session: slab\" 1>&2\nexit 1\n")
+	if err := (&Client{}).KillSession(context.Background(), "slab"); err != nil {
+		t.Fatalf("vanished-session kill = %v, want nil", err)
+	}
+
+	fakeTmux(t, "#!/bin/sh\necho 'server broke' 1>&2\nexit 1\n")
+	if err := (&Client{}).KillSession(context.Background(), "slab"); err == nil {
+		t.Fatal("an unrecognized kill failure was swallowed")
+	}
+}
