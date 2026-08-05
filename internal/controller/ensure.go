@@ -157,6 +157,7 @@ func (c *Controller) createSession(ctx context.Context, d Desired, windows []Win
 	// so only the observed shape below proves the creation.
 	confirm, err := c.Observe(ctx, d)
 	if err != nil {
+		c.recordFailure(id, "confirming the created session: "+err.Error())
 		return EnsureResult{}, err
 	}
 	if reason := confirmCreation(confirm, d, name); reason != "" {

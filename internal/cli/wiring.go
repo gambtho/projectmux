@@ -163,7 +163,16 @@ func (hostOnlyContainerObserver) DiscoverContainer(_ context.Context, ws resolve
 	// container applies exactly when a devcontainer configuration
 	// exists on disk.
 	for _, p := range devcontainerConfigPaths(ws.Worktree, cfg) {
-		if _, err := os.Stat(p); err == nil {
+		_, err := os.Stat(p)
+		switch {
+		case err == nil:
+			return nil, errUnprobed
+		case os.IsNotExist(err):
+			continue
+		default:
+			// An unreadable path (e.g. EACCES) is uncertainty, not absence:
+			// funnel it into the same unsupported path rather than silently
+			// treating "could not tell" as "no container applies".
 			return nil, errUnprobed
 		}
 	}

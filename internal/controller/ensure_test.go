@@ -319,6 +319,40 @@ func TestEnsurePostCreateConfirmationRejects(t *testing.T) {
 	}
 }
 
+// workspaceFailsOnCall wraps a *fake.Store and makes exactly its Nth
+// Workspace call fail with a non-ErrNotFound error, so Observe's own
+// "reading stored state" error return (as opposed to session/container
+// uncertainty) can be exercised deterministically: the post-create
+// confirmation Observe is the store's second Workspace call in an
+// Ensure that creates.
+type workspaceFailsOnCall struct {
+	*fake.Store
+	failOnCall int
+	calls      int
+}
+
+func (s *workspaceFailsOnCall) Workspace(id string) (state.Record, error) {
+	s.calls++
+	if s.calls == s.failOnCall {
+		return state.Record{}, errors.New("store read failed")
+	}
+	return s.Store.Workspace(id)
+}
+
+func TestEnsurePostCreateConfirmationObserveErrorIsRecorded(t *testing.T) {
+	r := newEnsureRig(t, absentStep(), absentStep())
+	store := &workspaceFailsOnCall{Store: r.store, failOnCall: 2}
+	r.ctrl.Store = store
+
+	_, err := r.ensure(t, ensureDesired())
+	if err == nil {
+		t.Fatal("Ensure succeeded despite a failing confirmation Observe")
+	}
+	if op := lastOp(t, r.store, "w1"); op == nil || op.Outcome != state.OutcomeFailed {
+		t.Errorf("last operation = %+v, want open/failed", op)
+	}
+}
+
 func TestEnsureConvergesAfterCrashBetweenCreateAndCommit(t *testing.T) {
 	r := newEnsureRig(t, absentStep(), absentStep(), absentStep())
 	if _, err := r.ensure(t, ensureDesired()); err == nil {

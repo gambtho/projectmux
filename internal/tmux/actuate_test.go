@@ -67,6 +67,50 @@ func TestCreateArgvShellWindowHasNoCommand(t *testing.T) {
 	}
 }
 
+func TestEscapeChainArg(t *testing.T) {
+	cases := map[string]string{
+		"plain":      "plain",
+		"trailing;":  `trailing\;`,
+		`trailing\;`: `trailing\\;`,
+		`trailing\`:  `trailing\`,
+		`trailing\\`: `trailing\\`,
+		";":          `\;`,
+		"mid;dle":    "mid;dle",
+		"":           "",
+	}
+	for in, want := range cases {
+		if got := escapeChainArg(in); got != want {
+			t.Errorf("escapeChainArg(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCreateArgvEscapesTrailingSemicolons(t *testing.T) {
+	spec := actuateSpec()
+	spec.Env = map[string]string{"KEY": "value;"}
+	spec.Windows[0].Command = "run;"
+	spec.Windows[0].Dir = "/w/slab;"
+	spec.Windows[0].Name = "agent1;"
+	argv := createArgv(spec)
+
+	want := []string{
+		"-n", `agent1\;`,
+		"-c", `/w/slab\;`,
+	}
+	joined := strings.Join(argv, " ")
+	for i := 0; i < len(want); i += 2 {
+		if !strings.Contains(joined, want[i]+" "+want[i+1]) {
+			t.Errorf("argv %q missing %q %q", joined, want[i], want[i+1])
+		}
+	}
+	if !strings.Contains(joined, `-e KEY=value\;`) {
+		t.Errorf("argv %q missing escaped env value", joined)
+	}
+	if !strings.Contains(joined, `run\;`) {
+		t.Errorf("argv %q missing escaped window command", joined)
+	}
+}
+
 func TestCreateSessionRejectsZeroWindows(t *testing.T) {
 	c := &Client{}
 	err := c.CreateSession(context.Background(), controller.SessionSpec{Name: "x"})
@@ -140,4 +184,47 @@ func TestIntegrationCreateSession(t *testing.T) {
 		exec.Command("sleep", "0.1").Run()
 	}
 	t.Error("PROJECTMUX_TEST_ENV did not reach the first window's pane")
+}
+
+// TestIntegrationCreateSessionEnvValueEndingInSemicolon proves the
+// escapeChainArg fix on real tmux: an env value ending in ";" must reach
+// the pane byte-for-byte rather than being silently truncated by tmux's
+// chained-command parser (open/attach spec §4).
+func TestIntegrationCreateSessionEnvValueEndingInSemicolon(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	socket := fmt.Sprintf("projectmux-actuate-semi-%d", os.Getpid())
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	})
+
+	dir := t.TempDir()
+	spec := controller.SessionSpec{
+		Name:        "slab",
+		WorkspaceID: "w1",
+		Slug:        "proj",
+		Worktree:    dir,
+		Env:         map[string]string{"PROJECTMUX_TEST_ENV": "visible;"},
+		Windows:     []controller.WindowSpec{{Name: "first", Dir: dir, Focus: true}},
+	}
+	c := &Client{Socket: socket}
+	if err := c.CreateSession(context.Background(), spec); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	if err := exec.Command("tmux", "-L", socket, "send-keys", "-t", "slab:first",
+		"printf 'ENVRESULT=%s\\n' \"$PROJECTMUX_TEST_ENV\"", "Enter").Run(); err != nil {
+		t.Fatalf("send-keys: %v", err)
+	}
+	deadline := 50
+	for i := 0; i < deadline; i++ {
+		out, err := exec.Command("tmux", "-L", socket, "capture-pane", "-p",
+			"-t", "slab:first").Output()
+		if err == nil && strings.Contains(string(out), "ENVRESULT=visible;") {
+			return
+		}
+		exec.Command("sleep", "0.1").Run()
+	}
+	t.Error("env value ending in ';' did not reach the pane verbatim")
 }

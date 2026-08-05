@@ -206,6 +206,32 @@ func TestHostOnlyContainerObserver(t *testing.T) {
 	}
 }
 
+func TestHostOnlyContainerObserverUnreadableParentIsUnprobed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions; the exclusion cannot be exercised")
+	}
+	observer := hostOnlyContainerObserver{}
+	parent := t.TempDir()
+	worktree := filepath.Join(parent, "worktree")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+
+	ws := resolve.Workspace{ID: "w1", Worktree: worktree}
+	auto := config.Config{DevContainer: config.DevContainer{Enabled: "auto"}}
+	obs, err := observer.DiscoverContainer(context.Background(), ws, auto)
+	if err == nil {
+		t.Fatalf("DiscoverContainer over an unreadable parent = (%v, nil), want errUnprobed", obs)
+	}
+	if !errors.Is(err, errUnprobed) {
+		t.Errorf("err = %v, want errUnprobed", err)
+	}
+}
+
 func TestAttachTerminalChoosesByTmuxEnv(t *testing.T) {
 	var execCalls, switchCalls []string
 	origExec, origSwitch, origInside := execAttach, switchClient, insideTmux
