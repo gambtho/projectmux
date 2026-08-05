@@ -16,6 +16,11 @@ import (
 // break out of the shell word the hook builds.
 var windowNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
+// numericWindowName rejects fully numeric names: tmux resolves a numeric
+// token in a target as a window index before a window name, so a window
+// literally named "3" can make focus land on the wrong window.
+var numericWindowName = regexp.MustCompile(`^[0-9]+$`)
+
 // validate returns every problem in the effective configuration. The layer is
 // needed alongside the normalized config to tell an omitted version from an
 // unsupported one.
@@ -57,6 +62,10 @@ func validate(l Layer, cfg Config) []string {
 	var focused []string
 	for _, w := range cfg.Windows {
 		problems = append(problems, validateWindow(w)...)
+		if cfg.DevContainer.Enabled == "false" && w.Location != nil && *w.Location == "container" {
+			problems = append(problems, fmt.Sprintf(
+				"window %q sets location: container but devcontainer.enabled is false", w.Name))
+		}
 		if w.Focus {
 			focused = append(focused, w.Name)
 		}
@@ -74,6 +83,10 @@ func validateWindow(w Window) []string {
 	if !windowNamePattern.MatchString(w.Name) {
 		problems = append(problems, fmt.Sprintf(
 			"window %q has an invalid name; use characters from [A-Za-z0-9._-]", w.Name))
+	}
+	if numericWindowName.MatchString(w.Name) {
+		problems = append(problems, fmt.Sprintf(
+			"window %q has a fully numeric name, which tmux treats as a window index; include a non-digit", w.Name))
 	}
 
 	var modes []string
