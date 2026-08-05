@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/gambtho/projectmux/internal/config"
+	"github.com/gambtho/projectmux/internal/controller"
 	"github.com/gambtho/projectmux/internal/resolve"
 )
 
@@ -27,6 +28,7 @@ const (
 	ExitAmbiguous        = 3 // a workspace name matched more than one worktree
 	ExitUnknownWorkspace = 4
 	ExitInvalidConfig    = 5
+	ExitRefused          = 6 // the plan refused: conflict or uncertainty, do not blindly retry
 )
 
 // version is overridden at release time with -ldflags "-X ...cli.version=v1.2.3".
@@ -113,6 +115,7 @@ func exitCode(err error) int {
 		ambiguous  *resolve.AmbiguousError
 		unknown    *resolve.UnknownWorkspaceError
 		invalidCfg *config.InvalidConfigError
+		refusal    *controller.RefusalError
 	)
 	switch {
 	case errors.As(err, &usageErr):
@@ -123,6 +126,8 @@ func exitCode(err error) int {
 		return ExitUnknownWorkspace
 	case errors.As(err, &invalidCfg):
 		return ExitInvalidConfig
+	case errors.As(err, &refusal):
+		return ExitRefused
 	default:
 		return ExitError
 	}
