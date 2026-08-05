@@ -386,7 +386,7 @@ func (c *Controller) createSession(ctx context.Context, d Desired, windows []Win
 	if err := c.Store.CommitReconciliation(id, state.ReconciliationResult{
 		AppliedDigest: &digest,
 		Container:     toStateObservation(containerObs),
-		Operation:     state.Operation{Name: "open", Outcome: state.OutcomeOK},
+		Operation:     state.Operation{Name: opName, Outcome: state.OutcomeOK},
 	}, c.Clock.Now()); err != nil {
 		c.recordFailure(id, opName, "committing the reconciliation: "+err.Error())
 		return EnsureResult{}, fmt.Errorf("committing the reconciliation: %w", err)

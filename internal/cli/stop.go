@@ -129,10 +129,6 @@ func runStop(ctx context.Context, args []string, stdout io.Writer) error {
 			Stopped:     res.ContainerStopped,
 			ContainerID: res.ContainerID,
 		}
-		if !res.ContainerStopped && env.Container.ContainerID == "" && stopErr == nil {
-			// No binding existed; report the no-op shape.
-			env.Container.ContainerID = ""
-		}
 	}
 	if stopErr != nil {
 		env.Error = stopErr.Error()
