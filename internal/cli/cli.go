@@ -47,6 +47,8 @@ commands:
         attach to the live workspace session; never creates one
   stop [--container] [--json] [--compact] [<workspace>]
         end the workspace session, and with --container its container
+  autostart [--json] [--compact]
+        start containers for registered primary worktrees with autostart: true
   config [--json] [--compact] [<workspace>]
         print the normalized, merged configuration for a workspace
   list [--json] [--compact]
@@ -125,6 +127,8 @@ func dispatch(ctx context.Context, args []string, stdout io.Writer) error {
 		return runAttach(ctx, rest, stdout)
 	case "stop":
 		return runStop(ctx, rest, stdout)
+	case "autostart":
+		return runAutostart(ctx, rest, stdout)
 	case "config":
 		return runConfig(rest, stdout)
 	case "list":
