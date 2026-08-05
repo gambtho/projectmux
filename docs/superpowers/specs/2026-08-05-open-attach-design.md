@@ -53,7 +53,12 @@ Observes and attaches only; it never creates and never mutates: no
 operation lock (§9 — observation-only commands do not take it) and no
 store writes. It targets only the identity-matched session.
 
-- Live matching session → attach (or `--json`: report without attaching).
+- Live matching session → attach. `--json` implies no attach and emits a
+  versioned envelope (JSON structure is a public contract):
+  `{"schema_version": 1, "workspace": <the config command's workspace
+  block>, "session": {"state", "name", "identity"}}`, with `session`
+  using the `status` command's shape (name and identity verdict present
+  only for live states).
 - Confirmed absent → error "no live session for this workspace; run
   `projectmux open`", exit 1.
 - Unobservable tmux → refusal, exit 6: attach cannot know, and does not
@@ -108,8 +113,9 @@ type SessionSpec struct {
 	Name        string
 	WorkspaceID string
 	Slug        string
-	Worktree    string // also the default window dir
-	Windows     []WindowSpec // at least one
+	Worktree    string            // also the default window dir
+	Env         map[string]string // config.Environment, applied to every window
+	Windows     []WindowSpec      // at least one (derivation guarantees it)
 }
 
 type SessionActuator interface {
@@ -119,20 +125,47 @@ type SessionActuator interface {
 
 - `CreateSession` issues **one** tmux invocation with chained commands
   (verified on tmux 3.4): `new-session -d -s <name> -c <dir> -n <first>
-  [cmd] \; set-option @dev_workspace_id … \; set-option @dev_slug … \;
-  set-option @dev_worktree … \; new-window … \; select-window …`. One
-  subprocess makes creation-with-identity near-atomic, closing most of
-  the window in which a concurrent observer could see a keyless session.
+  [-e K=V …] [cmd] \; set-option @dev_workspace_id … \; set-option
+  @dev_slug … \; set-option @dev_worktree … \; new-window -d [-e …] … \;
+  select-window …`. One subprocess makes creation-with-identity
+  near-atomic, closing most of the window in which a concurrent observer
+  could see a keyless session.
+- **Environment is part of desired configuration and must be applied**
+  (it is inside the digested document): every `Env` entry is passed as
+  `-e KEY=VALUE` to `new-session` **and** to every `new-window`, in
+  sorted key order for deterministic argv. `-e` on both commands is
+  verified on tmux 3.4 to reach the panes; chaining `set-environment`
+  instead would miss the first window, which `new-session` itself
+  creates. The applied digest is recorded only when the whole document —
+  windows and environment — was actuated.
+- Later windows are created with `-d` so the active window is not
+  stolen; `select-window` runs only for an explicitly focused window.
+  With no focused window, the first window stays active (tmux `-d`
+  behavior, verified).
 - Window commands are passed as tmux's shell-command argument — tmux runs
   them in the pane's default shell; projectmux itself never interpolates
   into a shell (design §11). A window whose command exits immediately
   closes; that is tmux semantics, documented, not fought — agent and
   command windows are long-running by design.
-- `WindowSpec` is derived in the CLI wiring from `config.Window`: `agent`
-  and `command` become the command string; `shell: true` an empty one;
-  relative `cwd` joins the worktree (already validated non-escaping);
-  exactly one merged window carries focus (validation guarantees it).
-  `location: container` never reaches the actuator this slice (§6).
+- **`WindowSpec` derivation** (CLI wiring, from `config.Window`), run
+  before any lock or mutation:
+  - `agent` and `command` become the command string; `shell: true` an
+    empty one; relative `cwd` joins the worktree (already validated
+    non-escaping).
+  - **Zero configured windows is valid configuration** (validation
+    permits it): derivation supplies one implicit `shell` window, so
+    `SessionSpec.Windows` is never empty and open behaves like a plain
+    `tmux new-session`.
+  - Validation enforces **at most** one focused window, not exactly one:
+    with none marked, the first window is the active one (see above).
+  - **Any window with explicit `location: container` fails derivation**
+    with the typed capability error (§6): the configuration is valid —
+    location is resolved against the container binding, which this build
+    cannot provide — but actuating it on the host would silently violate
+    the user's stated intent. Nothing is locked, mutated, or recorded;
+    exit 1. `location: host` and unset locations actuate on the host
+    (unset means "container when one exists", and none can exist this
+    slice).
 
 ## 5. `Ensure` — the §9 loop
 
@@ -166,20 +199,43 @@ Order of operations, all under the workspace lock:
    before any mutation (exit 1). Capability-shaped: the container slice
    plugs in an actuator; `Ensure` does not change.
 7. **Names are resolved per action, never pre-allocated:**
-   - `create`: `AllocateSessionName` (UNIQUE constraint is the collision
-     mechanism) → `CreateSession` with identity keys and windows →
-     re-observe → commit `CommitReconciliation{AppliedDigest: &digest,
-     Operation: open/ok}`. The applied digest is recorded only here —
-     creation is the only moment configuration is fully applied.
+   - `create`:
+     1. `AllocateSessionName` (the UNIQUE constraint is the collision
+        mechanism). An allocation failure records `open`/`failed` and
+        returns the error.
+     2. **Allocated-name squat check:** the initial observation only
+        queried the proposed and previously recorded names, but
+        allocation may return a suffixed variant (`slug-2`, …) a foreign
+        live session could hold. Re-observe with the allocated name as
+        the only candidate; any occupant (the workspace has no live
+        session — the plan said `create`) records `open`/`failed` with
+        the refusal text and returns a `RefusalError` (exit 6), matching
+        the plan's foreign-occupant promise. The allocated name stays
+        recorded — a benign reservation; later `open`s reuse it and keep
+        refusing until the squatter is resolved.
+     3. `CreateSession` with identity keys, environment, and windows. A
+        creation failure records `open`/`failed` (bounded stderr summary)
+        and returns the error.
+     4. **Post-create confirmation** — `Observe` reports failures as
+        snapshot uncertainty, never as its error return, so checking
+        `err` proves nothing. Creation is confirmed only when the
+        re-observation shows session state **live**, with an
+        identity-matched session agreeing on **all three keys**, whose
+        name equals the **allocated** name. Anything else — `unknown`,
+        `absent`, or a contradictory/mismatched session — commits
+        `open`/`failed` naming the actual outcome and returns a typed
+        error. The next `open` recovers by adopting via the identity
+        keys (§9 crash recovery; the same path covers a crash between
+        create and commit). All three failure shapes are tested.
+     5. Confirmed: commit `CommitReconciliation{AppliedDigest: &digest,
+        Operation: open/ok}`. The applied digest is recorded only here —
+        creation is the only moment the whole desired document (windows
+        **and** environment) was actuated.
    - `adopt`: `AdoptSessionName(id, liveName)` records the observed name
      (includes live Phase-1 Bash sessions — §13 step 7). No applied
      digest: adoption applies nothing, so drift stays honest. Commit
      operation `open`/`ok`.
    - `none`: commit operation `open`/`ok`.
-8. Post-create re-observation failing (created but unconfirmable) commits
-   `open`/`failed` with the observation error and returns it — the next
-   `open` adopts via the identity keys (§9 crash recovery; the same path
-   recovers a crash between create and commit).
 
 `attach` never calls `Ensure`.
 
@@ -241,16 +297,25 @@ re-registration and rebuild flows reuse it.
   changed), no-op re-adoption, `ErrNotFound` for unregistered workspaces.
 - **`internal/controller`:** table-driven `Ensure` over plan outcomes
   with fakes (a new `fake.SessionActuator` recording specs): create
-  commits applied digest + ok; adopt records the live name and no
-  digest; none commits ok; refuse records failed and mutates nothing
-  (actuator sees zero calls); container gate fires before any actuator
-  call; post-create observation failure commits failed and the next
-  Ensure adopts (crash-window recovery); lock held across observe →
-  mutate → commit (fake lock dir; second Ensure blocks).
-- **`internal/tmux`:** real-tmux integration on isolated sockets:
+  commits applied digest + ok and the actuated spec carries the full
+  environment; adopt records the live name and no digest; none commits
+  ok; refuse records failed and mutates nothing (actuator sees zero
+  calls); container gate fires before any actuator call; the
+  allocated-name squat check refuses (exit 6) when a foreign session
+  holds the suffixed allocation; allocation and creation failures record
+  failed operations; post-create confirmation rejects **each** of
+  unknown, absent, and contradictory/mismatched observations (failed op,
+  typed error), and the next Ensure adopts after a simulated crash
+  between create and commit; lock held across observe → mutate → commit
+  (fake lock dir; second Ensure blocks).
+- **`internal/tmux`:** unit tests assert the chained argv shape,
+  including sorted `-e KEY=VALUE` pairs on `new-session` and every
+  `new-window`, `-d` on later windows, and `select-window` only for an
+  explicit focus. Real-tmux integration on isolated sockets:
   `CreateSession` yields the session with identity keys, named windows,
-  working dirs, and focus (verified via the existing observer); the
-  chained single-invocation form is exercised end to end.
+  working dirs, focus, and environment visible in panes (send-keys /
+  capture-pane smoke); the chained single-invocation form is exercised
+  end to end.
 - **`internal/cli`:** `open --json`/`--no-attach` envelopes and exit
   codes (0, 4 for unknown workspace, 6 for refusal, 2 for bare-form flag
   misuse); bare-workspace dispatch; attach's never-creates guarantee
@@ -290,6 +355,26 @@ workspace deletion. Store API grows only `AdoptSessionName`.
 - `AdoptSessionName` conflicts are refusals, never overwrites.
 - Session creation is one chained tmux invocation (verified on 3.4),
   making creation-with-identity near-atomic.
+- Configured environment is applied via `-e KEY=VALUE` on `new-session`
+  and every `new-window` (verified on 3.4; chained `set-environment`
+  would miss the first window). The applied digest asserts the whole
+  document — windows and environment — was actuated.
+- Zero configured windows derive one implicit `shell` window; with no
+  explicitly focused window the first stays active (`new-window -d`,
+  `select-window` only on explicit focus). Validation's actual
+  guarantees (zero windows valid, at most one focus) are honored, not
+  assumed away.
+- Explicit `location: container` windows fail derivation with the typed
+  capability error before any lock or mutation — actuating them on the
+  host would silently violate stated intent; unset location means
+  "container when one exists" and actuates on the host this slice.
+- Creation is confirmed only by a live, three-key identity-matched
+  session under the allocated name; unknown, absent, and contradictory
+  re-observations each record a failed operation and return typed
+  errors.
+- The allocated name is re-checked against live tmux before creation;
+  a foreign holder of a suffixed allocation is a refusal (exit 6), and
+  the stored allocation stands as a benign reservation.
 - Window commands are tmux shell-command arguments; a fast-exiting
   command closes its window (tmux semantics, documented).
 - Exit 6 (`ExitRefused`) is additive; refused opens record a failed
