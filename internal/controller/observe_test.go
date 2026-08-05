@@ -198,6 +198,24 @@ func TestObserveSkipsContainersWhenDisabled(t *testing.T) {
 	}
 }
 
+// TestObserveSkipsContainersWhenUnnormalized is the zero-value gate: an
+// unnormalized config.Config leaves Enabled as "", which must read as
+// disabled, not as "auto" (design §9 discovery would otherwise run on
+// every hand-built or partially-loaded config).
+func TestObserveSkipsContainersWhenUnnormalized(t *testing.T) {
+	d := newDeps()
+	snap, err := d.ctrl.Observe(context.Background(), testDesired(""))
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if snap.Container.Observed != nil {
+		t.Errorf("container snapshot = %+v, want none for an unnormalized config", snap.Container)
+	}
+	if len(d.containers.Probed)+len(d.containers.Discovered) != 0 {
+		t.Error("no container observation should run when enabled is the zero value")
+	}
+}
+
 // TestContainerProbeFailureIsUnknownNotLoss is the design-§9 gate.
 func TestContainerProbeFailureIsUnknownNotLoss(t *testing.T) {
 	d := newDeps()

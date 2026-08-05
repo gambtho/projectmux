@@ -8,6 +8,8 @@ package fake
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -187,7 +189,9 @@ func (s *Store) recordOperationLocked(workspaceID string, op state.Operation, no
 	}
 	op.FinishedAt = now
 	if len(op.ErrorSummary) > state.MaxErrorSummaryBytes {
-		op.ErrorSummary = op.ErrorSummary[:state.MaxErrorSummaryBytes]
+		// Mirror the real store's boundedSummary (internal/state/store.go):
+		// trim to the byte bound, then drop any rune split by the cut.
+		op.ErrorSummary = strings.ToValidUTF8(op.ErrorSummary[:state.MaxErrorSummaryBytes], "")
 	}
 	rec.LastOperation = &op
 	return nil
@@ -227,6 +231,8 @@ func (s *Store) Workspace(id string) (state.Record, error) {
 	return copyRecord(rec), nil
 }
 
+// Workspaces returns every registered workspace ordered by slug, then
+// worktree, mirroring the real store's ORDER BY (internal/state/store.go).
 func (s *Store) Workspaces() ([]state.Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -234,11 +240,29 @@ func (s *Store) Workspaces() ([]state.Record, error) {
 	for _, rec := range s.records {
 		out = append(out, copyRecord(rec))
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Slug != out[j].Slug {
+			return out[i].Slug < out[j].Slug
+		}
+		return out[i].Worktree < out[j].Worktree
+	})
 	return out, nil
 }
 
 func copyRecord(rec *state.Record) state.Record {
 	out := *rec
+	if rec.ActualSession != nil {
+		v := *rec.ActualSession
+		out.ActualSession = &v
+	}
+	if rec.DesiredDigest != nil {
+		v := *rec.DesiredDigest
+		out.DesiredDigest = &v
+	}
+	if rec.AppliedDigest != nil {
+		v := *rec.AppliedDigest
+		out.AppliedDigest = &v
+	}
 	if rec.Container != nil {
 		c := *rec.Container
 		out.Container = &c

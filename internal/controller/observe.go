@@ -98,7 +98,9 @@ func (c *Controller) Observe(ctx context.Context, d Desired) (Snapshot, error) {
 }
 
 func (c *Controller) observeContainer(ctx context.Context, d Desired, stored *state.Record) ContainerSnapshot {
-	if d.Config.DevContainer.Enabled == "false" {
+	// Observe only on "auto" or "true"; anything else — including "false"
+	// and the unnormalized zero value "" — is treated as disabled.
+	if d.Config.DevContainer.Enabled != "auto" && d.Config.DevContainer.Enabled != "true" {
 		return ContainerSnapshot{}
 	}
 	if stored != nil && stored.Container != nil {

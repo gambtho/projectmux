@@ -88,6 +88,12 @@ func refusalFor(snap Snapshot) string {
 			"session %q exists but does not belong to this workspace; refusing to adopt or rename it",
 			occupant.Name)
 	}
+	// A live state with no identity-matched session is an inconsistent
+	// snapshot (it should never occur from Observe, but callers may build
+	// one by hand): refuse rather than dereference a nil session.
+	if snap.Session.State == SessionLive && snap.Session.ByIdentity == nil {
+		return "session state is live but no identity-matched session was observed; refusing to act on an inconsistent snapshot"
+	}
 	return ""
 }
 

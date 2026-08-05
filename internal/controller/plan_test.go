@@ -175,6 +175,40 @@ func TestPlanTable(t *testing.T) {
 			},
 		},
 		{
+			// A stored record naming a different actual session than the
+			// live identity-matched session means the record is stale
+			// (e.g. crash recovery); adopt the live session and let
+			// execution repair the record.
+			name: "live with a stored record naming a different session adopts",
+			mutate: func(s *controller.Snapshot) {
+				s.Stored = storedRecord(stringPtr("slabledger-old"), stringPtr("sha256:desired"))
+				s.Session = controller.SessionSnapshot{
+					State:      controller.SessionLive,
+					ByIdentity: ourLiveSession(),
+					ByName:     []controller.LiveSession{*ourLiveSession()},
+				}
+			},
+			want: controller.Plan{
+				Session:    controller.SessionActionAdopt,
+				RecordName: false,
+				Container:  controller.ContainerActionNone,
+				Reapply:    false,
+			},
+		},
+		{
+			// A hand-built Snapshot can claim SessionLive without an
+			// identity-matched session; sessionActionForLive must not be
+			// reached, or it panics dereferencing a nil ByIdentity.
+			name: "live state with no identity-matched session refuses",
+			mutate: func(s *controller.Snapshot) {
+				s.Session = controller.SessionSnapshot{State: controller.SessionLive}
+			},
+			want: controller.Plan{
+				Session:   controller.SessionActionRefuse,
+				Container: controller.ContainerActionNone,
+			},
+		},
+		{
 			name: "digest drift on a live recorded session plans reapply",
 			mutate: func(s *controller.Snapshot) {
 				s.Stored = storedRecord(stringPtr("slabledger"), stringPtr("sha256:stale"))

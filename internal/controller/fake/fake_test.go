@@ -66,6 +66,46 @@ func TestFakeStoreMirrorsAllocationAndRetention(t *testing.T) {
 	}
 }
 
+// TestFakeStoreWorkspacesOrdersBySlugThenWorktree mirrors the real store's
+// ORDER BY w.slug, w.worktree (internal/state/store.go): the fake iterates a
+// map, so without an explicit sort the order would be nondeterministic.
+func TestFakeStoreWorkspacesOrdersBySlugThenWorktree(t *testing.T) {
+	s := NewStore()
+	register := func(id, slug, worktree string) {
+		t.Helper()
+		ws := resolve.Workspace{
+			ID: id, Slug: slug, Worktree: worktree,
+			SessionName: id, IsPrimary: true,
+		}
+		if err := s.RegisterWorkspace(ws, "sha256:a", testTime); err != nil {
+			t.Fatalf("register %s: %v", id, err)
+		}
+	}
+	// Registered out of order so a map-iteration bug would show up.
+	register("w3", "zeta", "/w/zeta")
+	register("w1", "alpha", "/w/b")
+	register("w2", "alpha", "/w/a")
+
+	recs, err := s.Workspaces()
+	if err != nil {
+		t.Fatalf("workspaces: %v", err)
+	}
+	var got []string
+	for _, r := range recs {
+		got = append(got, r.ID)
+	}
+	want := []string{"w2", "w1", "w3"}
+	if len(got) != len(want) {
+		t.Fatalf("workspaces = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("workspaces = %v, want %v ordered by (slug, worktree)", got, want)
+			break
+		}
+	}
+}
+
 func TestFakeStoreCommitReconciliationRespectsNilDigest(t *testing.T) {
 	s := NewStore()
 	if err := s.RegisterWorkspace(testWorkspace("w1", "slab"), "sha256:a", testTime); err != nil {

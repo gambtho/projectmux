@@ -50,7 +50,7 @@ Existing packages are unchanged except as inputs: `controller` consumes
 
 ## 3. Schema (migration 0001)
 
-Timestamps are RFC3339 UTC text supplied by the caller (the controller owns
+Timestamps are RFC3339Nano UTC text supplied by the caller (the controller owns
 the clock), never `CURRENT_TIMESTAMP`.
 
 ```sql
@@ -264,8 +264,8 @@ migration from the Bash implementation.
   composite `CommitReconciliation` covers §9 step 5.
 - `PRAGMA user_version` + embedded ordered SQL files for migrations; too-new
   databases are refused, never repaired.
-- Timestamps injected by callers (controller clock), stored as RFC3339 UTC
-  text.
+- Timestamps injected by callers (controller clock), stored as RFC3339Nano
+  UTC text.
 - Error summaries bounded at 4096 bytes in the store.
 - Fakes live in the exported `internal/controller/fake` package for reuse by
   the next slice.
