@@ -172,12 +172,16 @@ type SessionQuery struct {
 // whatever identity keys they carry, possibly none).
 
 type ContainerObserver interface {
-    // ProbeContainer checks the liveness of an existing binding.
+    // ProbeContainer checks the liveness of an existing binding. A binding
+    // always applies, so the observation is a value.
     ProbeContainer(ctx context.Context, binding state.ContainerBinding) (ContainerObservation, error)
     // DiscoverContainer looks for a container for a workspace with no stored
     // binding — post-rebuild reacquisition and devcontainer.enabled: auto
     // resolution both need the workspace and its effective configuration.
-    DiscoverContainer(ctx context.Context, ws resolve.Workspace, cfg config.Config) (ContainerObservation, error)
+    // A nil observation with a nil error means no container applies to this
+    // workspace (auto resolved to none); Observe then treats the workspace
+    // exactly like enabled: false.
+    DiscoverContainer(ctx context.Context, ws resolve.Workspace, cfg config.Config) (*ContainerObservation, error)
 }
 
 type Clock interface{ Now() time.Time }
@@ -210,7 +214,13 @@ tri-state: `live`/`absent`/`unknown` and `present`/`missing`/`unknown`.
   a live session occupying a candidate name whose identity keys contradict
   the workspace (or that carries no identity keys) plans `refuse` with a
   typed explanation, never silent adoption or renaming (design §7's
-  cross-workspace guard).
+  cross-workspace guard). Identity comparison covers **all three** keys —
+  workspace ID, slug, and worktree — for both the identity-matched session
+  and name occupants; any contradiction refuses.
+- **Refusal is global:** a refusing plan carries no mutating action of any
+  kind — container action `none`, record-name and reapply flags false — so
+  the execution slice may act on any non-refusing plan field without
+  re-checking session state.
 
 Execution of plans (`ensure`/`stop`), the per-workspace filesystem lock, and
 real adapters are later slices.
@@ -271,3 +281,9 @@ migration from the Bash implementation.
   inside the transaction; concurrent `Open` is tested.
 - `CommitReconciliation.AppliedDigest` is optional; failure never clears
   drift.
+- `DiscoverContainer` returns a nil observation to mean "no container
+  applies" (`auto` resolved to none), planned identically to
+  `enabled: false`.
+- Plan refusal is global: a refusing plan carries no mutating actions.
+- Session identity comparison covers all three keys (ID, slug, worktree);
+  any contradiction refuses, including on the identity-matched session.

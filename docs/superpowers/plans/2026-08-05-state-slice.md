@@ -27,20 +27,16 @@
 **Files:**
 - Create: `internal/state/state.go`
 - Create: `internal/state/state_test.go`
-- Modify: `go.mod`, `go.sum` (via `go get`)
 
 **Interfaces:**
 - Consumes: nothing from this repo.
 - Produces: `state.Root() (string, error)` — later tasks and future CLI slices call it; `PROJECTMUX_STATE_ROOT` override, then `$XDG_STATE_HOME/projectmux`, then `~/.local/state/projectmux`. Mirrors `config.Root()` (internal/config/load.go:19).
 
-- [ ] **Step 1: Add the driver dependency**
+The `modernc.org/sqlite` dependency is deliberately NOT added here: `go mod
+tidy` would prune it while no source imports it yet. Task 2 adds it together
+with the first import.
 
-```bash
-go get modernc.org/sqlite@v1.56.0
-go mod tidy
-```
-
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 1: Write the failing test**
 
 Create `internal/state/state_test.go`:
 
@@ -84,12 +80,12 @@ func TestRootPrefersExplicitOverrideThenXDG(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run the test to verify it fails**
+- [ ] **Step 2: Run the test to verify it fails**
 
 Run: `go test ./internal/state/ -run TestRoot -v`
 Expected: FAIL (package does not exist / `Root` undefined).
 
-- [ ] **Step 4: Implement `Root`**
+- [ ] **Step 3: Implement `Root`**
 
 Create `internal/state/state.go`:
 
@@ -124,17 +120,17 @@ func Root() (string, error) {
 }
 ```
 
-- [ ] **Step 5: Run the test to verify it passes**
+- [ ] **Step 4: Run the test to verify it passes**
 
 Run: `go test ./internal/state/ -run TestRoot -v`
 Expected: PASS.
 
-- [ ] **Step 6: Gates and commit**
+- [ ] **Step 5: Gates and commit**
 
 ```bash
 gofmt -l . && go vet ./... && go test ./... -count=1 -race
-git add go.mod go.sum internal/state/
-git commit -m "feat: add the state package root resolution and the sqlite driver"
+git add internal/state/
+git commit -m "feat: add the state package root resolution"
 ```
 
 ---
@@ -146,6 +142,7 @@ git commit -m "feat: add the state package root resolution and the sqlite driver
 - Create: `internal/state/migrate.go`
 - Modify: `internal/state/state.go` (add `Store`, `Open`, `Close`)
 - Create: `internal/state/migrate_test.go`
+- Modify: `go.mod`, `go.sum` (via `go get modernc.org/sqlite@v1.56.0` in Step 5)
 
 **Interfaces:**
 - Consumes: `Root` semantics from Task 1 (tests use `t.TempDir()` directly).
@@ -439,7 +436,14 @@ func applyNext(db *sql.DB) (done bool, err error) {
 }
 ```
 
-- [ ] **Step 5: Implement `Store`, `Open`, `Close`**
+- [ ] **Step 5: Add the driver dependency and implement `Store`, `Open`, `Close`**
+
+First add the dependency (now that this step introduces the import that
+keeps it in `go.mod`):
+
+```bash
+go get modernc.org/sqlite@v1.56.0
+```
 
 Append to `internal/state/state.go` (add `"database/sql"` and the blank driver import `_ "modernc.org/sqlite"` to the import block):
 
@@ -489,8 +493,8 @@ Expected: all PASS, including the concurrent-open and per-connection pragma test
 - [ ] **Step 7: Gates and commit**
 
 ```bash
-gofmt -l . && go vet ./... && go test ./... -count=1 -race
-git add internal/state/
+go mod tidy && gofmt -l . && go vet ./... && go test ./... -count=1 -race
+git add go.mod go.sum internal/state/
 git commit -m "feat: open the state database with schema 0001 and serialized migrations"
 ```
 
@@ -1722,9 +1726,14 @@ type SessionObserver interface {
 // ContainerObserver probes an existing binding or discovers a container
 // for a workspace that has none — post-rebuild reacquisition and
 // devcontainer.enabled "auto" both need the workspace and configuration.
+//
+// DiscoverContainer returning (nil, nil) means no container applies to
+// this workspace: "auto" resolved to none. Observe then treats the
+// workspace exactly like enabled "false". ProbeContainer returns a value
+// because a binding always applies.
 type ContainerObserver interface {
 	ProbeContainer(ctx context.Context, binding state.ContainerBinding) (ContainerObservation, error)
-	DiscoverContainer(ctx context.Context, ws resolve.Workspace, cfg config.Config) (ContainerObservation, error)
+	DiscoverContainer(ctx context.Context, ws resolve.Workspace, cfg config.Config) (*ContainerObservation, error)
 }
 
 // Clock supplies the timestamps the store persists.
@@ -1839,6 +1848,36 @@ func TestFakeStoreCommitReconciliationRespectsNilDigest(t *testing.T) {
 		t.Errorf("operation = %+v", rec.LastOperation)
 	}
 }
+
+// TestFakeStoreCommitReconciliationIsAllOrNothing mirrors the real store's
+// transaction rollback: a rejected container observation must leave every
+// other field untouched.
+func TestFakeStoreCommitReconciliationIsAllOrNothing(t *testing.T) {
+	s := NewStore()
+	if err := s.RegisterWorkspace(testWorkspace("w1", "slab"), "sha256:a", testTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	digest := "sha256:new"
+	err := s.CommitReconciliation("w1", state.ReconciliationResult{
+		AppliedDigest: &digest,
+		// Present without a container ID is invalid and must be rejected.
+		Container: &state.ContainerObservation{Health: state.HealthPresent},
+		Operation: state.Operation{Name: "open", Outcome: state.OutcomeOK},
+	}, testTime)
+	if err == nil {
+		t.Fatal("an invalid observation should fail the commit")
+	}
+	rec, err := s.Workspace("w1")
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	if rec.AppliedDigest != nil {
+		t.Errorf("applied digest = %v, want untouched nil after the failed commit", rec.AppliedDigest)
+	}
+	if rec.LastOperation != nil {
+		t.Errorf("operation = %+v, want none after the failed commit", rec.LastOperation)
+	}
+}
 ```
 
 - [ ] **Step 4: Run the tests to verify they fail**
@@ -1899,11 +1938,13 @@ func (o *SessionObserver) ObserveSession(_ context.Context, q controller.Session
 }
 
 // ContainerObserver returns canned probe and discovery results and records
-// what it was asked.
+// what it was asked. A nil DiscoverResult with a nil DiscoverErr means no
+// container applies (auto resolved to none), mirroring the interface
+// contract.
 type ContainerObserver struct {
 	ProbeResult    controller.ContainerObservation
 	ProbeErr       error
-	DiscoverResult controller.ContainerObservation
+	DiscoverResult *controller.ContainerObservation
 	DiscoverErr    error
 	Probed         []state.ContainerBinding
 	Discovered     []string
@@ -1917,10 +1958,10 @@ func (o *ContainerObserver) ProbeContainer(_ context.Context, binding state.Cont
 	return o.ProbeResult, nil
 }
 
-func (o *ContainerObserver) DiscoverContainer(_ context.Context, ws resolve.Workspace, _ config.Config) (controller.ContainerObservation, error) {
+func (o *ContainerObserver) DiscoverContainer(_ context.Context, ws resolve.Workspace, _ config.Config) (*controller.ContainerObservation, error) {
 	o.Discovered = append(o.Discovered, ws.ID)
 	if o.DiscoverErr != nil {
-		return controller.ContainerObservation{}, o.DiscoverErr
+		return nil, o.DiscoverErr
 	}
 	return o.DiscoverResult, nil
 }
@@ -2051,15 +2092,19 @@ func (s *Store) CommitReconciliation(workspaceID string, r state.ReconciliationR
 	if !ok {
 		return fmt.Errorf("workspace %s: %w", workspaceID, state.ErrNotFound)
 	}
-	if r.AppliedDigest != nil {
-		digest := *r.AppliedDigest
-		rec.AppliedDigest = &digest
-		rec.UpdatedAt = now
-	}
+	// The container observation is the only step that can fail, so it runs
+	// first: a rejected observation must leave the record untouched, the
+	// same all-or-nothing behavior the SQLite transaction gives the real
+	// store.
 	if r.Container != nil {
 		if err := s.recordContainerLocked(workspaceID, *r.Container, now); err != nil {
 			return err
 		}
+	}
+	if r.AppliedDigest != nil {
+		digest := *r.AppliedDigest
+		rec.AppliedDigest = &digest
+		rec.UpdatedAt = now
 	}
 	return s.recordOperationLocked(workspaceID, r.Operation, now)
 }
@@ -2287,7 +2332,7 @@ func TestObserveProbesAnExistingBinding(t *testing.T) {
 
 func TestObserveDiscoversWhenNeverBound(t *testing.T) {
 	d := newDeps()
-	d.containers.DiscoverResult = controller.ContainerObservation{Health: state.HealthMissing}
+	d.containers.DiscoverResult = &controller.ContainerObservation{Health: state.HealthMissing}
 	snap, err := d.ctrl.Observe(context.Background(), testDesired("auto"))
 	if err != nil {
 		t.Fatalf("Observe: %v", err)
@@ -2297,6 +2342,24 @@ func TestObserveDiscoversWhenNeverBound(t *testing.T) {
 	}
 	if snap.Container.Observed == nil || snap.Container.Observed.Health != state.HealthMissing {
 		t.Errorf("container snapshot = %+v", snap.Container)
+	}
+}
+
+// TestAutoResolvingToNoContainerObservesNone is the "auto means maybe
+// nothing" gate: a nil discovery result must read exactly like
+// enabled "false".
+func TestAutoResolvingToNoContainerObservesNone(t *testing.T) {
+	d := newDeps()
+	d.containers.DiscoverResult = nil
+	snap, err := d.ctrl.Observe(context.Background(), testDesired("auto"))
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if len(d.containers.Discovered) != 1 {
+		t.Errorf("discoveries = %v, want one attempt", d.containers.Discovered)
+	}
+	if snap.Container.Observed != nil || snap.Container.Err != nil {
+		t.Errorf("container snapshot = %+v, want empty when no container applies", snap.Container)
 	}
 }
 
@@ -2454,23 +2517,27 @@ func (c *Controller) observeContainer(ctx context.Context, d Desired, stored *st
 	if d.Config.DevContainer.Enabled == "false" {
 		return ContainerSnapshot{}
 	}
-	var (
-		obs ContainerObservation
-		err error
-	)
 	if stored != nil && stored.Container != nil {
-		obs, err = c.Containers.ProbeContainer(ctx, *stored.Container)
-	} else {
-		obs, err = c.Containers.DiscoverContainer(ctx, d.Workspace, d.Config)
+		obs, err := c.Containers.ProbeContainer(ctx, *stored.Container)
+		if err != nil {
+			// Design §9: a failed probe yields unknown, never loss.
+			return ContainerSnapshot{
+				Observed: &ContainerObservation{Health: state.HealthUnknown},
+				Err:      err,
+			}
+		}
+		return ContainerSnapshot{Observed: &obs}
 	}
+	obs, err := c.Containers.DiscoverContainer(ctx, d.Workspace, d.Config)
 	if err != nil {
-		// Design §9: a failed probe yields unknown, never loss.
 		return ContainerSnapshot{
 			Observed: &ContainerObservation{Health: state.HealthUnknown},
 			Err:      err,
 		}
 	}
-	return ContainerSnapshot{Observed: &obs}
+	// A nil observation means no container applies: "auto" resolved to
+	// none, treated exactly like enabled "false".
+	return ContainerSnapshot{Observed: obs}
 }
 ```
 
@@ -2603,6 +2670,8 @@ func TestPlanTable(t *testing.T) {
 			},
 		},
 		{
+			// Refusal is global (spec §5): no RecordName, no Reapply, no
+			// container action survives it.
 			name: "unknown session state refuses every mutating action",
 			mutate: func(s *controller.Snapshot) {
 				s.Session = controller.SessionSnapshot{
@@ -2611,10 +2680,24 @@ func TestPlanTable(t *testing.T) {
 				}
 			},
 			want: controller.Plan{
-				Session:    controller.SessionActionRefuse,
-				RecordName: true,
-				Container:  controller.ContainerActionNone,
-				Reapply:    true,
+				Session:   controller.SessionActionRefuse,
+				Container: controller.ContainerActionNone,
+			},
+		},
+		{
+			name: "an unknown session with a missing container still plans no container action",
+			mutate: func(s *controller.Snapshot) {
+				s.Session = controller.SessionSnapshot{
+					State: controller.SessionUnknown,
+					Err:   errors.New("tmux unobservable"),
+				}
+				s.Container = controller.ContainerSnapshot{
+					Observed: &controller.ContainerObservation{Health: state.HealthMissing},
+				}
+			},
+			want: controller.Plan{
+				Session:   controller.SessionActionRefuse,
+				Container: controller.ContainerActionNone,
 			},
 		},
 		{
@@ -2629,10 +2712,8 @@ func TestPlanTable(t *testing.T) {
 				}
 			},
 			want: controller.Plan{
-				Session:    controller.SessionActionRefuse,
-				RecordName: true,
-				Container:  controller.ContainerActionNone,
-				Reapply:    true,
+				Session:   controller.SessionActionRefuse,
+				Container: controller.ContainerActionNone,
 			},
 		},
 		{
@@ -2644,10 +2725,26 @@ func TestPlanTable(t *testing.T) {
 				}
 			},
 			want: controller.Plan{
-				Session:    controller.SessionActionRefuse,
-				RecordName: true,
-				Container:  controller.ContainerActionNone,
-				Reapply:    true,
+				Session:   controller.SessionActionRefuse,
+				Container: controller.ContainerActionNone,
+			},
+		},
+		{
+			// All three identity keys are load-bearing: a right ID with a
+			// contradictory worktree is corruption, not a match.
+			name: "an identity match with a contradictory worktree refuses",
+			mutate: func(s *controller.Snapshot) {
+				live := ourLiveSession()
+				live.Worktree = "/w/somewhere-else"
+				s.Session = controller.SessionSnapshot{
+					State:      controller.SessionLive,
+					ByIdentity: live,
+					ByName:     []controller.LiveSession{*live},
+				}
+			},
+			want: controller.Plan{
+				Session:   controller.SessionActionRefuse,
+				Container: controller.ContainerActionNone,
 			},
 		},
 		{
@@ -2744,6 +2841,7 @@ package controller
 import (
 	"fmt"
 
+	"github.com/gambtho/projectmux/internal/resolve"
 	"github.com/gambtho/projectmux/internal/state"
 )
 
@@ -2768,7 +2866,10 @@ const (
 )
 
 // Plan is the typed outcome of one planning pass. Refusal is non-empty
-// exactly when Session is SessionActionRefuse.
+// exactly when Session is SessionActionRefuse, and a refusing plan is
+// global: it carries no mutating action of any kind (spec §5), so the
+// execution slice may act on any non-refusing plan field without
+// re-checking session state.
 type Plan struct {
 	Session    SessionAction
 	RecordName bool
@@ -2782,42 +2883,63 @@ type Plan struct {
 // snapshot, same plan. (The spec names this operation Plan(snapshot); the
 // Go function is BuildPlan because the result type claims the name.)
 func BuildPlan(snap Snapshot) Plan {
-	p := Plan{Container: containerAction(snap)}
+	if refusal := refusalFor(snap); refusal != "" {
+		return Plan{
+			Session:   SessionActionRefuse,
+			Container: ContainerActionNone,
+			Refusal:   refusal,
+		}
+	}
 
+	p := Plan{Container: containerAction(snap)}
 	p.RecordName = snap.Stored == nil || snap.Stored.ActualSession == nil
 	p.Reapply = snap.Stored == nil ||
 		snap.Stored.AppliedDigest == nil ||
 		*snap.Stored.AppliedDigest != snap.Desired.Digest
 
-	switch {
-	case snap.Session.State == SessionUnknown:
-		// Design §9 via spec §5: no mutating action may be derived from an
-		// unobservable tmux.
-		p.Session = SessionActionRefuse
-		p.Refusal = "tmux could not be observed; refusing to act on an unknown session state"
-	case foreignOccupant(snap) != nil:
-		occupant := foreignOccupant(snap)
-		// Design §7: never adopt or rename a session that does not carry
-		// this workspace's identity keys.
-		p.Session = SessionActionRefuse
-		p.Refusal = fmt.Sprintf(
-			"session %q exists but does not belong to this workspace; refusing to adopt or rename it",
-			occupant.Name)
-	case snap.Session.State == SessionLive:
+	if snap.Session.State == SessionLive {
 		p.Session = sessionActionForLive(snap)
-	default:
+	} else {
 		p.Session = SessionActionCreate
 	}
 	return p
 }
 
-// foreignOccupant returns a live session occupying one of the candidate
-// names without this workspace's identity — including sessions with no
-// identity keys at all.
+// refusalFor returns the reason no mutating action may be planned, or ""
+// when acting is safe.
+func refusalFor(snap Snapshot) string {
+	// Design §9 via spec §5: no mutating action may be derived from an
+	// unobservable tmux.
+	if snap.Session.State == SessionUnknown {
+		return "tmux could not be observed; refusing to act on an unknown session state"
+	}
+	// Design §7: never adopt a session whose identity keys contradict the
+	// workspace, even when the observer matched it by ID.
+	if live := snap.Session.ByIdentity; live != nil && !belongsTo(*live, snap.Desired.Workspace) {
+		return fmt.Sprintf(
+			"session %q carries contradictory identity keys; refusing to adopt it", live.Name)
+	}
+	// Design §7: never adopt or rename a session occupying a candidate name
+	// without this workspace's identity — including keyless sessions.
+	if occupant := foreignOccupant(snap); occupant != nil {
+		return fmt.Sprintf(
+			"session %q exists but does not belong to this workspace; refusing to adopt or rename it",
+			occupant.Name)
+	}
+	return ""
+}
+
+// belongsTo compares all three load-bearing identity keys (design §7): a
+// session with the right workspace ID but a contradictory slug or worktree
+// is evidence of corruption or collision, not a match.
+func belongsTo(s LiveSession, ws resolve.Workspace) bool {
+	return s.WorkspaceID == ws.ID && s.Slug == ws.Slug && s.Worktree == ws.Worktree
+}
+
 func foreignOccupant(snap Snapshot) *LiveSession {
 	for i := range snap.Session.ByName {
 		s := snap.Session.ByName[i]
-		if s.WorkspaceID != snap.Desired.Workspace.ID {
+		if !belongsTo(s, snap.Desired.Workspace) {
 			return &s
 		}
 	}
