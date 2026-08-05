@@ -142,6 +142,35 @@ func TestOpenReadOnlyCorruptDatabaseReportsIntegrity(t *testing.T) {
 	}
 }
 
+// TestOpenReadOnlyUnreadableDatabaseIsNotCorruption separates the two
+// ways a first query can fail. A file the process may not read says
+// nothing about its contents, so it must surface as an error the caller
+// reports as uncertainty — never as an integrity finding, which asserts
+// the bytes were examined and found malformed.
+func TestOpenReadOnlyUnreadableDatabaseIsNotCorruption(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	root := seedDatabase(t)
+	path := DBPath(root)
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+
+	ro, insp, err := OpenReadOnly(root)
+	if err == nil {
+		ro.Close()
+		t.Fatalf("an unreadable database opened cleanly: %+v", insp)
+	}
+	if ro != nil {
+		t.Error("a failed open returned a store")
+	}
+	if insp.IntegrityErr != nil {
+		t.Errorf("an unreadable database was reported as corrupt: %v", insp.IntegrityErr)
+	}
+}
+
 func TestOpenReadOnlyNotADatabase(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(DBPath(root), []byte("this is not a database"), 0o600); err != nil {

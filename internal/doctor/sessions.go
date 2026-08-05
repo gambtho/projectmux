@@ -38,8 +38,10 @@ func (r *Runner) orphanedSessions(ctx context.Context) Check {
 		}
 		check.Items = append(check.Items, orphanItem(session.Name, session.WorkspaceID, registered))
 	}
+	// A server full of other people's sessions is a clean answer, not an
+	// empty one: aggregate over no items would leave the status unset.
 	if len(check.Items) == 0 {
-		check.Detail = "no projectmux sessions are live"
+		return verdict(check.Name, StatusOK, "no projectmux sessions are live")
 	}
 	return check.aggregate()
 }

@@ -288,6 +288,31 @@ func TestConfigurationReportsEachWorkspace(t *testing.T) {
 	}
 }
 
+// TestConfigurationUnreadableWorkspacesIsUnknown covers a workspaces
+// directory that cannot be listed. Reporting "no workspace files" there
+// would be an affirmative answer over ground nothing examined.
+func TestConfigurationUnreadableWorkspacesIsUnknown(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root, defaults := writeConfig(t, map[string]string{
+		"workspaces/slab.yaml": "windows:\n  - name: edit\n    shell: true\n",
+	})
+	dir := filepath.Join(root, "workspaces")
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	check := (&Runner{ConfigRoot: root, Defaults: defaults}).configuration()
+	if check.Status != StatusUnknown {
+		t.Fatalf("status = %q, want unknown: %+v", check.Status, check.Items)
+	}
+	if got := findItem(t, check, "workspaces").Status; got != StatusUnknown {
+		t.Errorf("workspaces item = %q, want unknown", got)
+	}
+}
+
 func TestConfigurationUnreadableDefaultsFailsTheCheck(t *testing.T) {
 	r := &Runner{ConfigRoot: t.TempDir(), DefaultsErr: errors.New("defaults.yaml: bad indent")}
 	check := r.configuration()
@@ -420,6 +445,31 @@ func TestOrphanedSessionsNoServerIsHealthy(t *testing.T) {
 	r := &Runner{DB: Database{Missing: true}, Sessions: &scriptedSessions{}}
 	if got := r.orphanedSessions(context.Background()).Status; got != StatusOK {
 		t.Fatalf("status = %q, want ok", got)
+	}
+}
+
+// TestOrphanedSessionsForeignServerIsHealthy covers a live tmux server
+// running only somebody else's sessions: every session is filtered out,
+// so the check has no items to aggregate over and must still state a
+// status rather than leaving it blank.
+func TestOrphanedSessionsForeignServerIsHealthy(t *testing.T) {
+	r := &Runner{
+		Store: seedStore(t, "slab", t.TempDir()),
+		Sessions: &scriptedSessions{sessions: []controller.LiveSession{
+			{Name: "somebody-else"},
+			{Name: "irc"},
+		}},
+	}
+
+	check := r.orphanedSessions(context.Background())
+	if check.Status != StatusOK {
+		t.Fatalf("status = %q, want ok", check.Status)
+	}
+	if len(check.Items) != 0 {
+		t.Errorf("items = %+v, want none", check.Items)
+	}
+	if check.Detail == "" {
+		t.Error("detail is empty; the report must say why there is nothing to show")
 	}
 }
 

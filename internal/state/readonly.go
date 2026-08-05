@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // PendingMigrationError reports a database older than this build's schema.
@@ -82,8 +85,15 @@ func OpenReadOnly(root string) (*ReadOnlyStore, Inspection, error) {
 	insp := Inspection{}
 	var result string
 	if err := db.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
-		// A file too damaged to read reports here rather than on open:
-		// the driver connects lazily.
+		// The driver connects lazily, so this first query is where both
+		// a damaged file and an unreadable one report. Only the codes
+		// that name malformation establish corruption; anything else —
+		// a permission failure, a directory that will not take the WAL
+		// index — leaves the contents unexamined and is uncertainty.
+		if !isMalformed(err) {
+			db.Close()
+			return nil, Inspection{}, fmt.Errorf("reading the state database: %w", err)
+		}
 		insp.IntegrityErr = fmt.Errorf("checking database integrity: %w", err)
 		return &ReadOnlyStore{db: db}, insp, nil
 	}
@@ -96,6 +106,22 @@ func OpenReadOnly(root string) (*ReadOnlyStore, Inspection, error) {
 		return nil, Inspection{}, fmt.Errorf("reading the schema version: %w", err)
 	}
 	return &ReadOnlyStore{db: db}, insp, nil
+}
+
+// isMalformed reports whether an error is SQLite saying the file's
+// contents are not a usable database: SQLITE_CORRUPT for a damaged
+// image, SQLITE_NOTADB for a file that was never one.
+func isMalformed(err error) bool {
+	var se *sqlite.Error
+	if !errors.As(err, &se) {
+		return false
+	}
+	// Extended result codes carry the primary code in the low byte.
+	switch se.Code() & 0xff {
+	case sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB:
+		return true
+	}
+	return false
 }
 
 // Close closes the connection pool.

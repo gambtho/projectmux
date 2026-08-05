@@ -70,14 +70,30 @@ func (r *Runner) defaultsItem() Item {
 // workspaceSlugs lists the tracked workspace layers. The machine-local
 // files are not separate subjects: config.Load already merges each under
 // its slug.
+//
+// Reading the directory rather than globbing it is deliberate: Glob
+// discards filesystem errors, so a workspaces/ directory that cannot be
+// read would report as an installation with no workspaces — an
+// affirmative answer over unexamined ground. Only an absent directory
+// means "none".
 func workspaceSlugs(root string) ([]string, error) {
-	entries, err := filepath.Glob(filepath.Join(root, "workspaces", "*.yaml"))
+	entries, err := os.ReadDir(filepath.Join(root, "workspaces"))
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	var slugs []string
-	for _, path := range entries {
-		name := strings.TrimSuffix(filepath.Base(path), ".yaml")
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".yaml") {
+			continue
+		}
+		name = strings.TrimSuffix(name, ".yaml")
 		if strings.HasSuffix(name, ".local") {
 			continue
 		}
