@@ -166,7 +166,9 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowInte
 
 // ensureContainer executes the plan's container action and returns the
 // observation the rest of the pass uses (nil when no container is in
-// play) plus whether devcontainer up ran.
+// play) plus whether a genuine start ran — an acquire's idempotent up
+// onto an already-running container reports false, so replacement
+// staleness is never claimed for it.
 func (c *Controller) ensureContainer(ctx context.Context, d Desired, snap Snapshot, action ContainerAction) (*ContainerObservation, bool, error) {
 	if action == ContainerActionProbeFirst {
 		// One retry of the observation kind that failed (spec §4): a
