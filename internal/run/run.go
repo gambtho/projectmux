@@ -58,7 +58,9 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 // Run executes cmd and waits for it. The error return is reserved for
 // failure to start, an empty argv, and context cancellation or timeout
 // (wrapping ctx's error so errors.Is sees context.DeadlineExceeded and
-// context.Canceled); cancellation kills the child.
+// context.Canceled); cancellation kills the child. Timeout and
+// cancellation errors carry the partially captured output in the
+// returned Result.
 func Run(ctx context.Context, cmd Command) (Result, error) {
 	if len(cmd.Argv) == 0 {
 		return Result{}, errors.New("run: empty argv")
@@ -85,14 +87,17 @@ func Run(ctx context.Context, cmd Command) (Result, error) {
 	c.WaitDelay = waitDelay
 
 	err := c.Run()
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return Result{}, fmt.Errorf("running %s: %w", cmd.Argv[0], ctxErr)
-	}
 	res := Result{
 		Stdout:          stdout.buf,
 		Stderr:          stderr.buf,
 		StdoutTruncated: stdout.truncated,
 		StderrTruncated: stderr.truncated,
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// Partial capture rides along with the error so callers can
+		// preserve a bounded stderr summary for timed-out subprocesses
+		// (container-adapter spec §4).
+		return res, fmt.Errorf("running %s: %w", cmd.Argv[0], ctxErr)
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {

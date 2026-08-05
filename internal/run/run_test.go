@@ -121,3 +121,19 @@ func TestRunStartFailureIsAnError(t *testing.T) {
 		t.Fatal("Run returned a nil error for a missing binary")
 	}
 }
+
+func TestRunTimeoutReturnsPartialCapture(t *testing.T) {
+	res, err := Run(context.Background(), Command{
+		Argv:    []string{"/bin/sh", "-c", "echo partial-out; echo partial-err 1>&2; sleep 10"},
+		Timeout: 300 * time.Millisecond,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+	}
+	if got := string(res.Stdout); got != "partial-out\n" {
+		t.Errorf("Stdout = %q; partial capture was discarded", got)
+	}
+	if got := string(res.Stderr); got != "partial-err\n" {
+		t.Errorf("Stderr = %q; partial capture was discarded", got)
+	}
+}
