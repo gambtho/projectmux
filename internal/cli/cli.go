@@ -45,6 +45,10 @@ commands:
         observe, ensure, record, and attach the workspace session
   attach [--json] [--compact] [<workspace>]
         attach to the live workspace session; never creates one
+  stop [--container] [--json] [--compact] [<workspace>]
+        end the workspace session, and with --container its container
+  autostart [--json] [--compact]
+        start containers for registered primary worktrees with autostart: true
   config [--json] [--compact] [<workspace>]
         print the normalized, merged configuration for a workspace
   list [--json] [--compact]
@@ -59,6 +63,15 @@ commands:
 This is an alpha build. Only the commands listed above are implemented.
 `
 
+// reportedError marks a failure whose full detail already went to
+// stdout as the command's structured report — the deliberate exception
+// to the no-stdout-on-failure contract (stop/autostart spec §5). Main
+// prints only its one-line summary to stderr; the exit code is the
+// default failure code.
+type reportedError struct{ msg string }
+
+func (e *reportedError) Error() string { return e.msg }
+
 // usageError marks a caller mistake, which exits 2 and prints usage guidance.
 type usageError struct{ msg string }
 
@@ -68,9 +81,13 @@ func usagef(format string, args ...any) error {
 	return &usageError{msg: fmt.Sprintf(format, args...)}
 }
 
-// Main runs one command and returns the process exit code. It writes nothing
-// to stdout for a failing command, so callers can pipe stdout without having to
-// filter diagnostics out of it.
+// Main runs one command and returns the process exit code. A failing
+// single-operation command writes nothing to stdout, so callers can pipe
+// stdout without filtering diagnostics out of it. The deliberate
+// exception (stop/autostart spec §5): commands whose structured report
+// IS the output — autostart's batch and a partially succeeding stop —
+// write that report to stdout and then return a reportedError carrying
+// only a one-line summary for stderr; nothing further reaches stdout.
 func Main(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -108,6 +125,10 @@ func dispatch(ctx context.Context, args []string, stdout io.Writer) error {
 		return runOpen(ctx, rest, stdout)
 	case "attach":
 		return runAttach(ctx, rest, stdout)
+	case "stop":
+		return runStop(ctx, rest, stdout)
+	case "autostart":
+		return runAutostart(ctx, rest, stdout)
 	case "config":
 		return runConfig(rest, stdout)
 	case "list":

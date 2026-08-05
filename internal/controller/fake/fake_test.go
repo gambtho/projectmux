@@ -261,3 +261,29 @@ func TestFakeContainerActuator(t *testing.T) {
 		t.Error("configured start error was not returned")
 	}
 }
+
+func TestFakeActuatorsKillAndStop(t *testing.T) {
+	sa := &SessionActuator{}
+	if err := sa.KillSession(context.Background(), "slab"); err != nil {
+		t.Fatalf("KillSession: %v", err)
+	}
+	if len(sa.Killed) != 1 || sa.Killed[0] != "slab" {
+		t.Errorf("Killed = %v", sa.Killed)
+	}
+	sa.KillErr = errors.New("boom")
+	if err := sa.KillSession(context.Background(), "slab"); err == nil {
+		t.Error("configured kill error was not returned")
+	}
+
+	ca := &ContainerActuator{}
+	if err := ca.StopContainer(context.Background(), "c1"); err != nil {
+		t.Fatalf("StopContainer: %v", err)
+	}
+	if len(ca.Stopped) != 1 || ca.Stopped[0] != "c1" {
+		t.Errorf("Stopped = %v", ca.Stopped)
+	}
+	ca.StopErr = errors.New("boom")
+	if err := ca.StopContainer(context.Background(), "c1"); err == nil {
+		t.Error("configured stop error was not returned")
+	}
+}

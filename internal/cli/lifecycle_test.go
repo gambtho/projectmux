@@ -286,3 +286,147 @@ func TestLifecycleContainerStartFailureCreatesNoSession(t *testing.T) {
 		t.Errorf("status does not carry the start's exit status: %s", stdout)
 	}
 }
+
+// TestLifecycleOpenStopReopen: stop kills the real session, a second
+// stop is an idempotent no-op, and reopen creates a fresh session.
+func TestLifecycleOpenStopReopen(t *testing.T) {
+	ws, socket := lifecycleRig(t, "stopcycle")
+
+	if env := openJSON(t); env.Action != "created" {
+		t.Fatalf("open = %+v", env)
+	}
+
+	code, stdout, stderr := run(t, "stop", "--json")
+	if code != 0 {
+		t.Fatalf("stop exit %d, stderr: %s", code, stderr)
+	}
+	env := decodeStop(t, stdout)
+	if !env.Session.Stopped || env.Session.Name != ws.SessionName {
+		t.Fatalf("stop = %+v", env.Session)
+	}
+	live, err := (&tmux.Client{Socket: socket}).Sessions(context.Background())
+	if err != nil {
+		t.Fatalf("Sessions: %v", err)
+	}
+	if len(live) != 0 {
+		t.Fatalf("live = %+v after stop", live)
+	}
+
+	code, stdout, _ = run(t, "stop", "--json")
+	if code != 0 {
+		t.Fatalf("second stop exit %d", code)
+	}
+	if env := decodeStop(t, stdout); env.Session.Stopped {
+		t.Errorf("second stop = %+v, want idempotent no-op", env.Session)
+	}
+
+	if env := openJSON(t); env.Action != "created" {
+		t.Errorf("reopen after stop = %+v, want a fresh creation", env)
+	}
+}
+
+// TestLifecycleStopKillsExactlyTheIdentitySession: a same-prefix
+// sibling session must survive — kill-session's default prefix matching
+// would take it out if the actuator did not pin exact matching.
+func TestLifecycleStopKillsExactlyTheIdentitySession(t *testing.T) {
+	ws, socket := lifecycleRig(t, "sibling")
+
+	if env := openJSON(t); env.Action != "created" {
+		t.Fatalf("open = %+v", env)
+	}
+	sibling := ws.SessionName + "-scratch"
+	if out, err := exec.Command("tmux", "-L", socket,
+		"new-session", "-d", "-s", sibling).CombinedOutput(); err != nil {
+		t.Fatalf("seeding the sibling: %v\n%s", err, out)
+	}
+
+	code, _, stderr := run(t, "stop", "--json")
+	if code != 0 {
+		t.Fatalf("stop exit %d, stderr: %s", code, stderr)
+	}
+	out, err := exec.Command("tmux", "-L", socket,
+		"list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		t.Fatalf("list-sessions: %v", err)
+	}
+	names := strings.Fields(string(out))
+	if len(names) != 1 || names[0] != sibling {
+		t.Errorf("surviving sessions = %v, want only %q", names, sibling)
+	}
+}
+
+// TestLifecycleStopContainerThenAutostart: real tmux and store, fake
+// container tooling. stop --container kills the session and stops the
+// bound container while retaining the binding as missing; autostart then
+// restarts the container from the stored record without touching tmux.
+func TestLifecycleStopContainerThenAutostart(t *testing.T) {
+	ws, socket := lifecycleRig(t, "restart")
+	actC := installContainerActuator(t)
+	actC.ExecResult = "sleep 300"
+	obs := &fake.ContainerObserver{
+		AppliesResult:  true,
+		DiscoverResult: &controller.ContainerObservation{Health: state.HealthMissing, Kind: "devcontainer"},
+	}
+	installContainerObserver(t, obs)
+
+	if env := openJSON(t); env.Action != "created" {
+		t.Fatalf("open = %+v", env)
+	}
+
+	code, stdout, stderr := run(t, "stop", "--container", "--json")
+	if code != 0 {
+		t.Fatalf("stop exit %d, stderr: %s", code, stderr)
+	}
+	stopEnv := decodeStop(t, stdout)
+	if !stopEnv.Session.Stopped || stopEnv.Container == nil || !stopEnv.Container.Stopped {
+		t.Fatalf("stop = %+v / %+v", stopEnv.Session, stopEnv.Container)
+	}
+	if len(actC.Stopped) != 1 {
+		t.Fatalf("StopContainer calls = %d, want 1", len(actC.Stopped))
+	}
+	// The stored binding now probes as confirmed-stopped.
+	obs.ProbeResult = controller.ContainerObservation{
+		Health: state.HealthMissing, Kind: "devcontainer",
+	}
+
+	// Autostart restarts the container: the workspace is registered in
+	// the real store, and its config does not yet enable autostart, so
+	// first prove the skip, then enable the flag.
+	code, stdout, _ = run(t, "autostart", "--json")
+	if code != 0 {
+		t.Fatalf("autostart exit %d\n%s", code, stdout)
+	}
+	env := decodeAutostart(t, stdout)
+	if e := entryFor(t, env, ws.Slug); e.Outcome != "skipped" {
+		t.Fatalf("autostart without the flag = %+v, want skipped", e)
+	}
+
+	configDir := os.Getenv("PROJECTMUX_CONFIG_ROOT")
+	path := configDir + "/workspaces/" + ws.Slug + ".yaml"
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+	if err := os.WriteFile(path, append(raw, []byte("autostart: true\n")...), 0o644); err != nil {
+		t.Fatalf("enabling autostart: %v", err)
+	}
+
+	code, stdout, _ = run(t, "autostart", "--json")
+	if code != 0 {
+		t.Fatalf("autostart exit %d\n%s", code, stdout)
+	}
+	env = decodeAutostart(t, stdout)
+	if e := entryFor(t, env, ws.Slug); e.Outcome != "started" {
+		t.Fatalf("autostart = %+v, want started", e)
+	}
+	if len(actC.Started) != 2 {
+		t.Errorf("StartContainer calls = %d, want 2 (open + autostart)", len(actC.Started))
+	}
+	live, err := (&tmux.Client{Socket: socket}).Sessions(context.Background())
+	if err != nil {
+		t.Fatalf("Sessions: %v", err)
+	}
+	if len(live) != 0 {
+		t.Errorf("autostart touched tmux: %+v", live)
+	}
+}

@@ -1,0 +1,32 @@
+# Systemd user unit for projectmux autostart.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp projectmux-autostart.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable projectmux-autostart.service
+#
+# Whether this unit is enabled at all is the dotfiles' decision, not
+# projectmux's: installing the binary never enables it.
+#
+# The unit assumes the Docker daemon is reachable when it runs. In
+# rootful-Docker setups the system docker.service usually is up by the
+# time the user session starts; if containers intermittently fail at
+# boot with connection errors, add a small ExecStartPre delay or switch
+# WantedBy to a later target for your environment.
+
+[Unit]
+Description=Start projectmux workspace containers
+# User units cannot depend on system units, so docker.service cannot be
+# ordered here; see the note above.
+
+[Service]
+Type=oneshot
+# Adjust the path if projectmux is installed elsewhere (e.g. from
+# `go install`, use %h/go/bin/projectmux).
+ExecStart=%h/.local/bin/projectmux autostart
+# autostart exits 1 when any workspace fails; the report is in the
+# journal either way.
+
+[Install]
+WantedBy=default.target

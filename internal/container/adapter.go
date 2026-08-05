@@ -190,3 +190,28 @@ func (a *Adapter) StartContainer(ctx context.Context, ws resolve.Workspace, cfg 
 		Health:        state.HealthPresent,
 	}, nil
 }
+
+// stopTimeout bounds docker stop. Docker's default SIGTERM grace is 10
+// seconds before the SIGKILL (verified on busybox), so the probe-class
+// 5s default would false-fail routinely.
+const stopTimeout = 30 * time.Second
+
+// StopContainer stops the container. Idempotent by classification:
+// already-stopped containers exit 0, and a removed container ("No such
+// container", verified shape) is the goal state — both are success.
+func (a *Adapter) StopContainer(ctx context.Context, containerID string) error {
+	res, err := run.Run(ctx, run.Command{
+		Argv:    []string{dockerBinary, "stop", containerID},
+		Timeout: stopTimeout,
+	})
+	if err != nil {
+		return fmt.Errorf("stopping the container: %w", err)
+	}
+	if res.ExitCode != 0 {
+		if strings.Contains(strings.ToLower(string(res.Stderr)), "no such container") {
+			return nil
+		}
+		return fmt.Errorf("docker stop exited %d: %s", res.ExitCode, boundedStderr(res.Stderr))
+	}
+	return nil
+}

@@ -292,3 +292,92 @@ func TestIntegrationCreateSessionNameEndingInSemicolon(t *testing.T) {
 		t.Fatalf("observed = %+v, want one session named \"slab;\" with matching identity", live)
 	}
 }
+
+func TestKillSessionSuccessAndIdempotency(t *testing.T) {
+	fakeTmux(t, "#!/bin/sh\nexit 0\n")
+	if err := (&Client{}).KillSession(context.Background(), "slab"); err != nil {
+		t.Fatalf("KillSession: %v", err)
+	}
+
+	// A session that vanished first is success: stop is idempotent and
+	// the goal state holds (verified tmux error shape).
+	fakeTmux(t, "#!/bin/sh\necho \"can't find session: slab\" 1>&2\nexit 1\n")
+	if err := (&Client{}).KillSession(context.Background(), "slab"); err != nil {
+		t.Fatalf("vanished-session kill = %v, want nil", err)
+	}
+
+	fakeTmux(t, "#!/bin/sh\necho 'server broke' 1>&2\nexit 1\n")
+	if err := (&Client{}).KillSession(context.Background(), "slab"); err == nil {
+		t.Fatal("an unrecognized kill failure was swallowed")
+	}
+}
+
+// TestIntegrationKillByIDSparesNameReuse: killing by the observed
+// session ID must not touch a replacement session that reused the name
+// after the original vanished — the TOCTOU a name-targeted kill has.
+func TestIntegrationKillByIDSparesNameReuse(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	socket := fmt.Sprintf("projectmux-actuate-reuse-%d", os.Getpid())
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	})
+	tm := func(args ...string) ([]byte, error) {
+		return exec.Command("tmux", append([]string{"-L", socket}, args...)...).CombinedOutput()
+	}
+
+	if out, err := tm("new-session", "-d", "-s", "keeper"); err != nil {
+		t.Fatalf("seeding keeper: %v\n%s", err, out)
+	}
+	if out, err := tm("new-session", "-d", "-s", "slab"); err != nil {
+		t.Fatalf("seeding slab: %v\n%s", err, out)
+	}
+	idOut, err := tm("display-message", "-p", "-t", "slab", "#{session_id}")
+	if err != nil {
+		t.Fatalf("reading the session ID: %v\n%s", err, idOut)
+	}
+	observedID := strings.TrimSpace(string(idOut))
+	if !strings.HasPrefix(observedID, "$") {
+		t.Fatalf("observed ID = %q, want a $-prefixed session ID", observedID)
+	}
+
+	// The observed session dies and a replacement reuses its name.
+	if out, err := tm("kill-session", "-t", "=slab"); err != nil {
+		t.Fatalf("killing the original: %v\n%s", err, out)
+	}
+	if out, err := tm("new-session", "-d", "-s", "slab"); err != nil {
+		t.Fatalf("seeding the replacement: %v\n%s", err, out)
+	}
+
+	// The stale ID resolves to nothing: idempotent success, and the
+	// replacement survives untouched.
+	if err := (&Client{Socket: socket}).KillSession(context.Background(), observedID); err != nil {
+		t.Fatalf("kill by stale ID = %v, want nil", err)
+	}
+	out, err := tm("list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		t.Fatalf("list-sessions: %v\n%s", err, out)
+	}
+	names := strings.Fields(string(out))
+	if len(names) != 2 || !strings.Contains(string(out), "slab") {
+		t.Errorf("surviving sessions = %v, want keeper and the replacement slab", names)
+	}
+
+	// A live ID still kills exactly its session.
+	idOut, err = tm("display-message", "-p", "-t", "slab", "#{session_id}")
+	if err != nil {
+		t.Fatalf("reading the replacement ID: %v\n%s", err, idOut)
+	}
+	if err := (&Client{Socket: socket}).KillSession(
+		context.Background(), strings.TrimSpace(string(idOut))); err != nil {
+		t.Fatalf("kill by live ID: %v", err)
+	}
+	out, err = tm("list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		t.Fatalf("list-sessions: %v\n%s", err, out)
+	}
+	if names := strings.Fields(string(out)); len(names) != 1 || names[0] != "keeper" {
+		t.Errorf("surviving sessions = %v, want only keeper", names)
+	}
+}

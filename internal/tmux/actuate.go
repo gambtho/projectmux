@@ -125,3 +125,30 @@ func windowDir(w controller.WindowSpec, spec controller.SessionSpec) string {
 	}
 	return spec.Worktree
 }
+
+// KillSession ends one session. A "$"-prefixed target is a
+// server-assigned session ID and is passed through as-is — it can never
+// be reused by a replacement session, so it binds the kill to the
+// session that was actually observed. A plain name gets the exact-match
+// "=" prefix (kill-session is a target-session command, where "=" is
+// valid). A session that vanished first ("can't find session", verified
+// shape) is success: stop is idempotent and the goal state holds.
+// Killing the last session exits the tmux server, which later
+// observation correctly reads as absence.
+func (c *Client) KillSession(ctx context.Context, target string) error {
+	if !strings.HasPrefix(target, "$") {
+		target = "=" + target
+	}
+	res, err := c.exec(ctx, "kill-session", "-t", target)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		if strings.Contains(strings.ToLower(string(res.Stderr)), "can't find session") {
+			return nil
+		}
+		return fmt.Errorf("tmux kill-session exited %d: %s",
+			res.ExitCode, bytes.TrimSpace(res.Stderr))
+	}
+	return nil
+}
