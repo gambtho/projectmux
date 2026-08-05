@@ -2,6 +2,7 @@ package state
 
 import (
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -86,4 +87,13 @@ type ReconciliationResult struct {
 	AppliedDigest *string
 	Container     *ContainerObservation
 	Operation     Operation
+}
+
+// SessionNameConflictError reports an adoption target already recorded
+// as another workspace's actual session. Callers treat it as a refusal,
+// never an overwrite (open/attach spec §7).
+type SessionNameConflictError struct{ Name string }
+
+func (e *SessionNameConflictError) Error() string {
+	return fmt.Sprintf("session name %q is already recorded for another workspace", e.Name)
 }
