@@ -75,7 +75,7 @@ store, a lock, or a tmux socket.
 
 ---
 
-### Task 1: Typed `state.IncompleteWALError`
+### Task 1: Typed `state.IncompleteWALError`, and a WAL state that means it
 
 Spec §5. `readonly.go` refuses a database whose `-wal` has no `-shm` beside it,
 because reading such a log would recover it into the state directory and an
@@ -84,15 +84,32 @@ indistinguishable from a permission failure — but the two callers want opposit
 things. Doctor must stop; rebuild must *proceed*, because an unrecovered log is
 exactly the crash `rebuild` exists to recover from, and `state.Open` recovers it.
 
-Doctor's behavior must not change. It prints the message either way, so the
-message text stays byte-identical and the test asserts that byte for byte.
+**The type alone is not enough, and this is the load-bearing half of the task.**
+`walIncomplete` today is four situations wearing one name
+(`internal/state/readonly.go:140-152`): a `-wal` whose stat failed for a reason
+other than absence, a `-wal` that is not a regular file, a `-shm` whose stat
+failed for any reason at all — and the one case the name describes, a regular
+`-wal` with `-shm` confirmed absent. Doctor may overload them because it maps the
+whole bucket to a single *unknown*, which is honest. Rebuild may not: it reads
+this classification as **proceed**, so an unexaminable sidecar would be silently
+promoted from "we could not look" to "we looked and it is fine". That is the
+tri-state violation this slice's Global Constraints forbid, committed by the very
+first task. So `walStateOf` gains a fourth state, and only the confirmed case
+becomes `IncompleteWALError`.
+
+Doctor's behavior on the confirmed case must not change. It prints the message
+either way, so that message text stays byte-identical and the test asserts it
+byte for byte. The unexaminable cases get a new, different message — doctor
+still refuses on them, which is all it did before, so no golden output moves.
 
 **Files:**
 - Modify: `internal/state/readonly.go:14-26` (add the type beside `PendingMigrationError`)
-- Modify: `internal/state/readonly.go:95` (construct the type at the call site)
-- Modify: `internal/state/readonly.go:154-161` (remove the now-redundant `incompleteWAL` helper)
+- Modify: `internal/state/readonly.go:87-96` (a fourth arm in `OpenReadOnly`'s switch)
+- Modify: `internal/state/readonly.go:118-152` (add `walUnknown`; narrow `walStateOf`)
+- Modify: `internal/state/readonly.go:154-161` (replace the `incompleteWAL` helper)
 - Modify: `internal/state/readonly.go:222-225` (add `IsIncompleteWAL` beside `IsMissingDatabase`)
-- Test: `internal/state/readonly_test.go` (this file exists — **add** a function, do not create it)
+- Test: `internal/state/readonly_test.go` (this file exists — **add** two functions and
+  **amend** `TestWalStateOfClassifiesSidecars` at :299-318; do not create the file)
 
 **Interfaces:**
 - Consumes: nothing.
@@ -104,15 +121,21 @@ func (e *IncompleteWALError) Error() string
 func IsIncompleteWAL(err error) bool
 ```
 
+The unexaminable case gets no exported type and no predicate. Task 4 reaches it
+through its `default:` arm — "any other error, refuse" — which is exactly the
+behavior wanted, and an exported symbol nobody names is a symbol that invites
+someone to special-case it later.
+
 A note on the test fixture, since staging this state is the awkward part and the
 repository already solved it: `internal/state/readonly_test.go:231` defines
 `seedUnrecoveredWAL(t)`, which copies the `-wal` aside while a writer still holds
 it and restores both files after that writer closes (a clean `Close` checkpoints
 the log away, so the pre-checkpoint database bytes have to be restored too). It
 asserts `walStateOf(path) == walIncomplete` before returning. Reuse it; do not
-write a second fixture.
+write a second fixture. That assertion stays true after this task — the fixture
+stages precisely the confirmed case.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 Append to `internal/state/readonly_test.go`:
 
@@ -160,14 +183,99 @@ func TestOpenReadOnlyUnrecoveredWALIsTyped(t *testing.T) {
 		t.Error("a missing database was reported as an unrecovered write-ahead log")
 	}
 }
+
+// TestOpenReadOnlyUnexaminableSidecarsAreNotTypedAsAnIncompleteWAL is the
+// reason walUnknown exists. Every case here is "the filesystem would not
+// tell us", which is uncertainty; the typed error means "we looked, and a
+// writer crashed", which a mutating command is licensed to proceed past.
+// Collapsing the two would let rebuild open a database it never examined.
+func TestOpenReadOnlyUnexaminableSidecarsAreNotTypedAsAnIncompleteWAL(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stage func(t *testing.T, path string)
+	}{
+		{
+			name: "a -wal that is not a regular file",
+			stage: func(t *testing.T, path string) {
+				if err := os.Mkdir(path+"-wal", 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+			},
+		},
+		{
+			name: "a -shm that cannot be stat'ed",
+			stage: func(t *testing.T, path string) {
+				if err := os.WriteFile(path+"-wal", []byte("log"), 0o600); err != nil {
+					t.Fatalf("writing the -wal: %v", err)
+				}
+				// A -shm inside an unsearchable directory: stat fails with
+				// EACCES rather than ENOENT, which is "we cannot tell"
+				// rather than "it is absent".
+				blocked := filepath.Join(t.TempDir(), "blocked")
+				if err := os.Mkdir(blocked, 0o000); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
+				if _, err := os.Stat(filepath.Join(blocked, "probe")); errors.Is(err, fs.ErrNotExist) {
+					t.Skip("this filesystem or user ignores directory permissions")
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := seedDatabase(t)
+			path := DBPath(root)
+			tc.stage(t, path)
+
+			ro, _, err := OpenReadOnly(root)
+			if err == nil {
+				ro.Close()
+				t.Fatal("an unexaminable sidecar opened cleanly")
+			}
+			if IsIncompleteWAL(err) {
+				t.Errorf("uncertainty was typed as a recoverable crash: %v", err)
+			}
+		})
+	}
+}
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+The second case needs a `-shm` whose stat fails for a reason other than absence,
+and the portable way to get one is an unsearchable parent directory. It cannot be
+the *state* root's parent — `OpenReadOnly` stats the database itself first
+(`internal/state/readonly.go:79`) and would fail there instead, testing nothing.
+So the case is staged as a skip-guarded probe: if this filesystem or this user
+ignores directory permissions (running as root does), the sub-test skips rather
+than passing vacuously. The first case needs no such guard and carries the
+finding on its own.
 
-Run: `go test ./internal/state/ -run TestOpenReadOnlyUnrecoveredWALIsTyped -v`
+Amend `TestWalStateOfClassifiesSidecars` (`internal/state/readonly_test.go:299-318`).
+Its final assertion currently expects a directory `-wal` to be `walIncomplete`;
+that expectation is the bug. Replace lines 311-317 with:
+
+```go
+	// A sidecar that cannot be examined is not an absent one — and it is
+	// not a crashed writer either. walIncomplete means "we looked, and a
+	// writer left a log behind"; this is "we could not look".
+	if err := os.Mkdir(clean+"-wal", 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if got := walStateOf(clean); got != walUnknown {
+		t.Errorf("an unexaminable -wal = %v, want walUnknown", got)
+	}
+```
+
+and update its doc comment from "the three states" to "the four states".
+
+Add `"io/fs"` and `"path/filepath"` to the test file's imports if they are not
+already there; `errors`, `os`, and `testing` already are.
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `go test ./internal/state/ -run 'TestOpenReadOnlyUnrecoveredWALIsTyped|TestOpenReadOnlyUnexaminableSidecars|TestWalStateOfClassifiesSidecars' -v`
 
 Expected: a build failure, not a test failure —
-`undefined: IncompleteWALError` and `undefined: IsIncompleteWAL`.
+`undefined: IncompleteWALError`, `undefined: IsIncompleteWAL`, `undefined: walUnknown`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -180,9 +288,12 @@ In `internal/state/readonly.go`, insert after the `PendingMigrationError` block
 // writer that did not shut down cleanly leaves behind. It is typed rather
 // than a bare message because its two readers want opposite things — an
 // inspection must refuse, since recovering the log would alter the state
-// root, while a mutating command is precisely what recovers it. Untyped,
-// this condition is indistinguishable from a permission failure, which is
-// uncertainty and must stop everyone.
+// root, while a mutating command is precisely what recovers it.
+//
+// It is deliberately narrower than "the sidecars were not readable". A
+// stat that failed is uncertainty, and a mutating command that treated
+// uncertainty as this error would open a database it never examined.
+// walStateOf keeps the two apart; see walUnknown.
 type IncompleteWALError struct {
 	Path string
 }
@@ -196,23 +307,93 @@ func (e *IncompleteWALError) Error() string {
 }
 ```
 
-Change the call site (currently line 95, in the `walIncomplete` branch of
-`OpenReadOnly`) from:
+Replace `OpenReadOnly`'s switch (currently lines 87-96) with:
 
 ```go
-		return nil, Inspection{}, incompleteWAL(path)
-```
-
-to:
-
-```go
+	switch walStateOf(path) {
+	case walComplete:
+		// The sidecars are already there, so the ordinary path adds
+		// nothing to the state root — and it is the only one that sees
+		// what the -wal holds. Immutable reads of a live WAL database
+		// silently omit committed rows.
+		return inspect(dsn)
+	case walIncomplete:
 		return nil, Inspection{}, &IncompleteWALError{Path: path}
+	case walUnknown:
+		return nil, Inspection{}, unexaminableSidecars(path)
+	}
 ```
 
-Delete the whole `incompleteWAL` helper (lines 154-161, including its comment).
-It had exactly one caller and the type now carries both the message and the
-path; keeping a constructor that only wraps a struct literal would be a second
-place to look.
+Replace the `walState` constants and `walStateOf` (currently lines 118-152) with:
+
+```go
+// walState is what the files beside a database say about its write-ahead
+// log. The last two cases exist because a -wal alone does not describe a
+// readable WAL state, and because failing to examine the sidecars is a
+// different answer from examining them and finding a crash.
+type walState int
+
+const (
+	// walNone: no write-ahead log, so nothing is uncheckpointed.
+	walNone walState = iota
+	// walComplete: a -wal and the -shm index that reads it, both present.
+	walComplete
+	// walIncomplete: a regular -wal with -shm confirmed absent. Neither
+	// DSN serves this state — the ordinary path creates the missing -shm
+	// and keeps it, and an immutable read silently omits every row the
+	// -wal holds. This is what an unclean shutdown leaves, and the one
+	// state a mutating command may proceed through: opening read-write
+	// recovers the log.
+	walIncomplete
+	// walUnknown: the sidecars could not be examined — a stat that failed
+	// for any reason other than absence, or a -wal that is not a regular
+	// file. Everyone refuses. Reporting this as walIncomplete would tell
+	// a mutating command it may proceed, on the strength of a question
+	// that was never answered.
+	walUnknown
+)
+
+// walStateOf classifies the sidecars beside path. A stat that fails for
+// any reason other than absence leaves the question open, and an open
+// question is never resolved as "no log" — that is the one reading under
+// which a silent immutable read looks safe — nor as "a writer crashed",
+// which is the one reading under which a read-write open looks safe.
+func walStateOf(path string) walState {
+	wal, err := os.Stat(path + "-wal")
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return walNone
+	case err != nil:
+		return walUnknown
+	case !wal.Mode().IsRegular():
+		// A directory, device, or socket named state.db-wal is not a log
+		// this code understands, whatever else it may be.
+		return walUnknown
+	}
+	if _, err := os.Stat(path + "-shm"); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return walIncomplete
+		}
+		return walUnknown
+	}
+	return walComplete
+}
+```
+
+Replace the `incompleteWAL` helper (lines 154-161, including its comment) with
+the message for the case that has no type:
+
+```go
+// unexaminableSidecars reports sidecars the filesystem would not describe.
+// It is not IncompleteWALError: that one asserts a writer crashed, which
+// is a licence to recover the log, and nothing here established that.
+func unexaminableSidecars(path string) error {
+	return fmt.Errorf(
+		"the state database at %s has write-ahead log files that could not be examined, "+
+			"so whether the log needs recovering is unknown; check the permissions and "+
+			"contents of the state directory", path)
+}
+```
 
 Add beside `IsMissingDatabase` at the end of the file:
 
@@ -220,22 +401,36 @@ Add beside `IsMissingDatabase` at the end of the file:
 // IsIncompleteWAL reports whether an OpenReadOnly error means the database
 // has a write-ahead log no reader can open without recovering it. Alone
 // among an inspection's refusals it is not a reason for a mutating command
-// to stop: opening the database read-write is what recovers the log.
+// to stop: opening the database read-write is what recovers the log. It is
+// false for sidecars that could not be examined, which stop everyone.
 func IsIncompleteWAL(err error) bool {
 	var e *IncompleteWALError
 	return errors.As(err, &e)
 }
 ```
 
+`errors`, `fmt`, `io/fs`, and `os` are all already imported by `readonly.go`; no
+import changes are needed.
+
+Leave the post-read re-check at `internal/state/readonly.go:107` alone. It asks
+`walStateOf(path) != walNone`, which still means "a log appeared while we were
+reading" for every state including the new one, and still ends in the same
+refusal. The message names a mid-inspection write, which for `walUnknown` is a
+guess about a race that has already made the answer unknowable — but it is a
+refusal either way, and narrowing it would add a fourth message for a case no
+one can reach deliberately.
+
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `go test ./internal/state/ ./internal/doctor/ ./internal/cli/ -count=1`
 
-Both the new test and the pre-existing
-`TestOpenReadOnlyUnrecoveredWALIsUncertainty` must pass — the second is the
-guarantee that the state root is still left untouched. Doctor's and the CLI's
-tests must pass unchanged; if any doctor golden output moved, the message was
-altered and step 3 is wrong.
+All three new or amended tests must pass, and so must the pre-existing
+`TestOpenReadOnlyUnrecoveredWALIsUncertainty` — that one is the guarantee that
+the state root is still left untouched. Doctor's and the CLI's tests must pass
+unchanged; if any doctor golden output moved, the confirmed-case message was
+altered and step 3 is wrong. Doctor's output for the *unexaminable* cases does
+change, which is intended and covered by no golden test — it refused before and
+refuses now, with a message that no longer claims a crash it did not observe.
 
 - [ ] **Step 5: Commit**
 
@@ -248,8 +443,15 @@ git commit -m "feat(state): type the incomplete write-ahead log refusal
 An unrecovered -wal is the one inspection refusal a mutating command
 should proceed through, since opening read-write recovers the log.
 IncompleteWALError and IsIncompleteWAL let rebuild tell it apart from a
-permission failure; the message is unchanged, so doctor's output is too."
+permission failure; the message is unchanged, so doctor's output is too.
+
+walStateOf gains walUnknown to make that distinction real. It previously
+returned walIncomplete for a failed stat and for a -wal that was not a
+regular file, neither of which establishes that a writer crashed. Typing
+that bucket as recoverable would have let a mutating command open a
+database whose sidecars it never managed to examine."
 ```
+
 
 ---
 
@@ -2077,6 +2279,73 @@ func TestApplyReclassifiesARegisterCandidateWhoseRowAppearedBeforeTheLock(t *tes
 	}
 }
 
+// The mirror image of the reclassification above, and the reason a digest
+// failure is carried forward rather than returned where it happens.
+// Classification saw no row, so a digest was loaded and the load failed —
+// but by the time the lock was held the row existed, which makes this an
+// adoption, and adoption writes no digest. Refusing at the load would
+// turn a recoverable workspace into a conflict on the strength of a
+// requirement it no longer has.
+func TestApplyAdoptsARegisterCandidateWhoseDigestFailedButWhoseRowAppeared(t *testing.T) {
+	ws := projectmux()
+	sess := liveSession(ws, "projectmux")
+	h := newHarness()
+	h.know(ws, "sha256:desired")
+	h.config.errs["projectmux"] = errors.New("projectmux.yaml is unreadable")
+	seedRecorded(t, h.fakeStore, ws)
+	h.observer.results = []controller.SessionObservation{observing(sess)}
+
+	report := h.applier().Apply(context.Background(), Plan{
+		Candidates: []Candidate{{Case: CaseRegister, Session: sess}},
+	})
+
+	if len(report.Conflicts) != 0 {
+		t.Fatalf("Conflicts = %+v, want none: adoption does not need a digest", report.Conflicts)
+	}
+	if len(report.Registered) != 1 {
+		t.Fatalf("Registered = %+v, want one", report.Registered)
+	}
+	rec, err := h.fakeStore.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.ActualSession == nil || *rec.ActualSession != "projectmux" {
+		t.Errorf("ActualSession = %v, want %q", rec.ActualSession, "projectmux")
+	}
+	assertRecordedFieldsUntouched(t, rec, ws)
+}
+
+// Carrying the failure must not swallow it. A register that is still a
+// register under the lock writes a row recording a desired digest, and
+// there is no digest to record: inventing one would be a guess, so this
+// is a conflict and nothing is written.
+func TestApplyRegisterWithAnUnreadableConfigurationIsAConflict(t *testing.T) {
+	ws := projectmux()
+	sess := liveSession(ws, "projectmux")
+	h := newHarness()
+	h.know(ws, "sha256:desired")
+	h.config.errs["projectmux"] = errors.New("projectmux.yaml is unreadable")
+	h.observer.results = []controller.SessionObservation{observing(sess)}
+
+	report := h.applier().Apply(context.Background(), Plan{
+		Candidates: []Candidate{{Case: CaseRegister, Session: sess}},
+	})
+
+	if len(report.Registered) != 0 {
+		t.Fatalf("Registered = %+v, want none", report.Registered)
+	}
+	if len(report.Conflicts) != 1 {
+		t.Fatalf("Conflicts = %+v, want exactly one", report.Conflicts)
+	}
+	if !strings.Contains(report.Conflicts[0].Reason, "projectmux.yaml is unreadable") {
+		t.Errorf("Reason = %q, want it to carry the configuration error",
+			report.Conflicts[0].Reason)
+	}
+	if _, err := h.fakeStore.Workspace(ws.ID); !errors.Is(err, state.ErrNotFound) {
+		t.Errorf("workspace err = %v, want ErrNotFound: nothing may be written", err)
+	}
+}
+
 func TestApplySessionThatVanishedBeforeTheLockIsAConflictWithNoWrite(t *testing.T) {
 	ws := projectmux()
 	sess := liveSession(ws, "projectmux")
@@ -2136,21 +2405,29 @@ func TestApplyReportsAnObservationFailureAsAConflict(t *testing.T) {
 
 Run: `go test ./internal/rebuild/ -run TestApply -v`
 
-Expected: four failures.
+Expected: five failures.
 - `TestApplyAdoptsOnlyAndLeavesEveryRecordedFieldUntouched`: FAIL at
   `Conflicts = [...], want none` — the digest is loaded unconditionally and
   `projectmux.yaml is unreadable` aborts the candidate.
 - `TestApplyReclassifiesARegisterCandidateWhoseRowAppearedBeforeTheLock`: FAIL
   at `IsPrimary = true, want the recorded false` — the unconditional
   `RegisterWorkspace` took the upsert branch and overwrote the row.
+- `TestApplyAdoptsARegisterCandidateWhoseDigestFailedButWhoseRowAppeared`: FAIL
+  at `Conflicts = [...], want none` — the digest failure returns where it is
+  loaded, before the lock-time re-classification can find the row.
 - `TestApplySessionThatVanishedBeforeTheLockIsAConflictWithNoWrite`: FAIL at
   `Registered = [...], want none` — the applier never re-observes.
 - `TestApplyReportsAnObservationFailureAsAConflict`: same, FAIL at
   `Registered = [...], want none`.
 
+`TestApplyRegisterWithAnUnreadableConfigurationIsAConflict` passes already: the
+unconditional load refuses it today. It is written now because Step 18 is what
+could break it — carrying the error forward is only correct if something still
+consults it.
+
 - [ ] **Step 18: Make the digest conditional and decide the writes under the lock**
 
-Two edits to `internal/rebuild/apply.go`.
+Three edits to `internal/rebuild/apply.go`.
 
 First, in `applyCandidate`, replace the unconditional digest load with:
 
@@ -2158,21 +2435,43 @@ First, in `applyCandidate`, replace the unconditional digest load with:
 	// Only registration writes a digest, so only registration needs one.
 	// A workspace whose configuration is broken can still have its live
 	// session adopted: adoption does not depend on the digest.
+	//
+	// The failure is carried rather than returned. The case decided here
+	// is a work list, not a verdict — if a row appeared in the meantime
+	// this candidate becomes an adoption under the lock, which needs no
+	// digest at all. Refusing at the load would make the outcome depend
+	// on a requirement the candidate may no longer have.
 	var digest string
+	var digestErr error
 	if cand.Case == CaseRegister {
-		digest, err = a.Config.Digest(ws.Slug)
-		if err != nil {
-			return nil, conflictf(sess.Name,
-				"loading the configuration for %q failed: %v", ws.Slug, err)
-		}
+		digest, digestErr = a.Config.Digest(ws.Slug)
 	}
 ```
 
-Second, replace everything after `defer release()` with a call to a new
+Second, extend the dry-run gate added in Step 13 to consult it. A dry run stops
+before the lock and so has only the pre-lock case to reason from; on that
+evidence this candidate registers, and registering is what the missing digest
+blocks:
+
+```go
+	if a.DryRun {
+		// Everything above is read-only, which is exactly what lets a dry
+		// run predict the real run's verdict and exit code (spec §2). A
+		// preview that stopped after pure classification would report a
+		// clean 0 for a vanished worktree the real run refuses.
+		if digestErr != nil {
+			return nil, conflictf(sess.Name,
+				"loading the configuration for %q failed: %v", ws.Slug, digestErr)
+		}
+		return registeredFor(ws, sess.Name), nil
+	}
+```
+
+Third, replace everything after `defer release()` with a call to a new
 function, and add that function:
 
 ```go
-	return a.writeUnderLock(ctx, ws, cand, digest)
+	return a.writeUnderLock(ctx, ws, cand, digest, digestErr)
 }
 
 // writeUnderLock re-observes, re-reads, and re-classifies with the lock
@@ -2180,7 +2479,11 @@ function, and add that function:
 // The lock package's rule is that the observation a mutation is decided
 // from must be taken after the lock (internal/lock/lock.go:1-5): the
 // classification pass is a work list, not evidence.
-func (a *Applier) writeUnderLock(ctx context.Context, ws resolve.Workspace, cand Candidate, digest string) (*Registered, *Conflict) {
+//
+// digestErr is the configuration failure from before the lock, if any. It
+// is consulted only where a digest is actually written, so that it stops
+// exactly the candidates that still need one.
+func (a *Applier) writeUnderLock(ctx context.Context, ws resolve.Workspace, cand Candidate, digest string, digestErr error) (*Registered, *Conflict) {
 	sess := cand.Session
 
 	obs, err := a.Sessions.ObserveSession(ctx, controller.SessionQuery{
@@ -2225,11 +2528,14 @@ func (a *Applier) writeUnderLock(ctx context.Context, ws resolve.Workspace, cand
 			// The row the first pass saw has since disappeared. The store
 			// has no delete primitive, so this needs an external actor —
 			// load the digest now rather than registering an empty one.
-			digest, err = a.Config.Digest(ws.Slug)
-			if err != nil {
-				return nil, conflictf(live.Name,
-					"loading the configuration for %q failed: %v", ws.Slug, err)
-			}
+			digest, digestErr = a.Config.Digest(ws.Slug)
+		}
+		// This is the one branch that writes a digest, so it is the one
+		// branch the failure stops — whether it came from before the lock
+		// or from the re-load just above.
+		if digestErr != nil {
+			return nil, conflictf(live.Name,
+				"loading the configuration for %q failed: %v", ws.Slug, digestErr)
 		}
 		if err := a.Store.RegisterWorkspace(ws, digest, now); err != nil {
 			return nil, conflictf(live.Name, "registering workspace %s: %v", ws.Slug, err)
@@ -2261,7 +2567,7 @@ Add `"errors"` to the import block.
 
 Run: `go test ./internal/rebuild/ -run TestApply -v`
 
-Expected: all ten PASS.
+Expected: all twelve PASS.
 
 - [ ] **Step 20: Commit**
 
@@ -2414,7 +2720,10 @@ with:
 3. `config.Load` for the desired digest — for CaseRegister only, the only case
    that writes a digest. A workspace whose configuration is broken can still
    have its live session adopted, because adoption does not depend on the
-   digest.
+   digest. A failure here is carried to step 5 rather than ending the candidate:
+   the case may become an adoption once the lock-held re-classification runs,
+   and a candidate that no longer writes a digest is not blocked by one it could
+   not load.
 ```
 
 The surrounding claim that steps 1-3 are read-only, and that `--dry-run` may
@@ -2440,7 +2749,7 @@ Rebuild therefore classifies the file read-only first, the way doctor does
 | --- | --- | --- |
 | missing (`state.IsMissingDatabase`) | proceed | `state.Open` creates it; the primary recovery path |
 | `IntegrityErr` set | refuse | the contents are not a usable database |
-| `*state.FutureSchemaError` | refuse | a newer build wrote this database |
+| `*state.FutureSchemaError` | refuse | a newer build wrote this database — its data is good, so the refusal must not advise destroying it |
 | `*state.PendingMigrationError` | proceed | `state.Open` migrates, as any mutating command does |
 | `state.IncompleteWALError` (Task 1) | proceed | `state.Open` recovers the log; this is the crash case rebuild exists for |
 | any other error | refuse | uncertainty, never a guess |
@@ -2449,9 +2758,21 @@ The refusal is a plain error, so it exits 1 through `exitCode`'s default branch
 (`internal/cli/cli.go:181-183`). That is deliberate: exit 6 denotes uncertainty
 about the world, while a corrupt file is a diagnosed, definite condition.
 
+**Refusing is one decision; what to advise is another.** The two refusals in that
+table are opposite situations wearing the same verdict. A corrupt database holds
+bytes nobody can read, so the advice is to move all three files aside and rebuild
+from live tmux sessions. A future schema holds *perfectly good data* — richer
+than this build understands — written by a newer projectmux the operator very
+likely still has installed. Telling them to move it aside would destroy a working
+installation to fix a version mismatch, and it would do so on the strength of a
+sentence that says "cannot be read", which in that case is false: it was read
+fine, and it said it was newer. So the two get separate messages, and only the
+corrupt one mentions moving files.
+
 **Files:**
-- Modify: `internal/cli/wiring.go:181-201` (add `rebuildDatabaseCheck` and
-  `corruptDatabaseError` immediately after the `inspectDatabase` seam)
+- Modify: `internal/cli/wiring.go:181-201` (add `rebuildDatabaseCheck`,
+  `corruptDatabaseError`, and `futureSchemaError` immediately after the
+  `inspectDatabase` seam)
 - Test: `internal/cli/rebuild_check_test.go` (create)
 
 The seam goes in `wiring.go` because that file already owns every substitutable
@@ -2464,7 +2785,8 @@ Task 5's `rebuild_test.go` stays about the command.
   `state.Inspection.Usable() error`; `state.DBPath(root string) string`;
   `state.IsMissingDatabase(err error) bool`;
   `state.IsIncompleteWAL(err error) bool` (Task 1);
-  `*state.PendingMigrationError`
+  `*state.PendingMigrationError`; `*state.FutureSchemaError`;
+  `state.SchemaVersion`
 - Produces: `var rebuildDatabaseCheck = func(root string) error` — Task 5 calls
   it before `openStore()`, and its tests substitute it.
 
@@ -2478,6 +2800,8 @@ Create `internal/cli/rebuild_check_test.go`:
 package cli
 
 import (
+	"database/sql"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -2485,6 +2809,10 @@ import (
 
 	"github.com/gambtho/projectmux/internal/resolve"
 	"github.com/gambtho/projectmux/internal/state"
+
+	// The driver is registered by internal/state already; naming it here
+	// keeps this file's sql.Open honest about what it depends on.
+	_ "modernc.org/sqlite"
 )
 
 // healthyStateRoot creates a state root holding a database this build
@@ -2542,6 +2870,49 @@ func TestRebuildDatabaseCheckRefusesACorruptDatabase(t *testing.T) {
 	}
 	if string(before) != string(after) {
 		t.Error("the check modified the database file")
+	}
+}
+
+// A database a newer projectmux wrote is refused, like a corrupt one —
+// but for the opposite reason, and the message must say so. Its contents
+// are good; they are simply richer than this build understands. Telling
+// the operator to move them aside would destroy a working installation to
+// resolve a version mismatch, so this test asserts the refusal does not
+// say that.
+func TestRebuildDatabaseCheckRefusesAFutureSchemaWithoutAdvisingDestruction(t *testing.T) {
+	root, path := healthyStateRoot(t)
+
+	// Claim a schema this build does not know. The pragma write goes
+	// through the ordinary driver; a clean close checkpoints it into the
+	// database file and removes the sidecars.
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", state.SchemaVersion+1)); err != nil {
+		t.Fatalf("bumping user_version: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	err = rebuildDatabaseCheck(root)
+	if err == nil {
+		t.Fatal("rebuildDatabaseCheck accepted a database from a newer build")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, path) {
+		t.Errorf("refusal %q does not name the database", msg)
+	}
+	if !strings.Contains(msg, "newer") {
+		t.Errorf("refusal %q does not say a newer build wrote it", msg)
+	}
+	// The corrupt-database advice must not leak here. These bytes are the
+	// operator's state, intact.
+	for _, forbidden := range []string{"aside", "cannot be read"} {
+		if strings.Contains(msg, forbidden) {
+			t.Errorf("refusal %q contains %q, which would advise destroying good data", msg, forbidden)
+		}
 	}
 }
 
@@ -2658,8 +3029,13 @@ var rebuildDatabaseCheck = func(root string) error {
 	if errors.As(usable, &pending) {
 		return nil
 	}
-	// Everything left is either confirmed damage or a database a newer
-	// build wrote. Neither is something to guess past.
+	// A newer build's database is refused, but its contents are good and
+	// the message must not tell anyone to move them aside.
+	var future *state.FutureSchemaError
+	if errors.As(usable, &future) {
+		return futureSchemaError(path, usable)
+	}
+	// What is left is confirmed damage, and not something to guess past.
 	return corruptDatabaseError(path, usable)
 }
 
@@ -2675,6 +3051,21 @@ func corruptDatabaseError(path string, cause error) error {
 			"sessions still describe",
 		path, cause, path, path+"-wal", path+"-shm")
 }
+
+// futureSchemaError refuses a database this build is too old to write,
+// and says nothing about moving files. The data is intact and a newer
+// projectmux — probably still installed — reads it correctly; rebuilding
+// over it would discard everything the newer schema records that this one
+// has no column for. The wrapped error already names both versions and
+// says to upgrade, so this adds only the path and the reason not to
+// reach for the corrupt-database remedy.
+func futureSchemaError(path string, cause error) error {
+	return fmt.Errorf(
+		"the state database at %s was written by a newer projectmux: %w\n"+
+			"its contents are intact, and rebuilding with this build would discard "+
+			"what the newer schema records",
+		path, cause)
+}
 ```
 
 `errors`, `fmt`, and `state` are already imported by `wiring.go`; no import
@@ -2684,7 +3075,7 @@ changes are needed.
 
 Run: `go test ./internal/cli/ -run TestRebuildDatabaseCheck -v`
 
-Expected: PASS, four tests.
+Expected: PASS, five tests.
 
 Note on the corrupt-database case: whether SQLite reports the garbage file as
 `SQLITE_NOTADB` (so `OpenReadOnly` returns an `Inspection` with `IntegrityErr`
