@@ -18,8 +18,10 @@ Three concrete gaps, each confirmed against the current tree:
    merged layer (`internal/config/validate.go`), so
    `more than one window sets focus: dev, test` cannot say whether
    `defaults.yaml`, `<slug>.yaml`, or `<slug>.local.yaml` is at fault. YAML
-   *decode* errors do carry a path and a `line N` (`load.go`, via yaml.v3);
-   the gap is semantic validation specifically.
+   *decode* errors are better off, but not uniformly: errors raised by yaml.v3
+   itself carry both a path and a `line N`, while the multi-document rejection
+   `load.go` constructs by hand carries the path only. So the gap is semantic
+   validation plus that one hand-built decode message.
 2. **`config` cannot reach a file that `doctor` can.** `buildEnvelope`
    resolves the worktree through git before loading configuration, so a
    workspace whose worktree has moved fails with *unknown workspace*
@@ -30,21 +32,28 @@ Three concrete gaps, each confirmed against the current tree:
    single line, undoing the "report every problem, not only the first"
    decision recorded in `config.go`.
 
+A fourth gap surfaced during review and is fixed here too: duplicate window
+names are undetectable in a defaults-only installation (§3.4). It is a
+pre-existing defect rather than a UX one, but it lands squarely in the path
+this slice adds.
+
 ## 2. Data model
 
 `InvalidConfigError.Problems` becomes `[]Problem`:
 
 ```go
-// Problem is one validation failure together with where it came from.
+// Problem is one validation failure together with every layer position
+// that contributed to it.
 type Problem struct {
-	// Field is the dotted path the problem is about:
+	// Field is the dotted path the problem is primarily about:
 	// "devcontainer.start_timeout", "windows[dev].location". It is empty
 	// for a problem no single field owns, such as a duplicated focus.
 	Field   string
 	Message string
-	// Origin is zero when no layer set the field. An absent required key
-	// has no file to point at, and inventing one would be a lie.
-	Origin Origin
+	// Origins are the positions the user may have to edit, primary first.
+	// It is empty when no layer set the field: an absent required key has
+	// no file to point at, and inventing one would be a lie.
+	Origins []Origin
 }
 
 // Origin is a location in a configuration layer. File is relative to the
@@ -56,12 +65,27 @@ type Origin struct {
 }
 ```
 
-Two properties are load-bearing.
+Four properties are load-bearing.
 
-**Origin is optional by construction.** `version is required` and
+**Origins is a list, because real failures are cross-field.** Two of the
+existing checks are jointly owned: `window "dev" sets location: container but
+devcontainer.enabled is false` implicates a window's `location` *and*
+`devcontainer.enabled`, potentially in different files; `more than one window
+sets focus` implicates every focused window. A single origin would force the
+report to name one file and stay silent about the other the user must also
+look at.
+
+**Attribution order is deterministic**, so output is stable and diffable:
+`Origins[0]` is the position of `Field` — the primary, the one the human
+renderer puts in the left column. The remainder follow in layer order
+(`defaults.yaml`, then `<slug>.yaml`, then `<slug>.local.yaml`), and within a
+file by ascending line. For a problem with no primary field, `Field` is empty
+and the whole list is in that same layer-then-line order.
+
+**Origins is optional by construction.** `version is required` and
 `window "dev" must set exactly one of agent, command, or shell (it sets
-none)` describe *absent* keys. There is no node to point at, so `Origin` is
-zero and rendering omits the prefix entirely. Printing `:0` would assert a
+none)` describe *absent* keys. There is no node to point at, so `Origins` is
+empty and rendering omits the prefix entirely. Printing `:0` would assert a
 position that does not exist — the same error as converting uncertainty into
 a finding.
 
@@ -139,6 +163,26 @@ weaker but still true statement; no rung invents a position.
 `rejectDuplicates` already runs per-layer, so
 `window "dev" is defined more than once` gains its file for free.
 
+### 3.4 A duplicate-detection hole this slice closes
+
+Duplicate window names are caught only inside `mergeWindows`, which
+`ValidateDefaults` never reaches — it calls `validate` directly. On an
+installation with no workspace layers, nothing merges, so a `defaults.yaml`
+declaring `dev` twice validates clean and `projectmux doctor` reports it
+healthy. The defect only surfaces later, when some workspace layer forces a
+merge, and it surfaces attributed to that workspace rather than to defaults.
+
+This is a pre-existing bug on `main`, not one this design introduces, but the
+`--validate` defaults-alone path would give it a second front door and make
+the wrong answer easier to reach. So duplicate detection moves out of
+`mergeWindows` into a check that runs over every layer as it is loaded,
+reached by both `Load` and `ValidateDefaults`. `mergeWindows` keeps merging
+and stops policing.
+
+The distinction it encodes is unchanged and still correct: repetition *within*
+one file is always a mistake; repetition *across* files is the merge working
+as intended.
+
 ## 4. Command surface
 
 ```
@@ -153,6 +197,24 @@ reporting an unknown workspace.
 
 With a slug: validate `defaults.yaml` merged with `workspaces/<slug>.yaml`
 and `workspaces/<slug>.local.yaml`.
+
+**The slug must be contained before it becomes a path.** `WorkspacePath` and
+`LocalPath` join their argument straight into the configuration root. Every
+existing caller obtains the slug from `resolve.slugFor`, so it is git-derived
+and inherently a single component; `--validate` is the first path that takes
+it from the command line. `resolve.byName` already guards the equivalent case,
+rejecting anything that is not exactly `filepath.Base(name)` or that carries a
+glob metacharacter, and states why: without it a separator escapes the
+configured roots.
+
+`--validate` applies the same rule and then one stronger one: the argument
+must be an exact member of `config.Slugs(root)`. Membership is the real
+contract — the mode validates workspace files that exist — and it makes
+traversal unrepresentable rather than merely rejected. `--validate ../../etc/x`
+therefore reports an unknown slug, not a read outside the configuration root.
+The exposure without this is bounded (read-only, and the file must parse as
+our schema) but the guard is one comparison and the resolver already sets the
+precedent.
 
 Without: validate `defaults.yaml` alone through `ValidateDefaults`, then
 every discovered slug. Defaults read alone stay a *warning* rather than a
@@ -213,6 +275,20 @@ rather than on what failed.
 
 Exit `0` when nothing is wrong. Exit `2` for usage errors.
 
+**A requested slug with no configuration file exits `2`.** It is a caller
+mistake — you named a workspace that does not exist — and `usageError` is the
+established carrier for that. It deliberately does **not** exit `4`:
+`ExitUnknownWorkspace` is the resolver's answer about worktrees, and
+`--validate` never consults the resolver. Reusing `4` would imply a git lookup
+happened. The message lists the slugs that were found, so the correction is
+immediate.
+
+**A warnings-only run exits `0`.** Warnings arise from `defaults.yaml` read
+alone, where an incomplete bottom layer is legitimate and a workspace layer
+may supply the rest. Treating that as failure would make
+`config --validate && deploy` fail on a correct installation. This matches
+doctor, where a `warn` is report content and the command still exits `0`.
+
 A subject reported **unknown** — one that could not be examined at all, such
 as an unreadable `workspaces/` directory — exits `1` (`ExitError`), not `5`
 and not `0`. It is an I/O failure, not invalid configuration, and it must not
@@ -237,8 +313,10 @@ shape under the shared version:
         {
           "field": "windows[dev].location",
           "message": "window \"dev\" sets location: container but devcontainer.enabled is false",
-          "file": "workspaces/dev.yaml",
-          "line": 12
+          "origins": [
+            {"file": "workspaces/dev.yaml", "line": 12},
+            {"file": "defaults.yaml", "line": 4}
+          ]
         }
       ]
     }
@@ -248,8 +326,9 @@ shape under the shared version:
 ```
 
 `status` is `ok`, `warn` (defaults read alone), `invalid`, or `unknown` (the
-subject could not be examined). `file` is `null` and `line` is omitted for an
-unattributable problem.
+subject could not be examined). `origins` is always present and is `[]` for an
+unattributable problem; `line` is omitted within an origin whose position is
+not known.
 
 ## 6. Relationship to doctor
 
@@ -282,6 +361,17 @@ same `config.Load`, so they cannot disagree.
   `windows[name]` lookup, the mode-unit rule, and every rung of the fallback
   ladder. Merge-origin tests assert which of three layers is credited for
   each field, including a field set by all three.
+- **Multi-origin ordering** — the two cross-field checks (container/enabled,
+  duplicated focus) assert the full `Origins` list, that `Origins[0]` is the
+  position of `Field`, and that the remainder are in layer-then-line order.
+  Ordering is asserted explicitly because unstable output would churn diffs.
+- **The duplicate-in-defaults hole** gets a regression test that fails on
+  today's `main`: a `defaults.yaml` naming one window twice, with no workspace
+  layer present, must be rejected by `ValidateDefaults` — and doctor must
+  report it.
+- **Slug containment** — `--validate` with a separator, a `..` component, and
+  a glob metacharacter each report an unknown slug and read no file outside
+  the configuration root.
 - **Brittleness guard.** Assertions are structural — file plus field — with
   line numbers asserted only in a small number of dedicated cases whose
   fixtures carry a comment marking the expected line. Otherwise every
@@ -289,7 +379,9 @@ same `config.Load`, so they cannot disagree.
 - **`internal/cli`** — `--validate` with a slug, with no argument, with an
   unknown slug, with an unreadable `workspaces/` directory (must report
   unknown, not none), the `--json` shape, and the exit-5 path through
-  `reportedError`.
+  `reportedError`. Each documented exit code gets a case: `0` clean, `0`
+  warnings-only, `2` unknown slug, `1` unknown subject, `5` invalid, and `5`
+  winning over `1` when a run produces both.
 - **`internal/doctor`** — existing tests updated for the new `Detail` shape
   and for `config.Slugs`.
 
