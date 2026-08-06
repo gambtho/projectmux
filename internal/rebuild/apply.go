@@ -111,6 +111,19 @@ func (a *Applier) applyCandidate(ctx context.Context, cand Candidate) (*Register
 			sess.Worktree, err)
 	}
 
+	// All three identity keys, not just the derived ID (spec §3). A
+	// session carrying a stale or hand-set @dev_slug would otherwise be
+	// registered from resolved values that silently disagree with it, and
+	// the next rebuild would report that row as a mismatch conflict
+	// instead of a clean no-op.
+	if !controller.SessionBelongsTo(sess, ws) {
+		return nil, conflictf(sess.Name,
+			"session carries workspace %s, slug %q, worktree %q, but %s resolves to "+
+				"workspace %s, slug %q, worktree %q; refusing to register it",
+			sess.WorkspaceID, sess.Slug, sess.Worktree,
+			sess.Worktree, ws.ID, ws.Slug, ws.Worktree)
+	}
+
 	digest, err := a.Config.Digest(ws.Slug)
 	if err != nil {
 		return nil, conflictf(sess.Name,

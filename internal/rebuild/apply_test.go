@@ -365,3 +365,36 @@ func TestApplyOrdersRegistrationsBySlugThenSessionAndPassesPlanConflictsThrough(
 		t.Errorf("Conflicts = %+v, want the classification conflict passed through unchanged", report.Conflicts)
 	}
 }
+
+func TestApplyRefusesASessionWhoseIdentityKeysContradictTheWorkspace(t *testing.T) {
+	ws := projectmux()
+	sess := liveSession(ws, "projectmux")
+	// The derived workspace ID still matches; the slug does not. Checking
+	// the ID alone would register the workspace from resolved values that
+	// silently disagree with the live keys.
+	sess.Slug = "stale-slug"
+
+	h := newHarness()
+	h.know(ws, "sha256:desired")
+	h.observer.results = []controller.SessionObservation{observing(sess)}
+
+	report := h.applier().Apply(context.Background(), Plan{
+		Candidates: []Candidate{{Case: CaseRegister, Session: sess}},
+	})
+
+	if len(report.Registered) != 0 {
+		t.Fatalf("Registered = %+v, want none", report.Registered)
+	}
+	if len(report.Conflicts) != 1 {
+		t.Fatalf("Conflicts = %+v, want exactly one", report.Conflicts)
+	}
+	if !strings.Contains(report.Conflicts[0].Reason, "stale-slug") {
+		t.Errorf("Reason = %q, want it to name the contradictory key", report.Conflicts[0].Reason)
+	}
+	if len(h.locker.locked) != 0 {
+		t.Errorf("locked = %v, want none: identity is verified before the lock", h.locker.locked)
+	}
+	if _, err := h.fakeStore.Workspace(ws.ID); !errors.Is(err, state.ErrNotFound) {
+		t.Errorf("workspace err = %v, want ErrNotFound: a refused session writes nothing", err)
+	}
+}
