@@ -175,8 +175,9 @@ func (f sessionListerFunc) Sessions(ctx context.Context) ([]controller.LiveSessi
 // Doctor deliberately does not go through openStore: state.Open creates
 // the file, enables WAL, and migrates, and a command that reports
 // "migrations pending" must not perform them in the same breath. The
-// database's own bytes are never written; SQLite may still materialize
-// the -shm/-wal sidecars any reader of a WAL database needs.
+// database's own bytes are never written, and nothing new appears beside
+// it either — see state.OpenReadOnly for how the -shm/-wal sidecars a WAL
+// reader would otherwise leave behind are avoided.
 var inspectDatabase = func(root string) (doctor.Database, doctor.Store, func()) {
 	db := doctor.Database{Path: state.DBPath(root), Supported: state.SchemaVersion}
 	ro, insp, err := state.OpenReadOnly(root)

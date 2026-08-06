@@ -65,9 +65,13 @@ type ReadOnlyStore struct {
 // still close cleanly. Consult Inspection.Usable before querying, and
 // Close the store whenever the error is nil.
 //
-// SQLite may create the -shm/-wal sidecars for a WAL database opened
-// read-only. The database file itself is never touched, which is what
-// "diagnose without mutating" protects.
+// Nothing is created beside the database either. Reading a WAL database
+// the ordinary way materializes the -shm and -wal sidecars, because
+// readers need the shared-memory index — and those files outlive the
+// connection, which would leave a diagnosis-only command permanently
+// altering the state root and unable to run at all where the directory
+// is not writable. The DSN choice below avoids that without giving up a
+// WAL-consistent read.
 func OpenReadOnly(root string) (*ReadOnlyStore, Inspection, error) {
 	path := DBPath(root)
 	if _, err := os.Stat(path); err != nil {
@@ -77,6 +81,38 @@ func OpenReadOnly(root string) (*ReadOnlyStore, Inspection, error) {
 		"?mode=ro" +
 		"&_pragma=busy_timeout(5000)" +
 		"&_pragma=query_only(1)"
+
+	// With no -wal beside the database there is no uncheckpointed
+	// content to miss, so it can be read as immutable: SQLite then skips
+	// the shared-memory index and touches nothing in the directory.
+	// Where a -wal does exist the sidecars are already there, so the
+	// ordinary path adds nothing to the state root anyway — and it is
+	// the only one that sees what the -wal holds. Immutable reads of a
+	// live WAL database silently omit committed rows.
+	if !walPresent(path) {
+		store, insp, err := inspect(dsn + "&immutable=1")
+		// A -wal that appeared mid-read means a writer was active and
+		// the immutable snapshot may be torn, so its verdict on
+		// integrity is unfounded. Anything else unexpected falls back
+		// too: immutable is an optimization that has to prove itself.
+		if err == nil && !(insp.IntegrityErr != nil && walPresent(path)) {
+			return store, insp, nil
+		}
+		if store != nil {
+			store.Close()
+		}
+	}
+	return inspect(dsn)
+}
+
+// walPresent reports whether a write-ahead log sits beside the database.
+func walPresent(path string) bool {
+	_, err := os.Stat(path + "-wal")
+	return err == nil
+}
+
+// inspect connects and reads the two facts an inspection is made of.
+func inspect(dsn string) (*ReadOnlyStore, Inspection, error) {
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, Inspection{}, fmt.Errorf("opening the state database read-only: %w", err)

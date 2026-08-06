@@ -252,17 +252,10 @@ func TestDoctorNeverTouchesTheStateDatabase(t *testing.T) {
 	if string(before) != string(after) {
 		t.Error("doctor modified the state database file")
 	}
+	// Not even the -shm/-wal sidecars a WAL reader would ordinarily
+	// materialize: doctor leaves the state root exactly as it found it.
 	if got := dirNames(t, stateRoot); strings.Join(got, ",") != strings.Join(beforeNames, ",") {
-		// SQLite's read-only connections still need the shared-memory
-		// index of a WAL database, so -shm and -wal may appear. Nothing
-		// else may.
-		for _, name := range got {
-			switch name {
-			case "state.db", "state.db-shm", "state.db-wal":
-			default:
-				t.Errorf("doctor created %q in the state root", name)
-			}
-		}
+		t.Errorf("state root = %v, want %v unchanged", got, beforeNames)
 	}
 }
 

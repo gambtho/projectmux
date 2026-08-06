@@ -31,6 +31,18 @@ var dependencyProbes = []dependency{
 // binary and so is probed separately.
 const dockerDaemonSubject = "docker daemon"
 
+// presence is what a version probe established about a binary. The
+// third state is the point: a probe that could not run leaves the
+// question open, and neither "it is here" nor "it is gone" may be
+// inferred from it.
+type presence int
+
+const (
+	presenceUnknown presence = iota
+	presencePresent
+	presenceAbsent
+)
+
 // dependencies probes each tool and also reports whether the docker
 // client was confirmed absent — stale-bindings needs that one fact, and
 // only a confirmed absence counts: an unfinished probe leaves the
@@ -48,20 +60,21 @@ func (r *Runner) dependencies(ctx context.Context) (Check, bool) {
 		if dep.subject != dockerSubject {
 			continue
 		}
-		dockerAbsent = !found
+		dockerAbsent = found == presenceAbsent
 		// The daemon is only meaningfully probed behind a client that
 		// exists; without one the reachability question has no answer
-		// to give, rather than a negative one.
-		if found {
+		// to give, rather than a negative one. A client whose probe
+		// failed is equally no ground to stand on.
+		if found == presencePresent {
 			check.Items = append(check.Items, r.probeDockerDaemon(ctx))
 		}
 	}
 	return check.aggregate(), dockerAbsent
 }
 
-// probeVersion reports the item and whether the binary was found. A
-// probe that could not run reports found: absence was not established.
-func (r *Runner) probeVersion(ctx context.Context, dep dependency) (Item, bool) {
+// probeVersion reports the item and what it established about the
+// binary.
+func (r *Runner) probeVersion(ctx context.Context, dep dependency) (Item, presence) {
 	item := Item{Subject: dep.subject}
 	res, err := r.Versions.Probe(ctx, dep.argv...)
 	switch {
@@ -70,10 +83,11 @@ func (r *Runner) probeVersion(ctx context.Context, dep dependency) (Item, bool) 
 		// tool is installed.
 		item.Status = StatusUnknown
 		item.Detail = err.Error()
+		return item, presenceUnknown
 	case !res.Found:
 		item.Status = dep.absent
 		item.Detail = "not installed"
-		return item, false
+		return item, presenceAbsent
 	case res.ExitCode != 0:
 		item.Status = StatusUnknown
 		item.Detail = fmt.Sprintf("%s exited %d: %s",
@@ -85,7 +99,8 @@ func (r *Runner) probeVersion(ctx context.Context, dep dependency) (Item, bool) 
 		item.Status = StatusOK
 		item.Detail = firstLine(res.Stdout)
 	}
-	return item, true
+	// The binary ran, whatever it then said, so it is on PATH.
+	return item, presencePresent
 }
 
 // probeDockerDaemon asks the client whether the daemon answers.

@@ -48,17 +48,6 @@ func (s *scriptedSessions) Sessions(context.Context) ([]controller.LiveSession, 
 	return s.sessions, s.err
 }
 
-func findCheck(t *testing.T, rep Report, name string) Check {
-	t.Helper()
-	for _, c := range rep.Checks {
-		if c.Name == name {
-			return c
-		}
-	}
-	t.Fatalf("check %q missing from the report", name)
-	return Check{}
-}
-
 func findItem(t *testing.T, c Check, subject string) Item {
 	t.Helper()
 	for _, item := range c.Items {
@@ -198,6 +187,35 @@ func TestDependenciesProbeErrorIsUnknown(t *testing.T) {
 	check, _ := r.dependencies(context.Background())
 	if got := findItem(t, check, "tmux").Status; got != StatusUnknown {
 		t.Errorf("tmux = %q, want unknown", got)
+	}
+}
+
+// TestDependenciesClientProbeErrorSkipsTheDaemon holds the other half
+// of the tri-state line: a docker client whose probe could not run is
+// neither present nor absent, so the daemon behind it must not be
+// probed and its absence must not be asserted downstream.
+func TestDependenciesClientProbeErrorSkipsTheDaemon(t *testing.T) {
+	versions := &scriptedVersions{
+		errs: map[string]error{"docker --version": errors.New("signal: killed")},
+	}
+	r := &Runner{Versions: versions}
+
+	check, dockerAbsent := r.dependencies(context.Background())
+	if dockerAbsent {
+		t.Error("a client whose probe failed was reported as confirmed absent")
+	}
+	if got := findItem(t, check, dockerSubject).Status; got != StatusUnknown {
+		t.Errorf("docker = %q, want unknown", got)
+	}
+	for _, item := range check.Items {
+		if item.Subject == dockerDaemonSubject {
+			t.Errorf("the daemon was probed behind a client that may not exist: %+v", item)
+		}
+	}
+	for _, call := range versions.calls {
+		if strings.HasPrefix(call, "docker version") {
+			t.Errorf("probe %q ran despite an unknown client", call)
+		}
 	}
 }
 

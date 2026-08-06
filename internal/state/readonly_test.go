@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -94,6 +95,130 @@ func TestOpenReadOnlyLeavesTheFileUntouched(t *testing.T) {
 	}
 	if string(before) != string(after) {
 		t.Fatal("the read-only inspection modified the database file")
+	}
+}
+
+// rootNames lists the state root, which the no-sidecar tests compare
+// across an inspection.
+func rootNames(t *testing.T, root string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return names
+}
+
+// TestOpenReadOnlyCreatesNoSidecars is the load-bearing one for the
+// no-mutation contract. Reading a WAL database the ordinary way leaves
+// -shm and -wal behind for good, which would make a diagnosis-only
+// command a permanent writer to the state root.
+func TestOpenReadOnlyCreatesNoSidecars(t *testing.T) {
+	root := seedDatabase(t)
+	before := rootNames(t, root)
+
+	ro, _, err := OpenReadOnly(root)
+	if err != nil {
+		t.Fatalf("OpenReadOnly: %v", err)
+	}
+	if _, err := ro.Workspaces(); err != nil {
+		t.Fatalf("Workspaces: %v", err)
+	}
+	during := rootNames(t, root)
+	if err := ro.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	after := rootNames(t, root)
+
+	for _, got := range []struct {
+		when  string
+		names []string
+	}{{"during the inspection", during}, {"after it closed", after}} {
+		if !slices.Equal(before, got.names) {
+			t.Errorf("state root %s = %v, want %v unchanged", got.when, got.names, before)
+		}
+	}
+}
+
+// TestOpenReadOnlyOnAnUnwritableRoot covers the case the sidecars used
+// to make impossible: an installation whose state directory cannot be
+// written is exactly when someone reaches for doctor.
+func TestOpenReadOnlyOnAnUnwritableRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root := seedDatabase(t)
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+
+	ro, insp, err := OpenReadOnly(root)
+	if err != nil {
+		t.Fatalf("OpenReadOnly on an unwritable root: %v", err)
+	}
+	defer ro.Close()
+	if usable := insp.Usable(); usable != nil {
+		t.Fatalf("a healthy database on an unwritable root reported %v", usable)
+	}
+	rows, err := ro.Workspaces()
+	if err != nil {
+		t.Fatalf("Workspaces: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Errorf("%d workspaces, want the 1 that was registered", len(rows))
+	}
+}
+
+// TestOpenReadOnlySeesUncheckpointedRows is the other half of the
+// contract the sidecar fix must not break. An immutable read of a live
+// WAL database silently omits committed rows, so a database with a -wal
+// beside it has to be read the ordinary way — where the sidecars
+// already exist, so nothing new is created there either.
+func TestOpenReadOnlySeesUncheckpointedRows(t *testing.T) {
+	root := seedDatabase(t)
+	// Hold the writer open so its -wal is not checkpointed away.
+	st, err := Open(root)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	ws := resolve.Workspace{
+		ID:          "id-2",
+		Slug:        "slab2",
+		Worktree:    "/w/slab2",
+		SessionName: "slab2",
+		IsPrimary:   true,
+	}
+	if err := st.RegisterWorkspace(ws, "sha256:def", time.Now()); err != nil {
+		t.Fatalf("RegisterWorkspace: %v", err)
+	}
+	if !walPresent(DBPath(root)) {
+		t.Fatal("the writer left no -wal, so this test proves nothing")
+	}
+	before := rootNames(t, root)
+
+	ro, insp, err := OpenReadOnly(root)
+	if err != nil {
+		t.Fatalf("OpenReadOnly: %v", err)
+	}
+	defer ro.Close()
+	if usable := insp.Usable(); usable != nil {
+		t.Fatalf("a healthy database reported %v", usable)
+	}
+	rows, err := ro.Workspaces()
+	if err != nil {
+		t.Fatalf("Workspaces: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Errorf("%d workspaces, want 2: the uncheckpointed row was missed", len(rows))
+	}
+	if got := rootNames(t, root); !slices.Equal(before, got) {
+		t.Errorf("state root = %v, want %v unchanged", got, before)
 	}
 }
 
