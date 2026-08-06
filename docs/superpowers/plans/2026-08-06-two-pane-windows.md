@@ -323,9 +323,31 @@ func TestMergeCreditsPanes(t *testing.T) {
 		t.Errorf("windows[dev].panes should be credited to workspace.yaml, got %+v", origin)
 	}
 }
+
+func TestMergeCreditsEachPanePath(t *testing.T) {
+	// The origin fallback ladder (originFor + enclosingWindow in
+	// internal/config/origin.go) reduces a field via its LAST bracket:
+	// "windows[dev].panes[mon].cwd" falls back to "windows[dev].panes[mon]",
+	// never to "windows[dev].panes". Each pane path must therefore be
+	// credited itself or nested pane problems print with no position.
+	cmd := "htop"
+	panes := []PaneLayer{{Name: "mon", Command: &cmd}}
+	over := Source{File: "workspace.yaml", Layer: Layer{Windows: []WindowLayer{
+		{Name: "dev", Panes: &panes},
+	}}}
+	m := mergeLayers(Merged{}, over)
+	for _, field := range []string{
+		"windows[dev].panes[mon]",
+		"windows[dev].panes[mon].cwd",
+	} {
+		if o, ok := m.originFor(field); !ok || o.File != "workspace.yaml" {
+			t.Errorf("originFor(%s) = %+v %v, want workspace.yaml", field, o, ok)
+		}
+	}
+}
 ```
 
-Adjust the origin-lookup call to whatever accessor `merge_origin_test.go` actually uses (`originOf`, `origins[...]`, or a helper) — read the file first and copy its pattern.
+Adjust the origin-lookup calls to whatever accessors `merge_origin_test.go` actually uses (`originOf`, `originFor`, `origins[...]`, or a helper) — read the file first and copy its pattern.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -367,8 +389,25 @@ In `creditWindow` (same file), after the `w.Focus != nil` block:
 ```go
 	if w.Panes != nil {
 		out.credit(over, prefix+".panes")
+		// The origin fallback ladder reduces a field via its last bracket,
+		// so "…panes[p].cwd" falls back to "…panes[p]" — never to the panes
+		// key. Credit every pane path to the panes key's position: the whole
+		// list comes from this one layer (unit merge), so that position is
+		// true for all of them, exactly like the mode trio above.
+		for _, p := range *w.Panes {
+			pane := prefix + ".panes[" + p.Name + "]"
+			out.creditAs(over.originOf(prefix+".panes"), pane,
+				pane+".agent", pane+".command", pane+".shell",
+				pane+".cwd", pane+".focus")
+		}
 	}
 ```
+
+If `Source.originOf` resolves YAML paths generically it will find the `panes`
+key's line; verify by reading `internal/config/source.go` (or wherever
+`originOf` lives) first. If it only resolves paths it was taught, point the
+pane credits at the position of `prefix+".panes"` however the mode-trio
+`creditAs` call obtains its position — mirror that call exactly.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -481,7 +520,12 @@ Then add below `validateWindow`:
 //
 // Duplicates are checked here rather than in duplicateWindows: panes
 // merge as a unit, so the merged window's list comes verbatim from one
-// layer and survives to the normalized config intact.
+// layer and survives to the normalized config intact. A duplicated list
+// in a layer that a later layer replaced is deliberately not reported —
+// the whole list was overridden, exactly as an overridden bad agent in
+// the mode trio goes unreported; defaults.yaml read on its own is still
+// covered because ValidateDefaults normalizes and validates that single
+// layer, which reaches this check.
 func validatePanes(m Merged, w Window) []Problem {
 	var problems []Problem
 	seen := map[string]bool{}
@@ -568,6 +612,7 @@ git commit -m "feat(config): validate pane names, modes, cwds, focus, and duplic
 **Files:**
 - Modify: `internal/controller/interfaces.go` (extend `WindowIntent`, `WindowSpec`; add `PaneIntent`, `PaneSpec`)
 - Modify: `internal/controller/ensure.go` (`renderWindows`)
+- Modify: `internal/cli/wiring_test.go` (the `Panes` slice makes `WindowIntent` non-comparable; `TestWindowIntentsDerivation` compares intents with `!=` and stops compiling)
 - Test: `internal/controller/ensure_test.go`
 
 **Interfaces:**
@@ -782,15 +827,32 @@ func renderWindows(intents []WindowIntent, d Desired, container *ContainerObserv
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 4: Fix the now non-comparable intent comparison in the CLI tests**
 
-Run: `go test ./internal/controller/ -run TestRenderWindows -v` then `go test ./internal/controller/`
-Expected: PASS; existing controller tests unaffected (intents without panes render empty pane lists).
+`WindowIntent` gained a slice field, so it no longer supports `!=`. In
+`internal/cli/wiring_test.go`, `TestWindowIntentsDerivation` compares
+intents element-wise with `!=` (around line 178) and now fails to compile.
+Replace the comparison loop with `reflect.DeepEqual` (add `"reflect"` to the
+imports); the `want` values need no change — windows without panes carry a
+nil `Panes` either side:
 
-- [ ] **Step 5: Commit**
+```go
+	for i := range want {
+		if !reflect.DeepEqual(intents[i], want[i]) {
+			t.Errorf("intent %d = %+v, want %+v", i, intents[i], want[i])
+		}
+	}
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `go test ./internal/controller/ -run TestRenderWindows -v` then `go test ./internal/controller/ ./internal/cli/` and `go build ./...`
+Expected: PASS everywhere — the whole tree compiles at the end of this task.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add internal/controller/interfaces.go internal/controller/ensure.go internal/controller/ensure_test.go
+git add internal/controller/interfaces.go internal/controller/ensure.go internal/controller/ensure_test.go internal/cli/wiring_test.go
 git commit -m "feat(controller): render pane intents into pane specs, container exec included"
 ```
 
@@ -888,19 +950,24 @@ func windowIntents(cfg config.Config) []controller.WindowIntent {
 		if w.Location != nil {
 			in.Location = controller.WindowLocation(*w.Location)
 		}
-		in.Panes = make([]controller.PaneIntent, 0, len(w.Panes))
-		for _, p := range w.Panes {
-			pane := controller.PaneIntent{Name: p.Name, Focus: p.Focus}
-			switch {
-			case p.Agent != nil:
-				pane.Command = *p.Agent
-			case p.Command != nil:
-				pane.Command = *p.Command
+		// Allocate only when panes exist so a pane-less window keeps a nil
+		// slice: normalized config always carries the list, but tests build
+		// Config values directly, and nil-vs-empty matters to DeepEqual.
+		if len(w.Panes) > 0 {
+			in.Panes = make([]controller.PaneIntent, 0, len(w.Panes))
+			for _, p := range w.Panes {
+				pane := controller.PaneIntent{Name: p.Name, Focus: p.Focus}
+				switch {
+				case p.Agent != nil:
+					pane.Command = *p.Agent
+				case p.Command != nil:
+					pane.Command = *p.Command
+				}
+				if p.Cwd != nil {
+					pane.RelDir = *p.Cwd
+				}
+				in.Panes = append(in.Panes, pane)
 			}
-			if p.Cwd != nil {
-				pane.RelDir = *p.Cwd
-			}
-			in.Panes = append(in.Panes, pane)
 		}
 		intents = append(intents, in)
 	}
@@ -1131,16 +1198,54 @@ func TestIntegrationCreateSessionWithPanes(t *testing.T) {
 		t.Errorf("solo panes = %v, want 1 (empty pane list)", solo)
 	}
 
-	// The configured environment must reach the split pane via -e.
-	out, err := exec.Command("tmux", "-L", socket, "show-environment", "-t",
-		"twopane", "PANE_PROBE").CombinedOutput()
-	if err != nil || !strings.Contains(string(out), "PANE_PROBE=yes") {
-		t.Errorf("session environment missing PANE_PROBE: %v %s", err, out)
+	// The -h split must yield two side-by-side panes of (near-)equal
+	// width; a one-column difference absorbs an odd total width.
+	widthsOut, err := exec.Command("tmux", "-L", socket, "list-panes", "-t",
+		"twopane:dev", "-F", "#{pane_width}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("list-panes widths: %v\n%s", err, widthsOut)
+	}
+	widths := strings.Fields(strings.TrimSpace(string(widthsOut)))
+	if len(widths) != 2 {
+		t.Fatalf("widths = %v", widths)
+	}
+	w0, _ := strconv.Atoi(widths[0])
+	w1, _ := strconv.Atoi(widths[1])
+	if diff := w0 - w1; diff < -1 || diff > 1 {
+		t.Errorf("pane widths %d/%d are not an even -h split", w0, w1)
+	}
+
+	// The configured environment must be visible INSIDE the split pane:
+	// the session table is populated by new-session -e alone, so probing
+	// it would not prove split-window -e worked (the existing env
+	// integration test documents the same limitation and uses this
+	// send-keys probe). The split pane is dev's active pane (Focus: true),
+	// so the bare window target addresses it without a pane index.
+	if err := exec.Command("tmux", "-L", socket, "send-keys", "-t",
+		"twopane:dev",
+		"printf 'PROBE=%s\\n' \"$PANE_PROBE\"", "Enter").Run(); err != nil {
+		t.Fatalf("send-keys: %v", err)
+	}
+	found := false
+	for i := 0; i < 50 && !found; i++ {
+		out, err := exec.Command("tmux", "-L", socket, "capture-pane", "-p",
+			"-t", "twopane:dev").Output()
+		if err == nil && strings.Contains(string(out), "PROBE=yes") {
+			found = true
+			break
+		}
+		exec.Command("sleep", "0.1").Run()
+	}
+	if !found {
+		t.Error("PANE_PROBE never appeared inside the split pane; split-window -e did not deliver the environment")
 	}
 }
 ```
 
-Note the env assertion uses the session environment (`show-environment`), matching how existing tests verify `-e`; the spec's manual transcripts already proved the value is visible inside the split pane's shell. Add `"path/filepath"` and `"strings"` to the imports if missing.
+The probe polling loop mirrors the existing env integration test in
+`internal/tmux/actuate_test.go` (around line 193) — read it and match its
+idiom. Add `"path/filepath"`, `"strconv"`, and `"strings"` to the imports
+if missing.
 
 - [ ] **Step 2: Run the integration test**
 
@@ -1259,10 +1364,19 @@ directory, same container if the window runs in one. Add `panes: []` to a
 window to keep it single-pane, or declare your own `panes` list.
 ```
 
-- [ ] **Step 2: Verify the full suite and docs build**
+- [ ] **Step 2: Run the CI gates locally**
 
-Run: `go test ./...` and `gofmt -l internal/` (expect no output) and `go vet ./...`
-Expected: everything green.
+Mirror `.github/workflows/ci.yml` exactly:
+
+```bash
+gofmt -l .                                # expect no output
+go mod tidy && git diff --exit-code go.mod go.sum
+go vet ./...
+go test -race ./...
+go build ./cmd/projectmux
+```
+
+Expected: everything green, no diff, no unformatted files.
 
 - [ ] **Step 3: Commit**
 

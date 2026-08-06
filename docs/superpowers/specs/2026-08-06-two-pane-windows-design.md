@@ -123,8 +123,14 @@ Two independent, composable rules:
 
 - Pane mode exclusivity: exactly one of `agent`/`command`/`shell`, same
   rule and message shape as windows.
-- Duplicate pane names within one window's list are a per-layer error,
-  mirroring `duplicateWindows`.
+- Duplicate pane names within one window's list are an error, checked on
+  the normalized config rather than per-layer: unit merge means the
+  merged list comes verbatim from one layer, so nothing collapses before
+  validation (the reason `duplicateWindows` needs its per-layer check).
+  A duplicated list in a layer that a later layer replaced goes
+  unreported — deliberately, matching how an overridden mode-trio value
+  escapes validation; defaults.yaml read alone is still covered via
+  `ValidateDefaults`.
 - At most one `focus: true` per window's pane list.
 - Problems use the field path `windows[<window>].panes[<pane>].<field>`
   with the same origin attribution machinery.
