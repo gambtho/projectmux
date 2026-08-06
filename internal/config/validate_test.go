@@ -10,11 +10,15 @@ import (
 func validateDefaults(t *testing.T, body string) []string {
 	t.Helper()
 	root := writeRoot(t, map[string]string{"defaults.yaml": body})
-	layer, err := LoadDefaults(root)
+	src, err := LoadDefaults(root)
 	if err != nil {
 		t.Fatalf("LoadDefaults: %v", err)
 	}
-	return ValidateDefaults(layer)
+	var rendered []string
+	for _, p := range ValidateDefaults(src) {
+		rendered = append(rendered, p.String())
+	}
+	return rendered
 }
 
 func TestValidateDefaultsAcceptsAnIncompleteLayer(t *testing.T) {

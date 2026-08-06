@@ -31,80 +31,91 @@ var numericWindowName = regexp.MustCompile(`^[0-9]+$`)
 // does state is checked as stated; a later layer may still override it,
 // which is why the caller reports these as a warning rather than a
 // rejection.
-func ValidateDefaults(l Layer) []string {
-	if l.Version == nil {
+func ValidateDefaults(src Source) []Problem {
+	merged := mergeLayers(Merged{root: filepath.Dir(src.File)}, src)
+	if merged.Layer.Version == nil {
 		supported := SchemaVersion
-		l.Version = &supported
+		merged.Layer.Version = &supported
 	}
-	return validate(l, normalize(l))
+	problems := merged.duplicateWindows(src)
+	return append(problems, validate(merged, normalize(merged.Layer))...)
 }
 
-// validate returns every problem in the effective configuration. The layer is
-// needed alongside the normalized config to tell an omitted version from an
-// unsupported one.
-func validate(l Layer, cfg Config) []string {
-	var problems []string
+// validate returns every problem in the effective configuration. The merged
+// layer is needed alongside the normalized config to tell an omitted version
+// from an unsupported one, and to attribute each problem to its source.
+func validate(m Merged, cfg Config) []Problem {
+	var problems []Problem
 
 	switch {
-	case l.Version == nil:
-		problems = append(problems, fmt.Sprintf(
-			"version is required and must be %d", SchemaVersion))
+	case m.Layer.Version == nil:
+		problems = append(problems, m.problem("version", fmt.Sprintf(
+			"version is required and must be %d", SchemaVersion)))
 	case cfg.Version != SchemaVersion:
-		problems = append(problems, fmt.Sprintf(
+		problems = append(problems, m.problem("version", fmt.Sprintf(
 			"unsupported schema version %d; this build supports version %d",
-			cfg.Version, SchemaVersion))
+			cfg.Version, SchemaVersion)))
 	}
 
 	if cfg.DevContainer.StartTimeout <= 0 {
-		problems = append(problems, fmt.Sprintf(
+		problems = append(problems, m.problem("devcontainer.start_timeout", fmt.Sprintf(
 			"devcontainer.start_timeout must be positive, got %s",
-			cfg.DevContainer.StartTimeout))
+			cfg.DevContainer.StartTimeout)))
 	}
 	if cfg.DevContainer.Config != nil {
-		if err := checkContained("devcontainer.config", *cfg.DevContainer.Config); err != nil {
-			problems = append(problems, err.Error())
+		if msg := checkContained("devcontainer.config", *cfg.DevContainer.Config); msg != "" {
+			problems = append(problems, m.problem("devcontainer.config", msg))
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(cfg.Environment)) {
+		field := "environment." + name
 		switch {
 		case name == "":
-			problems = append(problems, "environment contains an empty variable name")
+			problems = append(problems, m.problem(field,
+				"environment contains an empty variable name"))
 		case strings.ContainsAny(name, "=\x00"):
 			// Neither character can appear in a real environment variable name,
 			// so the export in a later slice would fail; reject it at config time.
-			problems = append(problems, fmt.Sprintf(
-				"environment variable name %q must not contain %q or a NUL byte", name, "="))
+			problems = append(problems, m.problem(field, fmt.Sprintf(
+				"environment variable name %q must not contain %q or a NUL byte", name, "=")))
 		}
 	}
 
 	var focused []string
+	var focusFields []string
 	for _, w := range cfg.Windows {
-		problems = append(problems, validateWindow(w)...)
+		problems = append(problems, validateWindow(m, w)...)
 		if cfg.DevContainer.Enabled == "false" && w.Location != nil && *w.Location == "container" {
-			problems = append(problems, fmt.Sprintf(
-				"window %q sets location: container but devcontainer.enabled is false", w.Name))
+			problems = append(problems, m.problem(windowField(w.Name, "location"), fmt.Sprintf(
+				"window %q sets location: container but devcontainer.enabled is false", w.Name),
+				"devcontainer.enabled"))
 		}
 		if w.Focus {
 			focused = append(focused, w.Name)
+			focusFields = append(focusFields, windowField(w.Name, "focus"))
 		}
 	}
 	if len(focused) > 1 {
-		problems = append(problems, fmt.Sprintf(
-			"more than one window sets focus: %s", strings.Join(focused, ", ")))
+		// No single field owns this: every focused window contributes, so
+		// the problem names them all rather than picking one arbitrarily.
+		problems = append(problems, m.problem("", fmt.Sprintf(
+			"more than one window sets focus: %s", strings.Join(focused, ", ")),
+			focusFields...))
 	}
 	return problems
 }
 
-func validateWindow(w Window) []string {
-	var problems []string
+func validateWindow(m Merged, w Window) []Problem {
+	var problems []Problem
+	window := fmt.Sprintf("windows[%s]", w.Name)
 
 	if !windowNamePattern.MatchString(w.Name) {
-		problems = append(problems, fmt.Sprintf(
-			"window %q has an invalid name; use characters from [A-Za-z0-9._-]", w.Name))
+		problems = append(problems, m.problem(window, fmt.Sprintf(
+			"window %q has an invalid name; use characters from [A-Za-z0-9._-]", w.Name)))
 	}
 	if numericWindowName.MatchString(w.Name) {
-		problems = append(problems, fmt.Sprintf(
-			"window %q has a fully numeric name, which tmux treats as a window index; include a non-digit", w.Name))
+		problems = append(problems, m.problem(window, fmt.Sprintf(
+			"window %q has a fully numeric name, which tmux treats as a window index; include a non-digit", w.Name)))
 	}
 
 	var modes []string
@@ -122,46 +133,56 @@ func validateWindow(w Window) []string {
 		if len(modes) > 1 {
 			detail = "it sets " + strings.Join(modes, " and ")
 		}
-		problems = append(problems, fmt.Sprintf(
+		// Attributed to the window, not to a key: when it sets none there is
+		// no key to point at, and when it sets two neither one alone is the
+		// answer. The window is what the reader has to look at either way.
+		problems = append(problems, m.problem(window, fmt.Sprintf(
 			"window %q must set exactly one of agent, command, or shell: true (%s)",
-			w.Name, detail))
+			w.Name, detail)))
 	}
 	if w.Agent != nil && strings.TrimSpace(*w.Agent) == "" {
-		problems = append(problems, fmt.Sprintf("window %q has an empty agent", w.Name))
+		problems = append(problems, m.problem(windowField(w.Name, "agent"), fmt.Sprintf(
+			"window %q has an empty agent", w.Name)))
 	}
 	if w.Command != nil && strings.TrimSpace(*w.Command) == "" {
-		problems = append(problems, fmt.Sprintf("window %q has an empty command", w.Name))
+		problems = append(problems, m.problem(windowField(w.Name, "command"), fmt.Sprintf(
+			"window %q has an empty command", w.Name)))
 	}
 
 	if w.Location != nil && *w.Location != "host" && *w.Location != "container" {
-		problems = append(problems, fmt.Sprintf(
-			"window %q has an invalid location %q; use host or container", w.Name, *w.Location))
+		problems = append(problems, m.problem(windowField(w.Name, "location"), fmt.Sprintf(
+			"window %q has an invalid location %q; use host or container", w.Name, *w.Location)))
 	}
 	if w.Cwd != nil {
-		if err := checkContained(fmt.Sprintf("window %q cwd", w.Name), *w.Cwd); err != nil {
-			problems = append(problems, err.Error())
+		if msg := checkContained(fmt.Sprintf("window %q cwd", w.Name), *w.Cwd); msg != "" {
+			problems = append(problems, m.problem(windowField(w.Name, "cwd"), msg))
 		}
 	}
 	return problems
 }
 
-// checkContained rejects a path that is absolute or that climbs out of the
-// worktree.
+// windowField builds the path of one field of one window.
+func windowField(name, field string) string {
+	return fmt.Sprintf("windows[%s].%s", name, field)
+}
+
+// checkContained reports why a path is unusable, or "" when it is fine. It
+// rejects a path that is absolute or that climbs out of the worktree.
 //
 // The check is lexical only. The target need not exist when configuration is
 // read, so a symlink pointing outside the worktree is not detectable here; this
 // rejects the paths a user can see are wrong, not every path that could
 // resolve outside.
-func checkContained(field, value string) error {
+func checkContained(field, value string) string {
 	if strings.TrimSpace(value) == "" {
-		return fmt.Errorf("%s must not be empty", field)
+		return fmt.Sprintf("%s must not be empty", field)
 	}
 	if filepath.IsAbs(value) {
-		return fmt.Errorf("%s must be relative to the worktree, got %q", field, value)
+		return fmt.Sprintf("%s must be relative to the worktree, got %q", field, value)
 	}
 	clean := filepath.Clean(value)
 	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("%s must not escape the worktree, got %q", field, value)
+		return fmt.Sprintf("%s must not escape the worktree, got %q", field, value)
 	}
-	return nil
+	return ""
 }

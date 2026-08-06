@@ -2,9 +2,9 @@ package doctor
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/gambtho/projectmux/internal/config"
@@ -19,7 +19,7 @@ func (r *Runner) configuration() Check {
 	}
 	check.Items = append(check.Items, r.defaultsItem())
 
-	slugs, err := workspaceSlugs(r.ConfigRoot)
+	slugs, err := config.Slugs(r.ConfigRoot)
 	if err != nil {
 		check.Items = append(check.Items, Item{
 			Subject: "workspaces",
@@ -32,11 +32,35 @@ func (r *Runner) configuration() Check {
 		item := Item{Subject: slug, Status: StatusOK}
 		if _, err := config.Load(r.ConfigRoot, r.Defaults, slug); err != nil {
 			item.Status = StatusFail
-			item.Detail = oneLine(err.Error())
+			item.Detail = summarizeProblems(config.ProblemsOf(err), slug)
 		}
 		check.Items = append(check.Items, item)
 	}
 	return check.aggregate()
+}
+
+// summarizeProblems describes a workspace's problems at doctor's altitude.
+//
+// It reports how many there are and where the first one is, then points at
+// the focused command for the rest. Doctor answers "is anything wrong across
+// this installation"; `config --validate` answers "what exactly, and where".
+// Reproducing every problem here would make one broken workspace crowd out
+// the others, which is what the old single-line flattening did badly in the
+// other direction — it discarded the detail instead of delegating it.
+func summarizeProblems(problems []config.Problem, slug string) string {
+	if len(problems) == 0 {
+		return ""
+	}
+	noun := "problems"
+	if len(problems) == 1 {
+		noun = "problem"
+	}
+	first := problems[0].Message
+	if len(problems[0].Origins) > 0 {
+		first = problems[0].Origins[0].String() + ": " + first
+	}
+	return fmt.Sprintf("%d %s, first at %s; run: projectmux config --validate %s",
+		len(problems), noun, first, slug)
 }
 
 // defaultsItem validates defaults.yaml on its own. Validation otherwise
@@ -60,49 +84,13 @@ func (r *Runner) defaultsItem() Item {
 		return item
 	}
 	if problems := config.ValidateDefaults(r.Defaults); len(problems) > 0 {
+		rendered := make([]string, 0, len(problems))
+		for _, p := range problems {
+			rendered = append(rendered, p.String())
+		}
 		item.Status = StatusWarn
 		item.Detail = "read alone, defaults.yaml has problems a workspace layer would have to override: " +
-			strings.Join(problems, "; ")
+			strings.Join(rendered, "; ")
 	}
 	return item
-}
-
-// workspaceSlugs lists the tracked workspace layers. The machine-local
-// files are not separate subjects: config.Load already merges each under
-// its slug.
-//
-// Reading the directory rather than globbing it is deliberate: Glob
-// discards filesystem errors, so a workspaces/ directory that cannot be
-// read would report as an installation with no workspaces — an
-// affirmative answer over unexamined ground. Only an absent directory
-// means "none".
-func workspaceSlugs(root string) ([]string, error) {
-	entries, err := os.ReadDir(filepath.Join(root, "workspaces"))
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var slugs []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".yaml") {
-			continue
-		}
-		name = strings.TrimSuffix(name, ".yaml")
-		if strings.HasSuffix(name, ".local") {
-			continue
-		}
-		slugs = append(slugs, name)
-	}
-	return slugs, nil
-}
-
-// oneLine flattens a multi-problem error into a single report line.
-func oneLine(s string) string {
-	return strings.Join(strings.Fields(strings.ReplaceAll(s, "\n", " ")), " ")
 }

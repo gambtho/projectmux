@@ -49,8 +49,9 @@ commands:
         end the workspace session, and with --container its container
   autostart [--json] [--compact]
         start containers for registered primary worktrees with autostart: true
-  config [--json] [--compact] [<workspace>]
-        print the normalized, merged configuration for a workspace
+  config [--validate] [--json] [--compact] [<workspace>]
+        print the normalized, merged configuration for a workspace, or with
+        --validate report what is wrong in the configuration files and where
   list [--json] [--compact]
         list recorded workspaces and live identity-carrying tmux sessions
   status [--json] [--compact] [<workspace>]
@@ -68,11 +69,19 @@ This is an alpha build. Only the commands listed above are implemented.
 // reportedError marks a failure whose full detail already went to
 // stdout as the command's structured report — the deliberate exception
 // to the no-stdout-on-failure contract (stop/autostart spec §5). Main
-// prints only its one-line summary to stderr; the exit code is the
-// default failure code.
-type reportedError struct{ msg string }
+// prints only its one-line summary to stderr.
+//
+// err is the underlying cause, and may be nil. It exists so that exit-code
+// classification still sees what actually failed: the exit code is a
+// property of the failure, not of which command reported it. Leaving it nil
+// keeps the default failure code, which is what a partial stop wants.
+type reportedError struct {
+	msg string
+	err error
+}
 
 func (e *reportedError) Error() string { return e.msg }
+func (e *reportedError) Unwrap() error { return e.err }
 
 // usageError marks a caller mistake, which exits 2 and prints usage guidance.
 type usageError struct{ msg string }

@@ -221,7 +221,7 @@ func TestDependenciesClientProbeErrorSkipsTheDaemon(t *testing.T) {
 
 // writeConfig lays out a configuration root and returns it with the
 // loaded defaults layer.
-func writeConfig(t *testing.T, files map[string]string) (string, config.Layer) {
+func writeConfig(t *testing.T, files map[string]string) (string, config.Source) {
 	t.Helper()
 	root := t.TempDir()
 	for name, body := range files {

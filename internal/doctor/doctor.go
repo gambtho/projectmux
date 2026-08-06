@@ -156,7 +156,7 @@ func (d Database) unavailable() error {
 // interface so each check is testable without a live environment.
 type Runner struct {
 	ConfigRoot string
-	Defaults   config.Layer
+	Defaults   config.Source
 	// DefaultsErr, when set, is why the defaults layer could not be
 	// read; per-workspace validation cannot run without it.
 	DefaultsErr error

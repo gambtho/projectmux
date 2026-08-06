@@ -44,6 +44,19 @@ func LocalPath(root, slug string) string {
 	return filepath.Join(root, "workspaces", slug+".local.yaml")
 }
 
+// Source is one layer file: its decoded form, its path, and its document
+// node.
+//
+// The node is kept beside Layer rather than inside it because Layer's fields
+// must stay concretely typed: a yaml.Node field would reopen the
+// unknown-field hole that keeps a misspelled key from silently becoming
+// default behavior.
+type Source struct {
+	Layer Layer
+	File  string
+	root  *yaml.Node
+}
+
 // LoadDefaults reads defaults.yaml alone.
 //
 // It is separate from Load because defaults.yaml carries repository_roots,
@@ -51,31 +64,38 @@ func LocalPath(root, slug string) string {
 // remaining layer paths — is known. A corrupt defaults.yaml consequently fails
 // before any resolution, which is the correct direction for "invalid
 // configuration fails before any mutation".
-func LoadDefaults(root string) (Layer, error) {
+func LoadDefaults(root string) (Source, error) {
 	return loadLayer(DefaultsPath(root))
 }
 
 // Load merges defaults with the workspace layers for slug and returns the
 // normalized, validated configuration and its digest.
-func Load(root string, defaults Layer, slug string) (Effective, error) {
-	merged := defaults
+func Load(root string, defaults Source, slug string) (Effective, error) {
+	// Every layer is read before anything is checked, so a file that will
+	// not decode is still reported ahead of a semantic problem elsewhere —
+	// the ordering that held when duplicate detection lived in the merge.
+	sources := []Source{defaults}
+	merged := mergeLayers(Merged{root: root}, defaults)
 	for _, path := range []string{WorkspacePath(root, slug), LocalPath(root, slug)} {
-		layer, err := loadLayer(path)
+		src, err := loadLayer(path)
 		if err != nil {
 			return Effective{}, err
 		}
-		if layer.RepositoryRoots != nil {
+		if src.Layer.RepositoryRoots != nil {
 			return Effective{}, invalid(fmt.Sprintf(
 				"%s: repository_roots may only be set in defaults.yaml", path))
 		}
-		merged, err = mergeLayers(merged, layer)
-		if err != nil {
-			return Effective{}, err
-		}
+		sources = append(sources, src)
+		merged = mergeLayers(merged, src)
 	}
 
-	cfg := normalize(merged)
-	if problems := validate(merged, cfg); len(problems) > 0 {
+	var problems []Problem
+	for _, src := range sources {
+		problems = append(problems, merged.duplicateWindows(src)...)
+	}
+	cfg := normalize(merged.Layer)
+	problems = append(problems, validate(merged, cfg)...)
+	if len(problems) > 0 {
 		return Effective{}, &InvalidConfigError{Problems: problems}
 	}
 	digest, err := digest(cfg)
@@ -88,13 +108,19 @@ func Load(root string, defaults Layer, slug string) (Effective, error) {
 // loadLayer decodes one YAML file strictly. A missing file, an empty file, and
 // a comment-only file all behave as an empty document rather than as an error
 // or a null that poisons the merge.
-func loadLayer(path string) (Layer, error) {
+//
+// The file is decoded twice: once strictly into Layer, and once into a
+// yaml.Node that carries positions. The passes stay separate because
+// Node.Decode does not honor KnownFields — routing the strict decode through
+// the node would trade unknown-field rejection for line numbers, and
+// rejection is the more valuable of the two.
+func loadLayer(path string) (Source, error) {
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return Layer{}, nil
+		return Source{File: path}, nil
 	}
 	if err != nil {
-		return Layer{}, fmt.Errorf("reading %s: %w", path, err)
+		return Source{}, fmt.Errorf("reading %s: %w", path, err)
 	}
 
 	var layer Layer
@@ -103,19 +129,28 @@ func loadLayer(path string) (Layer, error) {
 	if err := dec.Decode(&layer); err != nil {
 		// io.EOF means the document was empty or held only comments.
 		if errors.Is(err, io.EOF) {
-			return Layer{}, nil
+			return Source{File: path}, nil
 		}
-		return Layer{}, invalid(fmt.Sprintf("%s: %s", path, cleanYAMLError(err)))
+		return Source{}, invalid(fmt.Sprintf("%s: %s", path, cleanYAMLError(err)))
 	}
 	// A second document would silently discard configuration. Anything other
 	// than io.EOF means more content followed, including a second document too
 	// malformed to decode — which must not read as "there was nothing there".
 	var extra Layer
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		return Layer{}, invalid(fmt.Sprintf(
+		return Source{}, invalid(fmt.Sprintf(
 			"%s: contains more than one YAML document; use a single document", path))
 	}
-	return layer, nil
+
+	// Positions are best-effort: the strict decode above has already proved
+	// the document is well formed and schema-valid, so a failure here would
+	// mean only that lines are unavailable, never that the layer is bad.
+	src := Source{Layer: layer, File: path}
+	var node yaml.Node
+	if err := yaml.Unmarshal(raw, &node); err == nil {
+		src.root = &node
+	}
+	return src, nil
 }
 
 // yamlTypeSuffix strips the Go type name yaml.v3 appends to unknown-field
