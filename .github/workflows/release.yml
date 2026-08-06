@@ -28,6 +28,18 @@ on:
 permissions:
   contents: read
 
+# One release at a time, per tag.
+#
+# Runs are never cancelled: a cancelled publish would fire its cleanup trap
+# and delete a draft it no longer owns. Two tags pushed seconds apart get
+# distinct groups and proceed independently, which is correct — they are
+# different releases. The group exists so a re-run of the *same* tag cannot
+# race the run already publishing it, where one run's cleanup could delete the
+# other's finished release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   GO_VERSION: "1.25.x"
 
