@@ -296,11 +296,16 @@ func TestApplyConfigFailureIsOneWorkspacesConflictNotTheBatchs(t *testing.T) {
 	h.know(other, "sha256:other")
 	h.config.errs["other"] = errors.New(`other.yaml: unknown field "widnows"`)
 	good := liveSession(ws, "projectmux")
-	h.observer.results = []controller.SessionObservation{observing(good)}
+	otherSess := liveSession(other, "other")
+	// Both candidates are scripted, in candidate order. A failed digest is
+	// carried to the lock rather than ending the candidate, so "other"
+	// re-observes too and only then refuses; scripting "good" alone would
+	// hand "other" the wrong session and leave "good" unscripted.
+	h.observer.results = []controller.SessionObservation{observing(otherSess), observing(good)}
 
 	report := h.applier().Apply(context.Background(), Plan{
 		Candidates: []Candidate{
-			{Case: CaseRegister, Session: liveSession(other, "other")},
+			{Case: CaseRegister, Session: otherSess},
 			{Case: CaseRegister, Session: good},
 		},
 	})
@@ -467,5 +472,237 @@ func TestApplyDryRunMatchesTheRealRunAndWritesNothing(t *testing.T) {
 	}
 	if len(recs) != 0 {
 		t.Errorf("dry run left %d records, want 0", len(recs))
+	}
+}
+
+// seedRecorded registers a row whose every overwritable field disagrees
+// with what the resolver and the configuration loader would supply.
+// RegisterWorkspace's conflict branch overwrites slug, worktree,
+// is_primary, proposed_session, and desired_digest
+// (internal/state/store.go:43-49), so any of these changing proves the
+// applier re-registered a workspace it should only have adopted.
+//
+// Slug and worktree deliberately match: a row disagreeing on those is an
+// identity mismatch, which classification refuses before it ever reaches
+// application.
+func seedRecorded(t *testing.T, store *fake.Store, ws resolve.Workspace) {
+	t.Helper()
+	recorded := workspace(ws.ID, ws.Slug, ws.Worktree, "recorded-proposed", false)
+	if err := store.RegisterWorkspace(recorded, "sha256:recorded", testTime); err != nil {
+		t.Fatalf("seeding the recorded row: %v", err)
+	}
+}
+
+func assertRecordedFieldsUntouched(t *testing.T, rec state.Record, ws resolve.Workspace) {
+	t.Helper()
+	if rec.IsPrimary {
+		t.Errorf("IsPrimary = true, want the recorded false: adoption must not re-register")
+	}
+	if rec.ProposedSession != "recorded-proposed" {
+		t.Errorf("ProposedSession = %q, want %q", rec.ProposedSession, "recorded-proposed")
+	}
+	if rec.DesiredDigest == nil || *rec.DesiredDigest != "sha256:recorded" {
+		t.Errorf("DesiredDigest = %v, want %q", rec.DesiredDigest, "sha256:recorded")
+	}
+	if rec.Slug != ws.Slug {
+		t.Errorf("Slug = %q, want %q", rec.Slug, ws.Slug)
+	}
+	if rec.Worktree != ws.Worktree {
+		t.Errorf("Worktree = %q, want %q", rec.Worktree, ws.Worktree)
+	}
+}
+
+func TestApplyAdoptsOnlyAndLeavesEveryRecordedFieldUntouched(t *testing.T) {
+	ws := projectmux()
+	sess := liveSession(ws, "projectmux")
+	h := newHarness()
+	h.know(ws, "sha256:desired")
+	// A broken workspace configuration must not block adoption: only
+	// registration writes a digest.
+	h.config.errs["projectmux"] = errors.New("projectmux.yaml is unreadable")
+	seedRecorded(t, h.fakeStore, ws)
+	h.observer.results = []controller.SessionObservation{observing(sess)}
+
+	// Candidate.Record is left nil on purpose: the applier re-reads the
+	// row under the lock and must never trust the first pass's copy.
+	report := h.applier().Apply(context.Background(), Plan{
+		Candidates: []Candidate{{Case: CaseAdopt, Session: sess}},
+	})
+
+	if len(report.Conflicts) != 0 {
+		t.Fatalf("Conflicts = %+v, want none", report.Conflicts)
+	}
+	if len(report.Registered) != 1 {
+		t.Fatalf("Registered = %+v, want one", report.Registered)
+	}
+	rec, err := h.fakeStore.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.ActualSession == nil || *rec.ActualSession != "projectmux" {
+		t.Errorf("ActualSession = %v, want %q", rec.ActualSession, "projectmux")
+	}
+	assertRecordedFieldsUntouched(t, rec, ws)
+}
+
+func TestApplyReclassifiesARegisterCandidateWhoseRowAppearedBeforeTheLock(t *testing.T) {
+	ws := projectmux()
+	sess := liveSession(ws, "projectmux")
+	h := newHarness()
+	h.know(ws, "sha256:desired")
+	// Classification saw no row; another process registered the workspace
+	// in the gap. The lock-time re-read must turn this into an adoption.
+	seedRecorded(t, h.fakeStore, ws)
+	h.observer.results = []controller.SessionObservation{observing(sess)}
+
+	report := h.applier().Apply(context.Background(), Plan{
+		Candidates: []Candidate{{Case: CaseRegister, Session: sess}},
+	})
+
+	if len(report.Conflicts) != 0 {
+		t.Fatalf("Conflicts = %+v, want none", report.Conflicts)
+	}
+	if len(report.Registered) != 1 {
+		t.Fatalf("Registered = %+v, want one", report.Registered)
+	}
+	rec, err := h.fakeStore.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.ActualSession == nil || *rec.ActualSession != "projectmux" {
+		t.Errorf("ActualSession = %v, want %q", rec.ActualSession, "projectmux")
+	}
+	assertRecordedFieldsUntouched(t, rec, ws)
+
+	if h.observer.calls != 1 {
+		t.Fatalf("ObserveSession called %d times, want 1 (under the lock)", h.observer.calls)
+	}
+	wantQuery := controller.SessionQuery{
+		WorkspaceID:    ws.ID,
+		CandidateNames: []string{"projectmux"},
+	}
+	if !reflect.DeepEqual(h.observer.queries[0], wantQuery) {
+		t.Errorf("query = %+v, want %+v", h.observer.queries[0], wantQuery)
+	}
+}
+
+// The mirror image of the reclassification above, and the reason a digest
+// failure is carried forward rather than returned where it happens.
+// Classification saw no row, so a digest was loaded and the load failed —
+// but by the time the lock was held the row existed, which makes this an
+// adoption, and adoption writes no digest. Refusing at the load would
+// turn a recoverable workspace into a conflict on the strength of a
+// requirement it no longer has.
+func TestApplyAdoptsARegisterCandidateWhoseDigestFailedButWhoseRowAppeared(t *testing.T) {
+	ws := projectmux()
+	sess := liveSession(ws, "projectmux")
+	h := newHarness()
+	h.know(ws, "sha256:desired")
+	h.config.errs["projectmux"] = errors.New("projectmux.yaml is unreadable")
+	seedRecorded(t, h.fakeStore, ws)
+	h.observer.results = []controller.SessionObservation{observing(sess)}
+
+	report := h.applier().Apply(context.Background(), Plan{
+		Candidates: []Candidate{{Case: CaseRegister, Session: sess}},
+	})
+
+	if len(report.Conflicts) != 0 {
+		t.Fatalf("Conflicts = %+v, want none: adoption does not need a digest", report.Conflicts)
+	}
+	if len(report.Registered) != 1 {
+		t.Fatalf("Registered = %+v, want one", report.Registered)
+	}
+	rec, err := h.fakeStore.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.ActualSession == nil || *rec.ActualSession != "projectmux" {
+		t.Errorf("ActualSession = %v, want %q", rec.ActualSession, "projectmux")
+	}
+	assertRecordedFieldsUntouched(t, rec, ws)
+}
+
+// Carrying the failure must not swallow it. A register that is still a
+// register under the lock writes a row recording a desired digest, and
+// there is no digest to record: inventing one would be a guess, so this
+// is a conflict and nothing is written.
+func TestApplyRegisterWithAnUnreadableConfigurationIsAConflict(t *testing.T) {
+	ws := projectmux()
+	sess := liveSession(ws, "projectmux")
+	h := newHarness()
+	h.know(ws, "sha256:desired")
+	h.config.errs["projectmux"] = errors.New("projectmux.yaml is unreadable")
+	h.observer.results = []controller.SessionObservation{observing(sess)}
+
+	report := h.applier().Apply(context.Background(), Plan{
+		Candidates: []Candidate{{Case: CaseRegister, Session: sess}},
+	})
+
+	if len(report.Registered) != 0 {
+		t.Fatalf("Registered = %+v, want none", report.Registered)
+	}
+	if len(report.Conflicts) != 1 {
+		t.Fatalf("Conflicts = %+v, want exactly one", report.Conflicts)
+	}
+	if !strings.Contains(report.Conflicts[0].Reason, "projectmux.yaml is unreadable") {
+		t.Errorf("Reason = %q, want it to carry the configuration error",
+			report.Conflicts[0].Reason)
+	}
+	if _, err := h.fakeStore.Workspace(ws.ID); !errors.Is(err, state.ErrNotFound) {
+		t.Errorf("workspace err = %v, want ErrNotFound: nothing may be written", err)
+	}
+}
+
+func TestApplySessionThatVanishedBeforeTheLockIsAConflictWithNoWrite(t *testing.T) {
+	ws := projectmux()
+	sess := liveSession(ws, "projectmux")
+	h := newHarness()
+	h.know(ws, "sha256:desired")
+	// The session died between classification and the lock: the lock-time
+	// observation finds nothing carrying the workspace's identity keys.
+	h.observer.results = []controller.SessionObservation{{}}
+
+	report := h.applier().Apply(context.Background(), Plan{
+		Candidates: []Candidate{{Case: CaseRegister, Session: sess}},
+	})
+
+	if len(report.Registered) != 0 {
+		t.Fatalf("Registered = %+v, want none", report.Registered)
+	}
+	if len(report.Conflicts) != 1 {
+		t.Fatalf("Conflicts = %+v, want exactly one", report.Conflicts)
+	}
+	if !strings.Contains(report.Conflicts[0].Reason, "no longer live") {
+		t.Errorf("Reason = %q, want it to say the session was no longer live",
+			report.Conflicts[0].Reason)
+	}
+	if _, err := h.fakeStore.Workspace(ws.ID); !errors.Is(err, state.ErrNotFound) {
+		t.Errorf("workspace err = %v, want ErrNotFound: a dead session writes nothing", err)
+	}
+	if h.locker.released != 1 {
+		t.Errorf("lock released %d times, want 1 even on the conflict path", h.locker.released)
+	}
+}
+
+func TestApplyReportsAnObservationFailureAsAConflict(t *testing.T) {
+	ws := projectmux()
+	sess := liveSession(ws, "projectmux")
+	h := newHarness()
+	h.know(ws, "sha256:desired")
+	h.observer.errs = []error{errors.New("no server running on /tmp/tmux-1000/default")}
+
+	report := h.applier().Apply(context.Background(), Plan{
+		Candidates: []Candidate{{Case: CaseRegister, Session: sess}},
+	})
+
+	if len(report.Registered) != 0 {
+		t.Fatalf("Registered = %+v, want none", report.Registered)
+	}
+	if len(report.Conflicts) != 1 ||
+		!strings.Contains(report.Conflicts[0].Reason, "no server running") {
+		t.Fatalf("Conflicts = %+v, want one preserving the tmux error", report.Conflicts)
+	}
+	if _, err := h.fakeStore.Workspace(ws.ID); !errors.Is(err, state.ErrNotFound) {
+		t.Errorf("workspace err = %v, want ErrNotFound", err)
 	}
 }
