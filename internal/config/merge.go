@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // mergeLayers applies over on top of base. Later layers win; absent keys
 // inherit.
@@ -13,6 +16,9 @@ import "fmt"
 func mergeLayers(base Merged, over Source) (Merged, error) {
 	out := base
 	layer := over.Layer
+	if over.File != "" && !slices.Contains(out.files, over.File) {
+		out.files = append(slices.Clone(out.files), over.File)
+	}
 
 	if layer.Version != nil {
 		out.Layer.Version = layer.Version

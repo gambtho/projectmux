@@ -71,7 +71,7 @@ func LoadDefaults(root string) (Source, error) {
 // Load merges defaults with the workspace layers for slug and returns the
 // normalized, validated configuration and its digest.
 func Load(root string, defaults Source, slug string) (Effective, error) {
-	merged, err := mergeLayers(Merged{}, defaults)
+	merged, err := mergeLayers(Merged{root: root}, defaults)
 	if err != nil {
 		return Effective{}, err
 	}
@@ -91,7 +91,7 @@ func Load(root string, defaults Source, slug string) (Effective, error) {
 	}
 
 	cfg := normalize(merged.Layer)
-	if problems := validate(merged.Layer, cfg); len(problems) > 0 {
+	if problems := validate(merged, cfg); len(problems) > 0 {
 		return Effective{}, &InvalidConfigError{Problems: problems}
 	}
 	digest, err := digest(cfg)

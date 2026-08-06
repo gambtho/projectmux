@@ -93,22 +93,67 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// Problem is one validation failure together with every layer position that
+// contributed to it.
+type Problem struct {
+	// Field is the dotted path the problem is primarily about, such as
+	// "devcontainer.start_timeout" or "windows[dev].location". It is empty
+	// for a problem no single field owns, such as a duplicated focus.
+	Field   string
+	Message string
+	// Origins are the positions the reader may have to edit, primary first.
+	// It is empty when no layer set the field: an absent required key has no
+	// file to point at, and inventing one would be a lie.
+	Origins []Origin
+}
+
+// String renders the problem with its primary position, or bare when there
+// is none. A problem with no origin prints no prefix at all rather than a
+// ":0" that asserts a position which does not exist.
+//
+// Contributing positions follow the message. For a cross-field conflict the
+// primary line is often correct in isolation — a window asking for a
+// container is only wrong because another file disabled them — so a report
+// naming one position sends the reader somewhere with nothing to fix.
+func (p Problem) String() string {
+	if len(p.Origins) == 0 {
+		return p.Message
+	}
+	out := p.Origins[0].String() + ": " + p.Message
+	if len(p.Origins) > 1 {
+		rest := make([]string, 0, len(p.Origins)-1)
+		for _, o := range p.Origins[1:] {
+			rest = append(rest, o.String())
+		}
+		out += " (also " + strings.Join(rest, ", ") + ")"
+	}
+	return out
+}
+
+// String renders "file:line", dropping the line when it is unknown.
+func (o Origin) String() string {
+	if o.Line == 0 {
+		return o.File
+	}
+	return fmt.Sprintf("%s:%d", o.File, o.Line)
+}
+
 // InvalidConfigError reports configuration that must not reach any workspace
 // mutation. It carries every problem found rather than only the first, because
 // fixing configuration one error per run is needlessly slow.
 type InvalidConfigError struct {
-	Problems []string
+	Problems []Problem
 }
 
 func (e *InvalidConfigError) Error() string {
 	if len(e.Problems) == 1 {
-		return "invalid configuration: " + e.Problems[0]
+		return "invalid configuration: " + e.Problems[0].String()
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "invalid configuration (%d problems):", len(e.Problems))
 	for _, p := range e.Problems {
 		b.WriteString("\n  - ")
-		b.WriteString(p)
+		b.WriteString(p.String())
 	}
 	return b.String()
 }
@@ -117,5 +162,5 @@ func (e *InvalidConfigError) Error() string {
 // at the first problem because a file that will not decode has no further
 // problems to report; validate collects many and builds the error itself.
 func invalid(problem string) error {
-	return &InvalidConfigError{Problems: []string{problem}}
+	return &InvalidConfigError{Problems: []Problem{{Message: problem}}}
 }

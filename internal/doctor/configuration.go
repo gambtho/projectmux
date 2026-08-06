@@ -60,9 +60,13 @@ func (r *Runner) defaultsItem() Item {
 		return item
 	}
 	if problems := config.ValidateDefaults(r.Defaults); len(problems) > 0 {
+		rendered := make([]string, 0, len(problems))
+		for _, p := range problems {
+			rendered = append(rendered, p.String())
+		}
 		item.Status = StatusWarn
 		item.Detail = "read alone, defaults.yaml has problems a workspace layer would have to override: " +
-			strings.Join(problems, "; ")
+			strings.Join(rendered, "; ")
 	}
 	return item
 }

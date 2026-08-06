@@ -1,6 +1,9 @@
 package config
 
 import (
+	"cmp"
+	"path/filepath"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -24,8 +27,104 @@ func (s Source) originOf(path string) Origin {
 // Merged is the accumulated layer plus the file and line that last set each
 // field path. Origins are keyed by the same dotted paths lineOf resolves.
 type Merged struct {
-	Layer   Layer
+	Layer Layer
+	// root is the configuration root, used to render positions relative to
+	// it so reports read the same on every machine.
+	root    string
 	origins map[string]Origin
+	// files are the layer paths in merge order, which is the order secondary
+	// positions are reported in.
+	files []string
+}
+
+// problem builds a problem attributed to field, optionally naming further
+// fields that contributed to it.
+//
+// Origins[0] is the position of field — the primary, the one a renderer puts
+// in front of the message. The rest follow in layer order and then by line,
+// so output is stable across runs and diffable across edits.
+func (m Merged) problem(field, message string, also ...string) Problem {
+	p := Problem{Field: field, Message: message}
+
+	var origins []Origin
+	if primary, ok := m.originFor(field); ok {
+		origins = append(origins, primary)
+	}
+
+	var secondary []Origin
+	for _, f := range also {
+		o, ok := m.originFor(f)
+		if !ok || slices.Contains(origins, o) || slices.Contains(secondary, o) {
+			continue
+		}
+		secondary = append(secondary, o)
+	}
+	slices.SortStableFunc(secondary, func(a, b Origin) int {
+		if c := cmp.Compare(m.layerIndex(a.File), m.layerIndex(b.File)); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Line, b.Line)
+	})
+
+	p.Origins = m.relative(append(origins, secondary...))
+	return p
+}
+
+// originFor resolves a field to a position through the fallback ladder:
+// the field's own node, then the window enclosing it, then nothing. Each
+// rung is a weaker but still true statement; no rung invents a position.
+func (m Merged) originFor(field string) (Origin, bool) {
+	if field == "" {
+		return Origin{}, false
+	}
+	if o, ok := m.origins[field]; ok {
+		return o, true
+	}
+	if window, ok := enclosingWindow(field); ok {
+		if o, ok := m.origins[window]; ok {
+			return o, true
+		}
+	}
+	return Origin{}, false
+}
+
+// enclosingWindow reduces "windows[dev].location" to "windows[dev]".
+func enclosingWindow(field string) (string, bool) {
+	if !strings.HasPrefix(field, "windows[") {
+		return "", false
+	}
+	end := strings.LastIndexByte(field, ']')
+	if end < 0 || end == len(field)-1 {
+		return "", false
+	}
+	return field[:end+1], true
+}
+
+// layerIndex orders positions by the layer they came from. An unknown file
+// sorts last rather than first, so an unattributed position never displaces
+// one the merge actually recorded.
+func (m Merged) layerIndex(file string) int {
+	if i := slices.Index(m.files, file); i >= 0 {
+		return i
+	}
+	return len(m.files)
+}
+
+// relative rewrites positions against the configuration root so reports read
+// the same on every machine. A path outside the root, or a root that is not
+// known, is left as it is rather than rendered as a chain of "..".
+func (m Merged) relative(origins []Origin) []Origin {
+	if m.root == "" {
+		return origins
+	}
+	out := make([]Origin, 0, len(origins))
+	for _, o := range origins {
+		if rel, err := filepath.Rel(m.root, o.File); err == nil && !strings.HasPrefix(rel, "..") {
+			o.File = rel
+		}
+		out = append(out, o)
+	}
+	return out
 }
 
 // credit records that over set path. Later layers overwrite earlier ones, so
