@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/gambtho/projectmux/internal/controller"
@@ -91,5 +94,97 @@ func TestIntegrationNoServerIsAbsence(t *testing.T) {
 	}
 	if len(live) != 0 {
 		t.Errorf("Sessions = %+v, want none", live)
+	}
+}
+
+func TestIntegrationCreateSessionWithPanes(t *testing.T) {
+	socket := isolatedSocket(t, "panes")
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	spec := controller.SessionSpec{
+		Name:        "twopane",
+		WorkspaceID: "w1",
+		Slug:        "proj",
+		Worktree:    dir,
+		Env:         map[string]string{"PANE_PROBE": "yes"},
+		Windows: []controller.WindowSpec{
+			{Name: "dev", Dir: dir, Focus: true, Panes: []controller.PaneSpec{
+				{Name: "shell", Dir: sub, Focus: true},
+			}},
+			{Name: "solo", Dir: dir},
+		},
+	}
+	if err := (&Client{Socket: socket}).CreateSession(context.Background(), spec); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	panes := func(window string) []string {
+		out, err := exec.Command("tmux", "-L", socket, "list-panes", "-t",
+			"twopane:"+window, "-F",
+			"#{pane_current_path}|#{pane_active}").CombinedOutput()
+		if err != nil {
+			t.Fatalf("list-panes %s: %v\n%s", window, err, out)
+		}
+		return strings.Split(strings.TrimSpace(string(out)), "\n")
+	}
+
+	dev := panes("dev")
+	if len(dev) != 2 {
+		t.Fatalf("dev panes = %v, want 2", dev)
+	}
+	if dev[0] != dir+"|0" {
+		t.Errorf("primary pane = %q, want %q (unfocused, worktree cwd)", dev[0], dir+"|0")
+	}
+	if dev[1] != sub+"|1" {
+		t.Errorf("split pane = %q, want %q (focused, sub cwd)", dev[1], sub+"|1")
+	}
+	if solo := panes("solo"); len(solo) != 1 {
+		t.Errorf("solo panes = %v, want 1 (empty pane list)", solo)
+	}
+
+	// The -h split must yield two side-by-side panes of (near-)equal
+	// width; a one-column difference absorbs an odd total width.
+	widthsOut, err := exec.Command("tmux", "-L", socket, "list-panes", "-t",
+		"twopane:dev", "-F", "#{pane_width}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("list-panes widths: %v\n%s", err, widthsOut)
+	}
+	widths := strings.Fields(strings.TrimSpace(string(widthsOut)))
+	if len(widths) != 2 {
+		t.Fatalf("widths = %v", widths)
+	}
+	w0, _ := strconv.Atoi(widths[0])
+	w1, _ := strconv.Atoi(widths[1])
+	if diff := w0 - w1; diff < -1 || diff > 1 {
+		t.Errorf("pane widths %d/%d are not an even -h split", w0, w1)
+	}
+
+	// The configured environment must be visible INSIDE the split pane:
+	// the session table is populated by new-session -e alone, so probing
+	// it would not prove split-window -e worked (the existing env
+	// integration test documents the same limitation and uses this
+	// send-keys probe). The split pane is dev's active pane (Focus: true),
+	// so the bare window target addresses it without a pane index.
+	if err := exec.Command("tmux", "-L", socket, "send-keys", "-t",
+		"twopane:dev",
+		"printf 'PROBE=%s\\n' \"$PANE_PROBE\"", "Enter").Run(); err != nil {
+		t.Fatalf("send-keys: %v", err)
+	}
+	found := false
+	for i := 0; i < 50 && !found; i++ {
+		out, err := exec.Command("tmux", "-L", socket, "capture-pane", "-p",
+			"-t", "twopane:dev").Output()
+		if err == nil && strings.Contains(string(out), "PROBE=yes") {
+			found = true
+			break
+		}
+		exec.Command("sleep", "0.1").Run()
+	}
+	if !found {
+		t.Error("PANE_PROBE never appeared inside the split pane; split-window -e did not deliver the environment")
 	}
 }
