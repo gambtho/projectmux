@@ -100,7 +100,7 @@ checkout.
 This repository owns only personal installation policy and configuration:
 
 - pin and install a reviewed application release;
-- expose configuration under `$XDG_CONFIG_HOME/dev/`; and
+- expose configuration under `$XDG_CONFIG_HOME/projectmux/`; and
 - retain machine-local overrides in ignored files.
 
 The default configuration location is `$XDG_CONFIG_HOME/projectmux`, falling
