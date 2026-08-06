@@ -708,3 +708,84 @@ func TestRootPrefersExplicitOverrideThenXDG(t *testing.T) {
 		t.Errorf("Root = %q, want the ~/.config fallback", got)
 	}
 }
+
+func TestNormalizeDefaultsPanes(t *testing.T) {
+	shell := true
+	cfg := normalize(Layer{Windows: []WindowLayer{{Name: "dev", Shell: &shell}}})
+	if len(cfg.Windows) != 1 {
+		t.Fatalf("windows = %+v", cfg.Windows)
+	}
+	panes := cfg.Windows[0].Panes
+	if len(panes) != 1 || panes[0].Name != "shell" || !panes[0].Shell {
+		t.Errorf("omitted panes should normalize to the default shell pane, got %+v", panes)
+	}
+}
+
+func TestNormalizeEmptyPanesOptsOut(t *testing.T) {
+	shell := true
+	empty := []PaneLayer{}
+	cfg := normalize(Layer{Windows: []WindowLayer{
+		{Name: "dev", Shell: &shell, Panes: &empty},
+	}})
+	if panes := cfg.Windows[0].Panes; len(panes) != 0 || panes == nil {
+		t.Errorf("panes: [] should normalize to an empty non-nil list, got %#v", panes)
+	}
+}
+
+func TestNormalizeExplicitPanes(t *testing.T) {
+	shell := true
+	cmd := "tail -f log/dev.log"
+	cwd := "services/api"
+	declared := []PaneLayer{{Name: "logs", Command: &cmd, Cwd: &cwd}}
+	cfg := normalize(Layer{Windows: []WindowLayer{
+		{Name: "dev", Shell: &shell, Panes: &declared},
+	}})
+	panes := cfg.Windows[0].Panes
+	if len(panes) != 1 || panes[0].Name != "logs" ||
+		panes[0].Command == nil || *panes[0].Command != cmd ||
+		panes[0].Cwd == nil || *panes[0].Cwd != cwd {
+		t.Errorf("declared panes should pass through, got %+v", panes)
+	}
+}
+
+func TestDigestPanesBehavior(t *testing.T) {
+	shell := true
+	empty := []PaneLayer{}
+	base := Layer{Windows: []WindowLayer{{Name: "dev", Shell: &shell}}}
+	optOut := Layer{Windows: []WindowLayer{{Name: "dev", Shell: &shell, Panes: &empty}}}
+
+	dBase, err := digest(normalize(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dOptOut, err := digest(normalize(optOut))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dBase == dOptOut {
+		t.Error("omitted panes (default pane) and panes: [] must digest differently")
+	}
+
+	dAgain, err := digest(normalize(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dBase != dAgain {
+		t.Error("identical configuration must digest stably")
+	}
+}
+
+func TestDigestZeroWindowConfigCarriesNoPanes(t *testing.T) {
+	// The spec's §3 exception: a workspace with no windows digests an empty
+	// list; its implicit shell window (and that window's default pane) is
+	// invented at derivation, outside the digest. The canonical JSON must
+	// therefore contain no pane content at all.
+	cfg := normalize(Layer{})
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "panes") {
+		t.Errorf("zero-window config must not encode panes: %s", encoded)
+	}
+}
