@@ -179,6 +179,15 @@ Version 1 uses this schema:
 - `windows`: named entries containing exactly one of `agent: <command>`,
   `command: <command>`, or `shell: true`, plus optional relative `cwd`,
   `location` (`host` or `container`), and `focus`.
+  - `windows[].panes`: optional list of *additional* panes beyond the primary
+    pane the window's own fields describe. Each entry mirrors the window
+    fields minus `location` (panes inherit the window's resolved location):
+    `name`, exactly one of `agent`/`command`/`shell: true`, optional `cwd`,
+    optional `focus` (at most one per window; the primary pane is active by
+    default). Omitted, it defaults to a single shell pane in the window's
+    directory — every window is two panes by default. `panes: []` opts a
+    window back to single-pane. Across config layers, `panes` merges as a
+    unit: a layer that states it replaces the whole list.
 
 Exactly one merged window may be focused. Window names are unique and limited
 to a documented portable character set. Relative paths cannot escape the
