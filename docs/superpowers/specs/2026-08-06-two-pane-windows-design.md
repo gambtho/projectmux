@@ -19,7 +19,9 @@ Every window renders as **primary pane + shell pane, 50/50 side-by-side**
 same container, when one applies — as the primary, and focus stays on the
 primary pane. The change takes effect on the next `ensure` that creates a
 session. **Running sessions are untouched**: panes, like windows, are
-create-only and never reconciled (§5).
+create-only and never reconciled (§5). An already-live session reports
+drift until it is stopped and reopened — see §3 for why and for the
+migration path.
 
 Opting a window back to single-pane is one line of YAML:
 
@@ -141,10 +143,32 @@ stating layer.
 
 The digest hashes the normalized `Config`'s canonical JSON
 (`internal/config/digest.go`), and `Window` gains a `panes` member, so
-**every workspace's digest changes exactly once at this release**, YAML
-untouched or not. That signal is honest: the rendered session genuinely
-differs (each window gains a pane), and drift reporting should say so
-until the next ensure records the new applied digest.
+**every workspace with configured windows sees its digest change exactly
+once at this release**, YAML untouched or not. That signal is honest:
+the rendered session genuinely differs (each window gains a pane), and
+drift reporting should say so.
+
+**Exception — zero-window workspaces.** A workspace whose YAML declares
+no `windows:` digests an empty list (`internal/config/normalize.go`);
+its implicit shell window is invented at derivation (`windowIntents`,
+`internal/cli/wiring.go`), outside the digested document. That implicit
+window gains the default pane too, so these workspaces change rendering
+with **no digest change and no drift signal**. This is a knowing
+exception: the implicit window already lives outside the digest — it is
+the existing instance of the derivation-time-default pattern this spec
+otherwise rejects — and pulling it into the normalized config would
+change digest semantics for an unrelated reason. The default pane for
+the implicit window is therefore supplied at derivation, and the spec
+accepts that its arrival is digest-silent.
+
+**When the drift flag clears.** Only a *creating* ensure records the
+applied digest (`internal/controller/ensure.go`, creation commit); the
+already-running path deliberately commits none. An existing live session
+therefore reports drift from this release until it is stopped and
+reopened. That is the migration path: `projectmux stop` then `open` (or
+simply keep the running session and accept the drift flag until its
+natural end). Nothing forces a restart, and no reconciliation touches
+the live session.
 
 This is why the default flips in one release rather than opt-in first:
 shipping the schema already churns the digest, so a later default flip
@@ -196,6 +220,36 @@ the trailing-`;` chain-parsing rule applies to any argv element, and the
 composite targets are escaped as complete strings, matching the existing
 `select-window` treatment.
 
+### Partial failure
+
+"Near-atomic" means one subprocess, not all-or-nothing. Verified on
+tmux 3.4: a failing command mid-chain **aborts the remaining commands,
+exits nonzero, and leaves everything already created alive** — including
+the session, which carries its identity keys because they are set
+immediately after `new-session`. `CreateSession` then returns the error,
+ensure records the failure and returns without post-create confirmation,
+and the next ensure observes an identity-matched live session and
+accepts it as already-running (with the drift flag set, since no applied
+digest was committed). The partial session is never repaired.
+
+This is a pre-existing property of chained creation — a mid-chain
+`new-window` failure behaves identically today — and the added
+`split-window` segments widen the window without changing the shape.
+The design keeps it, for two reasons:
+
+- **Recovery works and is the normal path**: because the partial session
+  is identity-tagged, `projectmux stop` finds and kills it and `open`
+  recreates it. The alternative ordering (identity keys last) would
+  leave an identity-*less* session squatting on the workspace's name,
+  which planning treats as foreign and refuses to touch — strictly
+  worse.
+- **The added failure surface is small**: a nonexistent pane `cwd` does
+  *not* fail — verified on tmux 3.4, `split-window -c` falls back to
+  the home directory with exit 0 and the chain continues (pane `cwd`
+  validation is lexical only, matching windows). Realistic mid-chain
+  failures are tmux server faults, which fail creation loudly either
+  way.
+
 ### Verified transcripts (tmux 3.4, isolated `-L` socket)
 
 Chained split of a detached window created earlier in the same chain,
@@ -244,6 +298,26 @@ $ tmux -L test split-window -h -d -t t3:w1 -c /tmp \; \
 3 w=66 active=0
 ```
 
+A nonexistent `-c` directory does not fail the split:
+
+```
+$ tmux -L test new-session -d -s t6 -n w1 \; \
+    split-window -h -d -t t6:w1 -c /nonexistent-dir-xyz \; \
+    set-option -t t6 @after-split yes
+(exit 0; pane 2's cwd falls back to the home directory; @after-split set)
+```
+
+A genuinely failing mid-chain command aborts the rest and leaves the
+session alive:
+
+```
+$ tmux -L test new-session -d -s t7 -n w1 \; \
+    split-window -h -d -t t7:no-such-window \; \
+    set-option -t t7 @after-fail yes
+can't find window: no-such-window
+(exit 1; session t7 exists; @after-fail is unset — the chain aborted)
+```
+
 ## 5. Reconciliation boundary
 
 Panes are created and never observed, never reconciled — identical to
@@ -277,8 +351,14 @@ digest. This is a stated boundary, not an accident.
   opts out over a lower layer that declared panes; absent inherits),
   validation (mode exclusivity, duplicate pane names, multi-focus with
   origin attribution), normalization materializing the default pane, and
-  digest tests: adding the field changes the digest once; identical pane
-  config digests stably; `panes: []` vs omitted digest differently.
+  digest tests: adding the field changes the digest once for configured
+  windows; a zero-window config's digest is unchanged (the documented
+  §3 exception); identical pane config digests stably; `panes: []` vs
+  omitted digest differently.
+- **Unit — partial failure:** a `CreateSession` error leaves ensure
+  reporting failure without a committed digest, and the following ensure
+  accepts the identity-tagged session as already-running with the drift
+  flag set (fake actuator; pins the §4 partial-failure semantics).
 - **Integration (isolated `-L` socket):** created session has the
   expected pane count per window, pane cwd, pane environment (via
   `show-environment`/`send-keys` probe), active pane per window, and
@@ -297,3 +377,10 @@ digest. This is a stated boundary, not an accident.
   same workdir); panes have no `location` of their own.
 - `panes` merges **as a unit** across layers.
 - Panes are **not reconciled**; closing one is not drift.
+- The **implicit window's default pane is digest-silent** (§3 exception):
+  the implicit window already lives outside the digest, and this spec
+  does not move it.
+- **Partial creation is recoverable, not prevented**: identity keys stay
+  first in the chain so `stop` + `open` always recovers a partial
+  session; the drift flag on live sessions clears only through
+  stop-and-reopen.
