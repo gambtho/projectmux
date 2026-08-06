@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/gambtho/projectmux/internal/config"
@@ -19,7 +18,7 @@ func (r *Runner) configuration() Check {
 	}
 	check.Items = append(check.Items, r.defaultsItem())
 
-	slugs, err := workspaceSlugs(r.ConfigRoot)
+	slugs, err := config.Slugs(r.ConfigRoot)
 	if err != nil {
 		check.Items = append(check.Items, Item{
 			Subject: "workspaces",
@@ -69,41 +68,6 @@ func (r *Runner) defaultsItem() Item {
 			strings.Join(rendered, "; ")
 	}
 	return item
-}
-
-// workspaceSlugs lists the tracked workspace layers. The machine-local
-// files are not separate subjects: config.Load already merges each under
-// its slug.
-//
-// Reading the directory rather than globbing it is deliberate: Glob
-// discards filesystem errors, so a workspaces/ directory that cannot be
-// read would report as an installation with no workspaces — an
-// affirmative answer over unexamined ground. Only an absent directory
-// means "none".
-func workspaceSlugs(root string) ([]string, error) {
-	entries, err := os.ReadDir(filepath.Join(root, "workspaces"))
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var slugs []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".yaml") {
-			continue
-		}
-		name = strings.TrimSuffix(name, ".yaml")
-		if strings.HasSuffix(name, ".local") {
-			continue
-		}
-		slugs = append(slugs, name)
-	}
-	return slugs, nil
 }
 
 // oneLine flattens a multi-problem error into a single report line.
