@@ -384,6 +384,24 @@ The independent repository should provide:
 Tests must assert that observation-only commands do not mutate workspaces and
 that Docker unavailability never masquerades as container loss.
 
+### Gate phasing below 1.0
+
+Two of the gates above are not enforced by the `v0.x` release workflow, and
+this records that as a decision rather than leaving the list aspirational:
+
+- **Linting.** `gofmt`, `go vet`, and `go test -race` run on every push and
+  every release. A dedicated linter is not yet wired in; introducing one to an
+  existing codebase surfaces a backlog that deserves its own focused pass.
+- **Reproducible release checks.** Release builds use `-trimpath` and
+  `CGO_ENABLED=0`, which removes local paths and the cgo toolchain as sources
+  of variation, but nothing yet builds twice and compares digests.
+
+Both become gates before `v1.0`. Until then `v0.x` artifacts are published as
+prereleases, which is the honest signal: they are reproducible in intent and
+not yet verified to be so. Vulnerability scanning (`govulncheck`) *is*
+enforced on release, and a release failing any enforced gate publishes
+nothing.
+
 ## 13. Extraction sequence
 
 The merged Bash platform is a maintenance-only behavioral reference during
