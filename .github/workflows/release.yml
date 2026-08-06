@@ -54,6 +54,12 @@ jobs:
         with:
           # The ancestry check needs history, not just the tagged commit.
           fetch-depth: 0
+          # This job builds and tests code from the tagged commit, which a tag
+          # alone does not prove was reviewed — the whole premise of §3.1. Not
+          # persisting the token means that code cannot read it out of
+          # .git/config. Verified that the ancestry check below still works
+          # without it: on a public repository the fetch is unauthenticated.
+          persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
