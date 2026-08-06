@@ -185,9 +185,10 @@ Version 1 uses this schema:
     `name`, exactly one of `agent`/`command`/`shell: true`, optional `cwd`,
     optional `focus` (at most one per window; the primary pane is active by
     default). Omitted, it defaults to a single shell pane in the window's
-    directory — every window is two panes by default. `panes: []` opts a
-    window back to single-pane. Across config layers, `panes` merges as a
-    unit: a layer that states it replaces the whole list.
+    directory — every window is two panes by default. The opt-out is an
+    explicit empty list, `panes: []`; a bare `panes:` key is the same as
+    omitting it. Across config layers, `panes` merges as a unit: a layer
+    that states it replaces the whole list.
 
 Exactly one merged window may be focused. Window names are unique and limited
 to a documented portable character set. Relative paths cannot escape the

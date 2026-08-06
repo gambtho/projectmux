@@ -834,3 +834,76 @@ func TestMergePanesAsUnit(t *testing.T) {
 		}
 	})
 }
+
+// TestLoadPanesThroughYAML routes panes through the package's real,
+// file-based load path (rather than building Layer/PaneLayer structs
+// directly) so the yaml.v3 behavior the opt-out relies on — an explicit
+// empty list decodes to a non-nil pointer, a bare key decodes to a nil
+// pointer just like an omitted key — is pinned in the repository, not just
+// verified externally.
+func TestLoadPanesThroughYAML(t *testing.T) {
+	t.Run("explicit empty list opts out end to end", func(t *testing.T) {
+		root := writeRoot(t, map[string]string{"defaults.yaml": `
+version: 1
+windows:
+  - name: dev
+    shell: true
+    panes: []
+`})
+		eff := mustLoad(t, root, "slabledger")
+		panes := window(t, eff.Config, "dev").Panes
+		if panes == nil || len(panes) != 0 {
+			t.Errorf("panes: [] should load to an empty non-nil list, got %#v", panes)
+		}
+	})
+
+	t.Run("declared pane list carries through", func(t *testing.T) {
+		root := writeRoot(t, map[string]string{"defaults.yaml": `
+version: 1
+windows:
+  - name: dev
+    shell: true
+    panes:
+      - name: logs
+        command: tail -f log/dev.log
+        cwd: services/api
+`})
+		eff := mustLoad(t, root, "slabledger")
+		panes := window(t, eff.Config, "dev").Panes
+		if len(panes) != 1 || panes[0].Name != "logs" ||
+			panes[0].Command == nil || *panes[0].Command != "tail -f log/dev.log" ||
+			panes[0].Cwd == nil || *panes[0].Cwd != "services/api" {
+			t.Errorf("declared panes should load through, got %+v", panes)
+		}
+	})
+
+	t.Run("unknown pane field is rejected", func(t *testing.T) {
+		root := writeRoot(t, map[string]string{"defaults.yaml": `
+version: 1
+windows:
+  - name: dev
+    shell: true
+    panes:
+      - name: logs
+        command: tail -f log/dev.log
+        location: host
+`})
+		_, err := load(t, root, "slabledger")
+		assertInvalid(t, err, "location")
+	})
+
+	t.Run("bare panes key behaves like omitted", func(t *testing.T) {
+		root := writeRoot(t, map[string]string{"defaults.yaml": `
+version: 1
+windows:
+  - name: dev
+    shell: true
+    panes:
+`})
+		eff := mustLoad(t, root, "slabledger")
+		panes := window(t, eff.Config, "dev").Panes
+		if len(panes) != 1 || panes[0].Name != "shell" || !panes[0].Shell {
+			t.Errorf("bare panes: should default to a single shell pane, got %+v", panes)
+		}
+	})
+}
