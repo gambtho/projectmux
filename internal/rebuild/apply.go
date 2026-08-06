@@ -89,6 +89,10 @@ func (a *Applier) Apply(ctx context.Context, plan Plan) Report {
 		case reg != nil:
 			report.Registered = append(report.Registered, *reg)
 		}
+		// Both nil is a deliberate no-op, not an unhandled case: a
+		// candidate found already settled under the lock did nothing and
+		// refused nothing, so it belongs in neither list. Dropping it here
+		// is what keeps that outcome a clean exit 0.
 	}
 	slices.SortFunc(report.Registered, func(a, b Registered) int {
 		if c := cmp.Compare(a.Slug, b.Slug); c != 0 {
@@ -118,11 +122,7 @@ func (a *Applier) applyCandidate(ctx context.Context, cand Candidate) (*Register
 	// the next rebuild would report that row as a mismatch conflict
 	// instead of a clean no-op.
 	if !controller.SessionBelongsTo(sess, ws) {
-		return nil, conflictf(sess.Name,
-			"session carries workspace %s, slug %q, worktree %q, but %s resolves to "+
-				"workspace %s, slug %q, worktree %q; refusing to register it",
-			sess.WorkspaceID, sess.Slug, sess.Worktree,
-			sess.Worktree, ws.ID, ws.Slug, ws.Worktree)
+		return nil, identityConflict(sess, ws)
 	}
 
 	// Only registration writes a digest, so only registration needs one.
@@ -141,10 +141,21 @@ func (a *Applier) applyCandidate(ctx context.Context, cand Candidate) (*Register
 	}
 
 	if a.DryRun {
-		// Everything above is read-only, which is exactly what lets a dry
-		// run predict the real run's verdict and exit code (spec §2). A
-		// preview that stopped after pure classification would report a
-		// clean 0 for a vanished worktree the real run refuses.
+		// Everything above is read-only, and so is the observation below.
+		// A preview runs every step except the two that change something:
+		// taking the lock and writing. Observing is what discovers that a
+		// session died between classification and now, and a preview that
+		// skipped it would report a clean 0 for a workspace the real run
+		// refuses — which is the one thing --dry-run must never do
+		// (spec §2).
+		//
+		// Observation comes before the digest here because it comes before
+		// the digest is consulted in the real run: a dead session with a
+		// broken configuration must preview as the dead-session refusal,
+		// which is the refusal it will actually get.
+		if _, conflict := a.observeLive(ctx, ws, sess); conflict != nil {
+			return nil, conflict
+		}
 		if digestErr != nil {
 			return nil, conflictf(sess.Name,
 				"loading the configuration for %q failed: %v", ws.Slug, digestErr)
@@ -173,18 +184,11 @@ func (a *Applier) applyCandidate(ctx context.Context, cand Candidate) (*Register
 func (a *Applier) writeUnderLock(ctx context.Context, ws resolve.Workspace, cand Candidate, digest string, digestErr error) (*Registered, *Conflict) {
 	sess := cand.Session
 
-	obs, err := a.Sessions.ObserveSession(ctx, controller.SessionQuery{
-		WorkspaceID:    ws.ID,
-		CandidateNames: []string{sess.Name},
-	})
-	if err != nil {
-		return nil, conflictf(sess.Name, "re-observing tmux under the workspace lock: %v", err)
+	observed, conflict := a.observeLive(ctx, ws, sess)
+	if conflict != nil {
+		return nil, conflict
 	}
-	if obs.ByIdentity == nil {
-		return nil, conflictf(sess.Name,
-			"the session was no longer live when the workspace lock was taken; nothing was written")
-	}
-	live := *obs.ByIdentity
+	live := *observed
 
 	var records []state.Record
 	rec, err := a.Store.Workspace(ws.ID)
@@ -200,6 +204,21 @@ func (a *Applier) writeUnderLock(ctx context.Context, ws resolve.Workspace, cand
 
 	final := Classify([]controller.LiveSession{live}, records)
 	if len(final.Candidates) != 1 {
+		// A row that already records this session is the settled case:
+		// another rebuild or an open completed the workspace in the gap
+		// this re-classification exists to absorb. The desired end state
+		// is confirmed to hold, so the run did nothing and refused
+		// nothing — reporting a conflict would map a verified ok onto the
+		// refusal exit code, which is the tri-state rule inverted.
+		//
+		// Confirmed from the row rather than inferred from Classify's
+		// silence about settled sessions: silence also covers sessions it
+		// ignored, and an ignored session is an unknown, not an ok.
+		if len(records) == 1 && records[0].ActualSession != nil &&
+			*records[0].ActualSession == live.Name {
+			return nil, nil
+		}
+		// Everything else really did change adversely under the lock.
 		reason := "the workspace no longer needs recovery: something else completed it " +
 			"before the lock was taken; nothing was written"
 		if len(final.Conflicts) > 0 {
@@ -255,6 +274,41 @@ func (a *Applier) writeUnderLock(ctx context.Context, ws resolve.Workspace, cand
 	return registeredFor(ws, live.Name), nil
 }
 
+// observeLive re-observes the workspace's session and returns it only
+// when it is confirmed present and its identity keys agree with the
+// workspace. Both the lock-held write and the dry run call it: the
+// observation is read-only, so a preview can make it and thereby predict
+// the refusals it discovers.
+//
+// The refusals are phrased in terms of the lock because a dry run's job
+// is to report the verdict the real run would reach, and that run reaches
+// these under the lock.
+func (a *Applier) observeLive(ctx context.Context, ws resolve.Workspace, sess controller.LiveSession) (*controller.LiveSession, *Conflict) {
+	obs, err := a.Sessions.ObserveSession(ctx, controller.SessionQuery{
+		WorkspaceID:    ws.ID,
+		CandidateNames: []string{sess.Name},
+	})
+	if err != nil {
+		return nil, conflictf(sess.Name, "re-observing tmux under the workspace lock: %v", err)
+	}
+	if obs.ByIdentity == nil {
+		return nil, conflictf(sess.Name,
+			"the session was no longer live when the workspace lock was taken; nothing was written")
+	}
+	live := *obs.ByIdentity
+
+	// The observer matches on the workspace-ID tag alone
+	// (internal/tmux/decode.go:63-67), so this may not be the session the
+	// pre-lock gate validated: another session could have acquired the tag
+	// with a contradictory @dev_slug or @dev_worktree. Planning re-checks
+	// ByIdentity for exactly this reason (internal/controller/plan.go:87,
+	// design §7), and the writes are made from live, not from sess.
+	if !controller.SessionBelongsTo(live, ws) {
+		return nil, identityConflict(live, ws)
+	}
+	return &live, nil
+}
+
 func registeredFor(ws resolve.Workspace, session string) *Registered {
 	return &Registered{
 		ID:        ws.ID,
@@ -267,4 +321,16 @@ func registeredFor(ws resolve.Workspace, session string) *Registered {
 
 func conflictf(subject, format string, args ...any) *Conflict {
 	return &Conflict{Subject: subject, Reason: fmt.Sprintf(format, args...)}
+}
+
+// identityConflict is the refusal shared by the pre-lock gate and the
+// lock-held re-check. One function so the two can never drift: they are
+// the same finding about two different sessions, and an operator who
+// sees one has to be able to read it the same way as the other.
+func identityConflict(s controller.LiveSession, ws resolve.Workspace) *Conflict {
+	return conflictf(s.Name,
+		"session carries workspace %s, slug %q, worktree %q, but %s resolves to "+
+			"workspace %s, slug %q, worktree %q; refusing to register it",
+		s.WorkspaceID, s.Slug, s.Worktree,
+		s.Worktree, ws.ID, ws.Slug, ws.Worktree)
 }

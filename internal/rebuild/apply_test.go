@@ -434,6 +434,9 @@ func TestApplyDryRunMatchesTheRealRunAndWritesNothing(t *testing.T) {
 	preview := newHarness()
 	preview.know(ws, "sha256:desired")
 	preview.resolver.errs["/src/vanished"] = errors.New("worktree /src/vanished does not exist")
+	// Scripted identically to the real run: the preview observes too, so
+	// that it can predict the refusals observation is what discovers.
+	preview.observer.results = []controller.SessionObservation{observing(sess)}
 	counting := &countingStore{Store: preview.fakeStore}
 	preview.store = counting
 	preview.dryRun = true
@@ -463,8 +466,11 @@ func TestApplyDryRunMatchesTheRealRunAndWritesNothing(t *testing.T) {
 	if len(preview.locker.locked) != 0 {
 		t.Errorf("dry run locked %v, want nothing", preview.locker.locked)
 	}
-	if preview.observer.calls != 0 {
-		t.Errorf("dry run called ObserveSession %d times, want 0", preview.observer.calls)
+	// Observing is read-only, so a dry run may do it — and must, to
+	// predict the refusals it discovers. The lock and the writes are what
+	// a preview withholds, and those are asserted above.
+	if preview.observer.calls != 1 {
+		t.Errorf("dry run called ObserveSession %d times, want 1", preview.observer.calls)
 	}
 	recs, err := preview.fakeStore.Workspaces()
 	if err != nil {
@@ -769,5 +775,136 @@ func TestApplyRegisterThenFailedAdoptNamesBothHalvesAndASecondRunCompletesIt(t *
 	}
 	if rec.DesiredDigest == nil || *rec.DesiredDigest != "sha256:desired" {
 		t.Errorf("DesiredDigest = %v, want the digest written by the first run", rec.DesiredDigest)
+	}
+}
+
+// The pre-lock gate validates the candidate's session, but the writes use
+// the session the lock-held observation returned, and the observer matches
+// on the workspace-ID tag alone (internal/tmux/decode.go:63-67). A session
+// that acquired that tag with contradictory keys must be refused here too,
+// exactly as planning re-checks ByIdentity (internal/controller/plan.go:87).
+func TestApplyRefusesALockHeldSessionWhoseIdentityKeysContradictTheWorkspace(t *testing.T) {
+	ws := projectmux()
+	sess := liveSession(ws, "projectmux")
+	// This one passes the pre-lock gate. What comes back under the lock is
+	// a different session carrying the same workspace ID and a stale slug.
+	impostor := liveSession(ws, "impostor")
+	impostor.Slug = "stale-slug"
+
+	h := newHarness()
+	h.know(ws, "sha256:desired")
+	h.observer.results = []controller.SessionObservation{observing(impostor)}
+
+	report := h.applier().Apply(context.Background(), Plan{
+		Candidates: []Candidate{{Case: CaseRegister, Session: sess}},
+	})
+
+	if len(report.Registered) != 0 {
+		t.Fatalf("Registered = %+v, want none", report.Registered)
+	}
+	if len(report.Conflicts) != 1 {
+		t.Fatalf("Conflicts = %+v, want exactly one", report.Conflicts)
+	}
+	if !strings.Contains(report.Conflicts[0].Reason, "stale-slug") {
+		t.Errorf("Reason = %q, want it to name the contradictory key", report.Conflicts[0].Reason)
+	}
+	if _, err := h.fakeStore.Workspace(ws.ID); !errors.Is(err, state.ErrNotFound) {
+		t.Errorf("workspace err = %v, want ErrNotFound: nothing may be written", err)
+	}
+	if h.locker.released != 1 {
+		t.Errorf("lock released %d times, want 1 even on the conflict path", h.locker.released)
+	}
+}
+
+// The race the lock-held re-classification exists to absorb: another
+// rebuild, or an open, completed the workspace in the gap. The desired
+// end state is confirmed to hold, so this is a no-op — not a refusal.
+// Reporting a conflict here would map a verified ok to exit 6, which is
+// the tri-state rule inverted.
+func TestApplySettledUnderTheLockIsASilentNoOpNotAConflict(t *testing.T) {
+	ws := projectmux()
+	sess := liveSession(ws, "projectmux")
+	h := newHarness()
+	h.know(ws, "sha256:desired")
+	seedRecorded(t, h.fakeStore, ws)
+	// Someone else adopted the very session this run was going to adopt.
+	if err := h.fakeStore.AdoptSessionName(ws.ID, "projectmux", testTime); err != nil {
+		t.Fatalf("seeding the settled row: %v", err)
+	}
+	counting := &countingStore{Store: h.fakeStore}
+	h.store = counting
+	h.observer.results = []controller.SessionObservation{observing(sess)}
+
+	report := h.applier().Apply(context.Background(), Plan{
+		Candidates: []Candidate{{Case: CaseRegister, Session: sess}},
+	})
+
+	if len(report.Conflicts) != 0 {
+		t.Fatalf("Conflicts = %+v, want none: the workspace is already in the desired state", report.Conflicts)
+	}
+	if len(report.Registered) != 0 {
+		t.Fatalf("Registered = %+v, want none: this run wrote nothing", report.Registered)
+	}
+	if counting.registers != 0 || counting.adopts != 0 {
+		t.Errorf("wrote %d registers, %d adopts; want 0 and 0", counting.registers, counting.adopts)
+	}
+	rec, err := h.fakeStore.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.ActualSession == nil || *rec.ActualSession != "projectmux" {
+		t.Errorf("ActualSession = %v, want %q left as it was", rec.ActualSession, "projectmux")
+	}
+	assertRecordedFieldsUntouched(t, rec, ws)
+}
+
+// The dry run must predict the real run's refusals, and a session that
+// died between classification and the run is a refusal only the
+// observation discovers. ObserveSession is read-only, so the preview can
+// make it; only the lock is withheld.
+func TestApplyDryRunPredictsTheRefusalForASessionThatDiedBeforeTheRun(t *testing.T) {
+	ws := projectmux()
+	sess := liveSession(ws, "projectmux")
+	newPlan := func() Plan {
+		return Plan{Candidates: []Candidate{{Case: CaseRegister, Session: sess}}}
+	}
+
+	actual := newHarness()
+	actual.know(ws, "sha256:desired")
+	actual.observer.results = []controller.SessionObservation{{}}
+	actualReport := actual.applier().Apply(context.Background(), newPlan())
+
+	preview := newHarness()
+	preview.know(ws, "sha256:desired")
+	preview.observer.results = []controller.SessionObservation{{}}
+	counting := &countingStore{Store: preview.fakeStore}
+	preview.store = counting
+	preview.dryRun = true
+	previewReport := preview.applier().Apply(context.Background(), newPlan())
+
+	if len(actualReport.Conflicts) != 1 {
+		t.Fatalf("real run Conflicts = %+v, want exactly one", actualReport.Conflicts)
+	}
+	// Byte-identical, not merely both-refusals: the preview's whole job is
+	// to be the verdict the operator would get, and a differently-worded
+	// prediction is a different answer.
+	if !reflect.DeepEqual(previewReport.Conflicts, actualReport.Conflicts) {
+		t.Errorf("dry Conflicts = %+v, real = %+v; they must be identical",
+			previewReport.Conflicts, actualReport.Conflicts)
+	}
+	if !reflect.DeepEqual(previewReport.Registered, actualReport.Registered) {
+		t.Errorf("dry Registered = %+v, real = %+v; they must be identical",
+			previewReport.Registered, actualReport.Registered)
+	}
+	if len(previewReport.Registered) != 0 {
+		t.Errorf("dry Registered = %+v, want none: a dead session is not a recovery",
+			previewReport.Registered)
+	}
+	if counting.registers != 0 || counting.adopts != 0 {
+		t.Errorf("dry run wrote: %d registers, %d adopts; want 0 and 0",
+			counting.registers, counting.adopts)
+	}
+	if len(preview.locker.locked) != 0 {
+		t.Errorf("dry run locked %v, want nothing", preview.locker.locked)
 	}
 }

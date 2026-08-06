@@ -265,20 +265,33 @@ to be wrong.
 3. `config.Load` for the desired digest — for CaseRegister only, the only case
    that writes a digest. A workspace whose configuration is broken can still
    have its live session adopted, because adoption does not depend on the
-   digest. A failure here is carried to step 5 rather than ending the candidate:
+   digest. A failure here is carried to step 7 rather than ending the candidate:
    the case may become an adoption once the lock-held re-classification runs,
    and a candidate that no longer writes a digest is not blocked by one it could
-   not load.
+   not load. It is consulted where the digest is actually written, so it stops
+   exactly the candidates that still need one.
 4. Take the per-workspace lock.
 5. **Re-observe under the lock:** `ObserveSession(SessionQuery{WorkspaceID,
    CandidateNames: []string{session.Name}})`, and re-read the workspace's row.
+   The observed session is re-checked with `SessionBelongsTo` before anything
+   is written: the observer matches on the workspace-ID tag alone, so the
+   session that comes back need not be the one step 2 validated, and the writes
+   are made from the observed session. This is the same re-check planning
+   applies to `ByIdentity` (§7).
 6. Re-classify from that observation with the same `classify`.
 7. Write what the re-classification says: case 1 → `RegisterWorkspace` then
-   `AdoptSessionName`; case 2 → `AdoptSessionName` only; anything else →
-   report a conflict and write nothing.
+   `AdoptSessionName`; case 2 → `AdoptSessionName` only; a row that already
+   records the observed session → nothing at all, reported as neither a
+   recovery nor a conflict, because the desired end state is confirmed to hold
+   and a refusal there would map a verified ok onto the refusal exit code;
+   anything else → report a conflict and write nothing.
 
-Steps 1-3 are read-only, which is what lets `--dry-run` stop after step 3 and
-still predict the real run's verdict (§2). A failure at any step becomes a
+Steps 1-3 are read-only, and so is the observation in step 5. `--dry-run`
+performs all of them and stops before step 4, the first step that changes
+anything. Observing is what discovers that a session died between
+classification and the run, so a preview that skipped it would report a clean 0
+for a workspace the real run refuses — and a preview must predict the real
+run's refusals, not just its successes (§2). A failure at any step becomes a
 conflict in the report rather than aborting the batch, matching how
 `autostart` treats one workspace's failure.
 
