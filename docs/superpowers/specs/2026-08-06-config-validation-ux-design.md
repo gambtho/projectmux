@@ -82,12 +82,18 @@ renderer puts in the left column. The remainder follow in layer order
 file by ascending line. For a problem with no primary field, `Field` is empty
 and the whole list is in that same layer-then-line order.
 
-**Origins is optional by construction.** `version is required` and
-`window "dev" must set exactly one of agent, command, or shell (it sets
-none)` describe *absent* keys. There is no node to point at, so `Origins` is
-empty and rendering omits the prefix entirely. Printing `:0` would assert a
-position that does not exist — the same error as converting uncertainty into
-a finding.
+**Origins is optional by construction, but rarely empty.** The rule is that a
+position is reported when *something in a file* corresponds to the problem,
+even if the offending key itself is absent. `window "dev" must set exactly one
+of agent, command, or shell (it sets none)` names no key, but the window it is
+about is written down somewhere, so it attributes to that window's node per the
+fallback ladder in §3.3.
+
+`Origins` is empty only when nothing exists to point at anywhere — the
+motivating case is `version is required and must be 1` on a layer set that
+never mentions `version`. Then rendering omits the prefix entirely. Printing
+`:0`, or attributing to an arbitrary file, would assert a position that does
+not exist — the same error as converting uncertainty into a finding.
 
 **Nothing here reaches `Config`.** The digest covers the normalized `Config`
 and is compared against recorded workspace state as drift. Had provenance
@@ -153,15 +159,18 @@ same reason `mergeWindows` does: substring matching would swallow `age` into
 `shell` together, so a layer that sets any one of them owns all three. All
 three paths therefore record the origin of whichever key was physically
 present. A `must set exactly one` problem attributes to the enclosing
-`windows[dev]` node rather than to a single key, because when two keys are at
-fault neither one alone is the answer.
+`windows[dev]` node rather than to a single key, in **both** of its forms: when
+the window sets two modes, neither key alone is the answer; when it sets none,
+there is no key at all, and the window is the only thing written down. This is
+the rule §2 defers to — a problem about an absent key still has a position when
+the thing it is about was written down.
 
 **Fallback ladder** when a field has no node of its own: field node →
 enclosing window node → file with no line → unattributed. Each rung is a
 weaker but still true statement; no rung invents a position.
 
-`rejectDuplicates` already runs per-layer, so
-`window "dev" is defined more than once` gains its file for free.
+Duplicate window names are the one problem this machinery does not serve; §3.4
+covers why and what replaces it.
 
 ### 3.4 A duplicate-detection hole this slice closes
 
@@ -175,13 +184,49 @@ merge, and it surfaces attributed to that workspace rather than to defaults.
 This is a pre-existing bug on `main`, not one this design introduces, but the
 `--validate` defaults-alone path would give it a second front door and make
 the wrong answer easier to reach. So duplicate detection moves out of
-`mergeWindows` into a check that runs over every layer as it is loaded,
-reached by both `Load` and `ValidateDefaults`. `mergeWindows` keeps merging
-and stops policing.
+`mergeWindows` into a per-layer check. `mergeWindows` keeps merging and stops
+policing.
+
+**Where the check is invoked is load-bearing, not an implementation detail.**
+It is called by `Load` and by `ValidateDefaults`. It is **not** called by
+`loadLayer` or `LoadDefaults`, and the distinction decides whether doctor keeps
+working:
+
+- `LoadDefaults` returning an error routes doctor into its `DefaultsErr` branch,
+  which reports `configuration` as an outright **fail** and abandons the rest of
+  the check — "without a defaults layer no workspace can be merged, so there is
+  nothing further to diagnose."
+- `ValidateDefaults` returning problems routes doctor into `defaultsItem`, which
+  reports a **warn** and continues to every workspace.
+
+A duplicated window name in `defaults.yaml` belongs in the second branch. It is
+a real defect, but the file parsed fine and every other workspace remains
+diagnosable; failing the whole check would hide them. Putting the check in
+`loadLayer` would silently convert that warning into a fatal error and is the
+mistake to avoid.
+
+**Existing error ordering is preserved.** Today `Load` decodes an overlay before
+`mergeWindows` inspects the base for duplicates, so a defaults file with a
+duplicate *and* an overlay that fails to decode reports the decode failure. The
+new check runs at the same point in `Load` — after the layers are read, not
+during — so that ordering does not change and no existing test needs rewriting
+to accommodate it.
 
 The distinction it encodes is unchanged and still correct: repetition *within*
 one file is always a mistake; repetition *across* files is the merge working
 as intended.
+
+**A duplicate reports both definition lines**, which the ordinary name-based
+lookup cannot supply: `lineOf` resolves `windows[dev]` to the *first* sequence
+element whose name matches, and for this problem every colliding entry is
+`windows[dev]`. Reporting one of the two would send the user to a line that
+looks perfectly correct in isolation — the duplicate is only visible as a pair.
+
+So the duplicate check does not go through `lineOf`. It scans the layer's window
+sequence directly, collecting every element that carries the repeated name, and
+emits them as `Origins` in ascending line order within the one file. `Field` is
+`windows[dev]` and `Origins[0]` is the first definition, keeping the general
+ordering rule from §2 intact.
 
 ## 4. Command surface
 
@@ -209,12 +254,21 @@ configured roots.
 
 `--validate` applies the same rule and then one stronger one: the argument
 must be an exact member of `config.Slugs(root)`. Membership is the real
-contract — the mode validates workspace files that exist — and it makes
-traversal unrepresentable rather than merely rejected. `--validate ../../etc/x`
-therefore reports an unknown slug, not a read outside the configuration root.
-The exposure without this is bounded (read-only, and the file must parse as
-our schema) but the guard is one comparison and the resolver already sets the
-precedent.
+contract — the mode validates workspace files that exist — so
+`--validate ../../etc/x` reports an unknown slug rather than reading outside
+the configuration root.
+
+**The guarantee is lexical, and the spec claims no more than that.** Membership
+constrains the *name*, not the bytes behind it: discovery accepts any
+non-directory `*.yaml` entry, and a symlink is a non-directory entry, so
+`workspaces/evil.yaml` pointing at `/etc/passwd` is a legitimate member of
+`Slugs` and `os.ReadFile` will follow it. Resolving and containing every layer
+path before reading is deliberately **not** in this slice: it requires write
+access to the configuration directory to exploit, and anyone with that access
+can simply write a real file there. What this rule buys is that a hostile
+*argument* cannot escape — which is the part `--validate` newly exposes, since
+every existing caller gets its slug from git via `resolve.slugFor`. Tests assert
+the argument guard, not a symlink guarantee.
 
 Without: validate `defaults.yaml` alone through `ValidateDefaults`, then
 every discovered slug. Defaults read alone stay a *warning* rather than a
@@ -367,11 +421,16 @@ same `config.Load`, so they cannot disagree.
   Ordering is asserted explicitly because unstable output would churn diffs.
 - **The duplicate-in-defaults hole** gets a regression test that fails on
   today's `main`: a `defaults.yaml` naming one window twice, with no workspace
-  layer present, must be rejected by `ValidateDefaults` — and doctor must
-  report it.
+  layer present, must be rejected by `ValidateDefaults`. Two further cases pin
+  the lifecycle from §3.4: doctor reports it as a **warn** and still diagnoses
+  every workspace (never the fatal `DefaultsErr` branch), and a duplicate in
+  defaults alongside an undecodable overlay still reports the decode failure
+  first, proving error ordering is unchanged. Both `Origins` entries are
+  asserted, in ascending line order.
 - **Slug containment** — `--validate` with a separator, a `..` component, and
-  a glob metacharacter each report an unknown slug and read no file outside
-  the configuration root.
+  a glob metacharacter each report an unknown slug. The assertion is that the
+  argument is rejected, not that no file outside the root is reachable: per §4
+  the guarantee is lexical, and a symlinked layer file is out of scope.
 - **Brittleness guard.** Assertions are structural — file plus field — with
   line numbers asserted only in a small number of dedicated cases whose
   fixtures carry a comment marking the expected line. Otherwise every
