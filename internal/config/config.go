@@ -8,6 +8,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -156,6 +157,22 @@ func (e *InvalidConfigError) Error() string {
 		b.WriteString(p.String())
 	}
 	return b.String()
+}
+
+// ProblemsOf returns the structured problems an error carries, or the error
+// rendered as a single problem when it is not an invalid-configuration error.
+//
+// It exists so a reporting caller never has to choose between the structured
+// detail and the ordinary error text: every failure becomes problems.
+func ProblemsOf(err error) []Problem {
+	if err == nil {
+		return nil
+	}
+	var bad *InvalidConfigError
+	if errors.As(err, &bad) {
+		return bad.Problems
+	}
+	return []Problem{{Message: err.Error()}}
 }
 
 // invalid builds a single-problem InvalidConfigError. Load-time failures abort

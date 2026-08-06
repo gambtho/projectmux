@@ -21,11 +21,16 @@ import (
 // structure below.
 const OutputSchemaVersion = 1
 
-const configHelp = `usage: projectmux config [--json] [--compact] [<workspace>]
+const configHelp = `usage: projectmux config [--validate] [--json] [--compact] [<workspace>]
 
 Print the normalized, merged configuration for a workspace, resolved either
 from <workspace> or from the current directory.
 
+  --validate check configuration files instead of printing one, and report
+             what is wrong and where. The argument names a workspace file
+             directly rather than a worktree to resolve, so a workspace whose
+             worktree has moved can still be checked; with no argument every
+             configured workspace is checked.
   --json     emit the versioned JSON envelope instead of human-readable text
   --compact  emit the JSON on a single line (implies --json)
 `
@@ -53,6 +58,7 @@ type workspaceInfo struct {
 
 func runConfig(args []string, stdout io.Writer) error {
 	fs := newFlagSet("config")
+	validate := fs.Bool("validate", false, "check configuration files instead of printing one")
 	asJSON := fs.Bool("json", false, "emit the versioned JSON envelope")
 	compact := fs.Bool("compact", false, "emit the JSON on a single line")
 
@@ -69,6 +75,14 @@ func runConfig(args []string, stdout io.Writer) error {
 	// --compact only affects JSON, so asking for it is asking for JSON.
 	if *compact {
 		*asJSON = true
+	}
+
+	if *validate {
+		root, err := config.Root()
+		if err != nil {
+			return err
+		}
+		return runValidate(root, fs.Arg(0), *asJSON, *compact, stdout)
 	}
 
 	env, err := buildEnvelope(fs.Arg(0))

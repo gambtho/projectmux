@@ -49,8 +49,9 @@ commands:
         end the workspace session, and with --container its container
   autostart [--json] [--compact]
         start containers for registered primary worktrees with autostart: true
-  config [--json] [--compact] [<workspace>]
-        print the normalized, merged configuration for a workspace
+  config [--validate] [--json] [--compact] [<workspace>]
+        print the normalized, merged configuration for a workspace, or with
+        --validate report what is wrong in the configuration files and where
   list [--json] [--compact]
         list recorded workspaces and live identity-carrying tmux sessions
   status [--json] [--compact] [<workspace>]
