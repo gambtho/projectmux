@@ -54,6 +54,8 @@ curl -fsSLO $BASE/projectmux-linux-$ARCH
 curl -fsSLO $BASE/SHA256SUMS
 
 sha256sum --check --ignore-missing SHA256SUMS
+
+mkdir -p ~/.local/bin
 install -m 0755 projectmux-linux-$ARCH ~/.local/bin/projectmux
 ```
 

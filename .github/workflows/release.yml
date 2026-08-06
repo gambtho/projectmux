@@ -168,14 +168,27 @@ jobs:
           # public release missing a binary or carrying checksums that do not
           # describe what shipped — the state in which someone downloads a
           # binary that fails verification and blames the checksum file.
+          # Cleanup deletes only a draft this run created, and only while it is
+          # still a draft.
+          #
+          # Both guards are load-bearing. Re-running this workflow for a tag
+          # that already published makes `gh release create` fail, which under
+          # `set -e` jumps straight to the trap — and a cleanup that checked
+          # only "did we publish?" would then delete the existing, public
+          # release. draft_created answers "is this ours"; isDraft answers "is
+          # it still unpublished". Neither alone is enough.
           cleanup() {
-            if [ "${published:-no}" != "yes" ]; then
-              echo "Publishing failed; deleting the draft so a retry starts clean."
-              # --cleanup-tag is deliberately not passed: the tag is what
-              # triggered this run and must survive for a retry. Deleting the
-              # draft release is the whole cleanup.
-              gh release delete "$tag" --yes 2>/dev/null || true
+            [ "${published:-no}" = "yes" ] && return 0
+            [ "${draft_created:-no}" = "yes" ] || return 0
+            if [ "$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)" != "true" ]; then
+              echo "Release $tag is not a draft; leaving it alone."
+              return 0
             fi
+            echo "Publishing failed; deleting the draft so a retry starts clean."
+            # --cleanup-tag is deliberately not passed: the tag is what
+            # triggered this run and must survive for a retry. Deleting the
+            # draft release is the whole cleanup.
+            gh release delete "$tag" --yes 2>/dev/null || true
           }
           trap cleanup EXIT
 
@@ -184,11 +197,13 @@ jobs:
             v0.*) prerelease="--prerelease" ;;
           esac
 
+          # shellcheck disable=SC2086  # $prerelease is a flag or empty by design
           gh release create "$tag" \
             --draft \
             $prerelease \
             --title "$tag" \
             --generate-notes
+          draft_created=yes
 
           gh release upload "$tag" \
             dist/projectmux-linux-amd64 \

@@ -389,9 +389,10 @@ that Docker unavailability never masquerades as container loss.
 Two of the gates above are not enforced by the `v0.x` release workflow, and
 this records that as a decision rather than leaving the list aspirational:
 
-- **Linting.** `gofmt`, `go vet`, and `go test -race` run on every push and
-  every release. A dedicated linter is not yet wired in; introducing one to an
-  existing codebase surfaces a backlog that deserves its own focused pass.
+- **Linting.** `gofmt`, `go vet`, and `go test -race` run on every pull
+  request, every push to the default branch, and every release. A dedicated
+  linter is not yet wired in; introducing one to an existing codebase surfaces
+  a backlog that deserves its own focused pass.
 - **Reproducible release checks.** Release builds use `-trimpath` and
   `CGO_ENABLED=0`, which removes local paths and the cgo toolchain as sources
   of variation, but nothing yet builds twice and compares digests.

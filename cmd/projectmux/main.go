@@ -1,9 +1,10 @@
 // Command projectmux orchestrates declarative tmux workspaces whose windows
 // may run on the host or inside a Dev Container.
 //
-// It observes what tmux and Docker actually hold, plans the difference against
-// the configured desired state, and reconciles it: open, attach, stop,
-// autostart, list, status, config, and doctor.
+// It observes what tmux and Docker actually hold and plans the difference
+// against the configured desired state. Only open, stop, and autostart act on
+// that plan; attach joins a session it never creates, and config, list,
+// status, doctor, and version observe without mutating anything.
 //
 // This build is an alpha. The configuration schema and the exit codes may
 // still change below 1.0; the JSON envelopes carry a schema_version, and
