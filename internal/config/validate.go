@@ -21,6 +21,24 @@ var windowNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 // literally named "3" can make focus land on the wrong window.
 var numericWindowName = regexp.MustCompile(`^[0-9]+$`)
 
+// ValidateDefaults reports every problem in the defaults layer read on
+// its own. Validation otherwise lives only in Load, which needs a slug,
+// so a defaults.yaml would go unchecked on an installation with no
+// workspace files at all.
+//
+// Defaults are legitimately incomplete — a workspace layer supplies the
+// rest — so an omitted version is not a problem here. Anything defaults
+// does state is checked as stated; a later layer may still override it,
+// which is why the caller reports these as a warning rather than a
+// rejection.
+func ValidateDefaults(l Layer) []string {
+	if l.Version == nil {
+		supported := SchemaVersion
+		l.Version = &supported
+	}
+	return validate(l, normalize(l))
+}
+
 // validate returns every problem in the effective configuration. The layer is
 // needed alongside the normalized config to tell an omitted version from an
 // unsupported one.

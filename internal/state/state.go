@@ -36,6 +36,16 @@ type Store struct {
 	db *sql.DB
 }
 
+// DBPath is the state database file inside root.
+func DBPath(root string) string { return filepath.Join(root, "state.db") }
+
+// uriPath escapes a filesystem path for a SQLite file: URI: a directory
+// containing "?" or "#" must not be read as the query string. SQLite
+// %-decodes URI paths, so the escaping round-trips. Pragma values need no
+// encoding — parentheses are legal in a URI query and the driver reads
+// them literally.
+func uriPath(path string) string { return (&url.URL{Path: path}).EscapedPath() }
+
 // Open creates the state directory and database as needed, configures
 // every pooled connection, and applies pending migrations.
 //
@@ -48,13 +58,7 @@ func Open(root string) (*Store, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, fmt.Errorf("creating the state directory: %w", err)
 	}
-	// The path rides in a URI, so escape it: a directory containing "?" or
-	// "#" must not be read as the query string. SQLite %-decodes URI paths,
-	// so the escaping round-trips. The pragma values need no encoding —
-	// parentheses are legal in a URI query and the driver reads them
-	// literally.
-	dbPath := (&url.URL{Path: filepath.Join(root, "state.db")}).EscapedPath()
-	dsn := "file:" + dbPath +
+	dsn := "file:" + uriPath(DBPath(root)) +
 		"?_txlock=immediate" +
 		"&_pragma=busy_timeout(5000)" +
 		"&_pragma=journal_mode(WAL)" +

@@ -55,6 +55,8 @@ commands:
         list recorded workspaces and live identity-carrying tmux sessions
   status [--json] [--compact] [<workspace>]
         observe one workspace and explain drift and dependency failures
+  doctor [--json] [--compact]
+        diagnose dependencies, configuration, state, and drift; changes nothing
   version
         print the projectmux version
   help
@@ -135,6 +137,8 @@ func dispatch(ctx context.Context, args []string, stdout io.Writer) error {
 		return runList(ctx, rest, stdout)
 	case "status":
 		return runStatus(ctx, rest, stdout)
+	case "doctor":
+		return runDoctor(ctx, rest, stdout)
 	default:
 		if !strings.HasPrefix(command, "-") {
 			// Design §8: `projectmux <workspace>` is shorthand for

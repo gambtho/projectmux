@@ -67,8 +67,18 @@ LEFT JOIN container_bindings b ON b.workspace_id = w.id
 LEFT JOIN last_operations o ON o.workspace_id = w.id`
 
 // Workspace returns the joined record for one workspace, or ErrNotFound.
-func (s *Store) Workspace(id string) (Record, error) {
-	rec, err := scanRecord(s.db.QueryRow(selectRecord+" WHERE w.id = ?", id))
+func (s *Store) Workspace(id string) (Record, error) { return queryWorkspace(s.db, id) }
+
+// Workspaces returns every registered workspace ordered by slug, then
+// worktree.
+func (s *Store) Workspaces() ([]Record, error) { return queryWorkspaces(s.db) }
+
+// The read queries take the pool rather than the Store so the read-only
+// inspection path (readonly.go) can reuse them without also inheriting
+// the mutating methods.
+
+func queryWorkspace(db *sql.DB, id string) (Record, error) {
+	rec, err := scanRecord(db.QueryRow(selectRecord+" WHERE w.id = ?", id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Record{}, fmt.Errorf("workspace %s: %w", id, ErrNotFound)
 	}
@@ -78,10 +88,8 @@ func (s *Store) Workspace(id string) (Record, error) {
 	return rec, nil
 }
 
-// Workspaces returns every registered workspace ordered by slug, then
-// worktree.
-func (s *Store) Workspaces() ([]Record, error) {
-	rows, err := s.db.Query(selectRecord + " ORDER BY w.slug, w.worktree")
+func queryWorkspaces(db *sql.DB) ([]Record, error) {
+	rows, err := db.Query(selectRecord + " ORDER BY w.slug, w.worktree")
 	if err != nil {
 		return nil, fmt.Errorf("listing workspaces: %w", err)
 	}
