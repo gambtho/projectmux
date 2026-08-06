@@ -244,8 +244,10 @@ func writeValidationText(w io.Writer, report validationReport) error {
 			continue
 		}
 		fmt.Fprintf(w, "\n%s:\n", r.Subject)
-		for _, p := range r.Problems {
-			fmt.Fprintf(w, "  %s\n", describe(p))
+		// Rendered from the problems themselves rather than their JSON form,
+		// so the human text and the error text cannot drift apart.
+		for _, p := range r.raw {
+			fmt.Fprintf(w, "  %s\n", p)
 		}
 	}
 
@@ -254,30 +256,6 @@ func writeValidationText(w io.Writer, report validationReport) error {
 		report.Summary.WithProblems,
 		plural(report.Summary.Subjects, "subject"))
 	return nil
-}
-
-// describe renders one problem with its positions, primary first. A problem
-// with no position prints none rather than a fabricated one.
-func describe(p reportedProblem) string {
-	if len(p.Origins) == 0 {
-		return p.Message
-	}
-	out := renderOrigin(p.Origins[0]) + ": " + p.Message
-	if len(p.Origins) > 1 {
-		rest := make([]string, 0, len(p.Origins)-1)
-		for _, o := range p.Origins[1:] {
-			rest = append(rest, renderOrigin(o))
-		}
-		out += " (also " + strings.Join(rest, ", ") + ")"
-	}
-	return out
-}
-
-func renderOrigin(o reportedOrigin) string {
-	if o.Line == 0 {
-		return o.File
-	}
-	return fmt.Sprintf("%s:%d", o.File, o.Line)
 }
 
 func plural(n int, noun string) string {
