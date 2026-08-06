@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
+
+	"modernc.org/sqlite"
 )
 
 func TestOpenCreatesTheLatestSchema(t *testing.T) {
@@ -152,5 +155,73 @@ func TestPragmasApplyToEveryPooledConnection(t *testing.T) {
 		if fk != 1 {
 			t.Errorf("connection %d foreign_keys = %d, want 1", i, fk)
 		}
+	}
+}
+
+// TestBeginMigrationTxRetriesOnBusy covers the cold-start race that
+// busy_timeout alone does not: two processes creating the database for
+// the first time can each get SQLITE_BUSY back immediately, bypassing the
+// busy handler, which is why beginMigrationTx retries on top of it.
+//
+// busy_timeout(0) reproduces that deterministically — the driver reports
+// SQLITE_BUSY at once rather than waiting internally — so a Begin that
+// succeeds here can only have come from the retry loop.
+func TestBeginMigrationTxRetriesOnBusy(t *testing.T) {
+	dsn := "file:" + uriPath(filepath.Join(t.TempDir(), "state.db")) +
+		"?_txlock=immediate&_pragma=busy_timeout(0)"
+
+	holder, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("opening the holder: %v", err)
+	}
+	defer holder.Close()
+	contender, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("opening the contender: %v", err)
+	}
+	defer contender.Close()
+
+	// _txlock=immediate takes the write lock at BEGIN, not at first write.
+	held, err := holder.Begin()
+	if err != nil {
+		t.Fatalf("taking the write lock: %v", err)
+	}
+
+	// Prove the setup produces the exact error the retry loop keys on.
+	// Without this the test would still pass against an uncontended
+	// database, proving nothing; it also pins sqliteBusy to the code the
+	// driver actually reports, so a driver change cannot silently turn
+	// the retry into a pass-through.
+	_, err = contender.Begin()
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		held.Rollback()
+		t.Fatalf("contending Begin = %v, want a *sqlite.Error", err)
+	}
+	if sqliteErr.Code() != sqliteBusy {
+		held.Rollback()
+		t.Fatalf("code = %d, want %d (SQLITE_BUSY)", sqliteErr.Code(), sqliteBusy)
+	}
+
+	// Start the clock before launching the releaser: the goroutine's sleep
+	// begins whenever it is scheduled, so timing from after the go
+	// statement would subtract any preemption in between from elapsed and
+	// could fail a run that retried correctly.
+	const hold = 100 * time.Millisecond
+	start := time.Now()
+	go func() {
+		time.Sleep(hold)
+		held.Rollback()
+	}()
+
+	tx, err := beginMigrationTx(contender)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("beginMigrationTx gave up instead of retrying: %v", err)
+	}
+	tx.Rollback()
+	// Returning before the holder released means it never waited at all.
+	if elapsed < hold/2 {
+		t.Errorf("returned after %v, want at least %v: it cannot have retried", elapsed, hold/2)
 	}
 }

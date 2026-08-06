@@ -202,6 +202,17 @@ func TestFakeStoreAdoptSessionName(t *testing.T) {
 	if err := s.AdoptSessionName("w1", "", testTime); err == nil {
 		t.Error("an empty session name was accepted")
 	}
+	// Both failures apply at once. The real store validates the name
+	// before it reads the workspace, so this must not be ErrNotFound:
+	// a fake that disagreed here would let a test pass against an error
+	// production never returns. See the matching real-store test.
+	err = s.AdoptSessionName("nope", "", testTime)
+	if err == nil {
+		t.Fatal("an unknown workspace with an empty name was accepted")
+	}
+	if errors.Is(err, state.ErrNotFound) {
+		t.Errorf("err = %v, want the empty-name error, not ErrNotFound", err)
+	}
 }
 
 func TestFakeSessionActuatorRecordsSpecs(t *testing.T) {

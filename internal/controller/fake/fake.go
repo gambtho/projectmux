@@ -313,14 +313,18 @@ func (a *SessionActuator) KillSession(_ context.Context, name string) error {
 // another workspace holds, no-op on the workspace's own current name,
 // repair of a stale assignment otherwise.
 func (s *Store) AdoptSessionName(workspaceID, name string, now time.Time) error {
+	// Validation order mirrors the real store, which rejects an empty name
+	// before it looks the workspace up. Both checks fire for an unknown
+	// workspace *and* an empty name, so a fake that reordered them would
+	// hand tests a different error than production for the same call.
+	if name == "" {
+		return fmt.Errorf("adopting an empty session name for workspace %s", workspaceID)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.records[workspaceID]
 	if !ok {
 		return fmt.Errorf("workspace %s: %w", workspaceID, state.ErrNotFound)
-	}
-	if name == "" {
-		return fmt.Errorf("adopting an empty session name for workspace %s", workspaceID)
 	}
 	if rec.ActualSession != nil && *rec.ActualSession == name {
 		return nil

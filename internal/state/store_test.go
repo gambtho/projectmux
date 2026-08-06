@@ -497,4 +497,14 @@ func TestAdoptSessionNameRejectsUnknownWorkspaceAndEmptyName(t *testing.T) {
 	if err := s.AdoptSessionName("w1", "", testTime); err == nil {
 		t.Error("an empty session name was accepted")
 	}
+	// When both failures apply, the name check wins because it runs
+	// before the workspace lookup. The fake store pins the same order;
+	// see TestFakeStoreAdoptSessionName.
+	err := s.AdoptSessionName("nope", "", testTime)
+	if err == nil {
+		t.Fatal("an unknown workspace with an empty name was accepted")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want the empty-name error, not ErrNotFound", err)
+	}
 }
