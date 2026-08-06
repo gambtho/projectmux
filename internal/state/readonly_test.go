@@ -197,8 +197,8 @@ func TestOpenReadOnlySeesUncheckpointedRows(t *testing.T) {
 	if err := st.RegisterWorkspace(ws, "sha256:def", time.Now()); err != nil {
 		t.Fatalf("RegisterWorkspace: %v", err)
 	}
-	if !walPresent(DBPath(root)) {
-		t.Fatal("the writer left no -wal, so this test proves nothing")
+	if walStateOf(DBPath(root)) != walComplete {
+		t.Fatal("the writer left no complete WAL, so this test proves nothing")
 	}
 	before := rootNames(t, root)
 
@@ -219,6 +219,101 @@ func TestOpenReadOnlySeesUncheckpointedRows(t *testing.T) {
 	}
 	if got := rootNames(t, root); !slices.Equal(before, got) {
 		t.Errorf("state root = %v, want %v unchanged", got, before)
+	}
+}
+
+// seedUnrecoveredWAL leaves a database beside a -wal with no -shm: what
+// a writer that did not shut down cleanly leaves behind. A crash cannot
+// be staged inside the test process, so the -wal is copied aside while a
+// writer still holds it and restored after that writer closes — the
+// close checkpoints the row into the database file, which is why the
+// pre-checkpoint bytes are restored along with it.
+func seedUnrecoveredWAL(t *testing.T) string {
+	t.Helper()
+	root := seedDatabase(t)
+	path := DBPath(root)
+
+	st, err := Open(root)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ws := resolve.Workspace{
+		ID:          "id-2",
+		Slug:        "slab2",
+		Worktree:    "/w/slab2",
+		SessionName: "slab2",
+		IsPrimary:   true,
+	}
+	if err := st.RegisterWorkspace(ws, "sha256:def", time.Now()); err != nil {
+		t.Fatalf("RegisterWorkspace: %v", err)
+	}
+	db, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the database: %v", err)
+	}
+	wal, err := os.ReadFile(path + "-wal")
+	if err != nil {
+		t.Fatalf("reading the -wal: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := os.WriteFile(path, db, 0o600); err != nil {
+		t.Fatalf("restoring the database: %v", err)
+	}
+	if err := os.WriteFile(path+"-wal", wal, 0o600); err != nil {
+		t.Fatalf("restoring the -wal: %v", err)
+	}
+	if got := walStateOf(path); got != walIncomplete {
+		t.Fatalf("staged WAL state = %v, want walIncomplete", got)
+	}
+	return root
+}
+
+// TestOpenReadOnlyUnrecoveredWALIsUncertainty covers the state no DSN
+// serves. Reading it the ordinary way recovers the log and keeps the
+// -shm it had to build; reading it immutably silently omits every row
+// the log holds — measured as 1 row where 2 were committed, with
+// integrity still reporting "ok". A diagnosis may do neither, so it
+// reports that it could not look.
+func TestOpenReadOnlyUnrecoveredWALIsUncertainty(t *testing.T) {
+	root := seedUnrecoveredWAL(t)
+	before := rootNames(t, root)
+
+	ro, insp, err := OpenReadOnly(root)
+	if err == nil {
+		ro.Close()
+		t.Fatalf("an unrecovered write-ahead log opened cleanly: %+v", insp)
+	}
+	if ro != nil {
+		t.Error("a failed open returned a store")
+	}
+	if insp.IntegrityErr != nil {
+		t.Errorf("an unread database was reported as corrupt: %v", insp.IntegrityErr)
+	}
+	if got := rootNames(t, root); !slices.Equal(before, got) {
+		t.Errorf("state root = %v, want %v unchanged: the log was recovered", got, before)
+	}
+}
+
+// TestWalStateOfClassifiesSidecars pins the three states apart, since
+// which DSN is safe follows entirely from this classification.
+func TestWalStateOfClassifiesSidecars(t *testing.T) {
+	clean := DBPath(seedDatabase(t))
+	if got := walStateOf(clean); got != walNone {
+		t.Errorf("a checkpointed database = %v, want walNone", got)
+	}
+
+	if got := walStateOf(DBPath(seedUnrecoveredWAL(t))); got != walIncomplete {
+		t.Errorf("a -wal with no -shm = %v, want walIncomplete", got)
+	}
+
+	// A sidecar that cannot be examined is not an absent one.
+	if err := os.Mkdir(clean+"-wal", 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if got := walStateOf(clean); got != walIncomplete {
+		t.Errorf("an unexaminable -wal = %v, want walIncomplete", got)
 	}
 }
 

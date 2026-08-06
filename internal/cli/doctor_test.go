@@ -6,9 +6,11 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gambtho/projectmux/internal/controller/fake"
 	"github.com/gambtho/projectmux/internal/doctor"
+	"github.com/gambtho/projectmux/internal/resolve"
 	"github.com/gambtho/projectmux/internal/state"
 )
 
@@ -256,6 +258,63 @@ func TestDoctorNeverTouchesTheStateDatabase(t *testing.T) {
 	// materialize: doctor leaves the state root exactly as it found it.
 	if got := dirNames(t, stateRoot); strings.Join(got, ",") != strings.Join(beforeNames, ",") {
 		t.Errorf("state root = %v, want %v unchanged", got, beforeNames)
+	}
+}
+
+// TestDoctorLeavesAnUnrecoveredWALAlone covers the one state where
+// reading the database at all would write to the state root: a -wal with
+// no -shm beside it, left by a writer that did not shut down cleanly.
+// Recovering it is the next mutating command's job, so doctor reports
+// the database as unknown rather than repairing it in passing.
+func TestDoctorLeavesAnUnrecoveredWALAlone(t *testing.T) {
+	workspace(t, map[string]string{"defaults.yaml": validConfig})
+	stateRoot := t.TempDir()
+	t.Setenv("PROJECTMUX_STATE_ROOT", stateRoot)
+	installVersionRunner(t, fakeProbe{})
+	installLiveSessions(t, nil, nil)
+	installContainerObserver(t, &fake.ContainerObserver{})
+
+	// Stage the crash: copy the -wal aside while a writer holds it, then
+	// restore it (with the pre-checkpoint database) after that writer's
+	// clean close has removed both sidecars.
+	path := state.DBPath(stateRoot)
+	st, err := state.Open(stateRoot)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := st.RegisterWorkspace(resolve.Workspace{
+		ID: "id-1", Slug: "slab", Worktree: "/w/slab", SessionName: "slab", IsPrimary: true,
+	}, "sha256:abc", time.Now()); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	dbBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read db: %v", err)
+	}
+	walBytes, err := os.ReadFile(path + "-wal")
+	if err != nil {
+		t.Fatalf("read wal: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := os.WriteFile(path, dbBytes, 0o600); err != nil {
+		t.Fatalf("restore db: %v", err)
+	}
+	if err := os.WriteFile(path+"-wal", walBytes, 0o600); err != nil {
+		t.Fatalf("restore wal: %v", err)
+	}
+	beforeNames := dirNames(t, stateRoot)
+
+	code, stdout, stderr := run(t, "doctor", "--json")
+	if code != ExitOK {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	if db := decodeDoctor(t, stdout).Checks[2]; db.Status != "unknown" {
+		t.Errorf("database check = %+v, want unknown for an unrecovered log", db)
+	}
+	if got := dirNames(t, stateRoot); strings.Join(got, ",") != strings.Join(beforeNames, ",") {
+		t.Errorf("state root = %v, want %v unchanged: doctor recovered the log", got, beforeNames)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 
 	"modernc.org/sqlite"
@@ -70,8 +71,9 @@ type ReadOnlyStore struct {
 // readers need the shared-memory index — and those files outlive the
 // connection, which would leave a diagnosis-only command permanently
 // altering the state root and unable to run at all where the directory
-// is not writable. The DSN choice below avoids that without giving up a
-// WAL-consistent read.
+// is not writable. The DSN is chosen from what the sidecars show, and
+// where no DSN can both answer honestly and leave the directory alone
+// the inspection reports uncertainty instead. See walStateOf.
 func OpenReadOnly(root string) (*ReadOnlyStore, Inspection, error) {
 	path := DBPath(root)
 	if _, err := os.Stat(path); err != nil {
@@ -82,33 +84,80 @@ func OpenReadOnly(root string) (*ReadOnlyStore, Inspection, error) {
 		"&_pragma=busy_timeout(5000)" +
 		"&_pragma=query_only(1)"
 
-	// With no -wal beside the database there is no uncheckpointed
-	// content to miss, so it can be read as immutable: SQLite then skips
-	// the shared-memory index and touches nothing in the directory.
-	// Where a -wal does exist the sidecars are already there, so the
-	// ordinary path adds nothing to the state root anyway — and it is
-	// the only one that sees what the -wal holds. Immutable reads of a
-	// live WAL database silently omit committed rows.
-	if !walPresent(path) {
-		store, insp, err := inspect(dsn + "&immutable=1")
-		// A -wal that appeared mid-read means a writer was active and
-		// the immutable snapshot may be torn, so its verdict on
-		// integrity is unfounded. Anything else unexpected falls back
-		// too: immutable is an optimization that has to prove itself.
-		if err == nil && !(insp.IntegrityErr != nil && walPresent(path)) {
-			return store, insp, nil
-		}
-		if store != nil {
-			store.Close()
-		}
+	switch walStateOf(path) {
+	case walComplete:
+		// The sidecars are already there, so the ordinary path adds
+		// nothing to the state root — and it is the only one that sees
+		// what the -wal holds. Immutable reads of a live WAL database
+		// silently omit committed rows.
+		return inspect(dsn)
+	case walIncomplete:
+		return nil, Inspection{}, incompleteWAL(path)
 	}
-	return inspect(dsn)
+
+	// No -wal, so there is no uncheckpointed content to miss and the
+	// database can be read as immutable: SQLite then skips the
+	// shared-memory index and touches nothing in the directory. A
+	// failure here is reported as it stands rather than retried the
+	// ordinary way, which would create both sidecars.
+	store, insp, err := inspect(dsn + "&immutable=1")
+	if err != nil {
+		return nil, Inspection{}, err
+	}
+	if walStateOf(path) != walNone {
+		// A writer arrived mid-read. The immutable snapshot ignored
+		// whatever it committed and may be torn besides, so neither its
+		// rows nor its verdict on integrity are worth reporting.
+		store.Close()
+		return nil, Inspection{}, fmt.Errorf(
+			"the state database at %s was written during the inspection; run the command again", path)
+	}
+	return store, insp, nil
 }
 
-// walPresent reports whether a write-ahead log sits beside the database.
-func walPresent(path string) bool {
-	_, err := os.Stat(path + "-wal")
-	return err == nil
+// walState is what the files beside a database say about its write-ahead
+// log. The third case exists because a -wal alone does not describe a
+// readable WAL state: without the -shm index beside it, no connection can
+// read the log without first creating that index.
+type walState int
+
+const (
+	// walNone: no write-ahead log, so nothing is uncheckpointed.
+	walNone walState = iota
+	// walComplete: a -wal and the -shm index that reads it, both present.
+	walComplete
+	// walIncomplete: a -wal with no -shm, or sidecars that could not be
+	// examined at all. Neither DSN serves this state — the ordinary path
+	// creates the missing -shm and keeps it, and an immutable read
+	// silently omits every row the -wal holds.
+	walIncomplete
+)
+
+// walStateOf classifies the sidecars beside path. A stat that fails for
+// any reason other than absence leaves the question open, and an open
+// question is never resolved as "no log": that is the one reading under
+// which a silent immutable read looks safe.
+func walStateOf(path string) walState {
+	wal, err := os.Stat(path + "-wal")
+	if errors.Is(err, fs.ErrNotExist) {
+		return walNone
+	}
+	if err != nil || wal.IsDir() {
+		return walIncomplete
+	}
+	if _, err := os.Stat(path + "-shm"); err != nil {
+		return walIncomplete
+	}
+	return walComplete
+}
+
+// incompleteWAL reports a log that cannot be read without writing.
+func incompleteWAL(path string) error {
+	return fmt.Errorf(
+		"the state database at %s has a write-ahead log with no shared-memory index, "+
+			"which means a writer did not shut down cleanly; reading it would require "+
+			"recovering the log into the state directory, which an inspection must not do. "+
+			"The next mutating command recovers it", path)
 }
 
 // inspect connects and reads the two facts an inspection is made of.
