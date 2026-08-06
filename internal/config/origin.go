@@ -6,6 +6,50 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Origin is a location in a configuration layer.
+//
+// Line is 0 when the position is not known, which is a real answer rather
+// than a missing one: it means the layer set the field in a way the document
+// tree cannot point at.
+type Origin struct {
+	File string
+	Line int
+}
+
+// originOf builds the origin of path within this layer.
+func (s Source) originOf(path string) Origin {
+	return Origin{File: s.File, Line: lineOf(s.root, path)}
+}
+
+// Merged is the accumulated layer plus the file and line that last set each
+// field path. Origins are keyed by the same dotted paths lineOf resolves.
+type Merged struct {
+	Layer   Layer
+	origins map[string]Origin
+}
+
+// credit records that over set path. Later layers overwrite earlier ones, so
+// the map always names the layer that actually won — the file the reader has
+// to edit.
+func (m *Merged) credit(over Source, paths ...string) {
+	for _, path := range paths {
+		m.creditAs(over.originOf(path), path)
+	}
+}
+
+// creditAs records one position under several paths. It exists for fields
+// that merge as a unit: the three mode keys share whichever key the layer
+// physically wrote, because the other two have no node to point at and would
+// otherwise report the file with no line.
+func (m *Merged) creditAs(origin Origin, paths ...string) {
+	if m.origins == nil {
+		m.origins = map[string]Origin{}
+	}
+	for _, path := range paths {
+		m.origins[path] = origin
+	}
+}
+
 // lineOf resolves a dotted field path to its 1-based line in one layer's
 // document, or 0 when the path names nothing there.
 //

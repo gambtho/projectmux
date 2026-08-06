@@ -71,7 +71,10 @@ func LoadDefaults(root string) (Source, error) {
 // Load merges defaults with the workspace layers for slug and returns the
 // normalized, validated configuration and its digest.
 func Load(root string, defaults Source, slug string) (Effective, error) {
-	merged := defaults.Layer
+	merged, err := mergeLayers(Merged{}, defaults)
+	if err != nil {
+		return Effective{}, err
+	}
 	for _, path := range []string{WorkspacePath(root, slug), LocalPath(root, slug)} {
 		src, err := loadLayer(path)
 		if err != nil {
@@ -81,14 +84,14 @@ func Load(root string, defaults Source, slug string) (Effective, error) {
 			return Effective{}, invalid(fmt.Sprintf(
 				"%s: repository_roots may only be set in defaults.yaml", path))
 		}
-		merged, err = mergeLayers(merged, src.Layer)
+		merged, err = mergeLayers(merged, src)
 		if err != nil {
 			return Effective{}, err
 		}
 	}
 
-	cfg := normalize(merged)
-	if problems := validate(merged, cfg); len(problems) > 0 {
+	cfg := normalize(merged.Layer)
+	if problems := validate(merged.Layer, cfg); len(problems) > 0 {
 		return Effective{}, &InvalidConfigError{Problems: problems}
 	}
 	digest, err := digest(cfg)
