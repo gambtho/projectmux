@@ -25,6 +25,29 @@ func (e *PendingMigrationError) Error() string {
 		e.Database, e.Supported)
 }
 
+// IncompleteWALError reports a database whose write-ahead log cannot be
+// read without writing: a -wal with no -shm beside it, which is what a
+// writer that did not shut down cleanly leaves behind. It is typed rather
+// than a bare message because its two readers want opposite things — an
+// inspection must refuse, since recovering the log would alter the state
+// root, while a mutating command is precisely what recovers it.
+//
+// It is deliberately narrower than "the sidecars were not readable". A
+// stat that failed is uncertainty, and a mutating command that treated
+// uncertainty as this error would open a database it never examined.
+// walStateOf keeps the two apart; see walUnknown.
+type IncompleteWALError struct {
+	Path string
+}
+
+func (e *IncompleteWALError) Error() string {
+	return fmt.Sprintf(
+		"the state database at %s has a write-ahead log with no shared-memory index, "+
+			"which means a writer did not shut down cleanly; reading it would require "+
+			"recovering the log into the state directory, which an inspection must not do. "+
+			"The next mutating command recovers it", e.Path)
+}
+
 // Inspection is what a read-only open learned about the database file.
 // IntegrityErr is nil exactly when PRAGMA integrity_check returned "ok".
 type Inspection struct {
@@ -92,7 +115,9 @@ func OpenReadOnly(root string) (*ReadOnlyStore, Inspection, error) {
 		// silently omit committed rows.
 		return inspect(dsn)
 	case walIncomplete:
-		return nil, Inspection{}, incompleteWAL(path)
+		return nil, Inspection{}, &IncompleteWALError{Path: path}
+	case walUnknown:
+		return nil, Inspection{}, unexaminableSidecars(path)
 	}
 
 	// No -wal, so there is no uncheckpointed content to miss and the
@@ -116,9 +141,9 @@ func OpenReadOnly(root string) (*ReadOnlyStore, Inspection, error) {
 }
 
 // walState is what the files beside a database say about its write-ahead
-// log. The third case exists because a -wal alone does not describe a
-// readable WAL state: without the -shm index beside it, no connection can
-// read the log without first creating that index.
+// log. The last two cases exist because a -wal alone does not describe a
+// readable WAL state, and because failing to examine the sidecars is a
+// different answer from examining them and finding a crash.
 type walState int
 
 const (
@@ -126,38 +151,55 @@ const (
 	walNone walState = iota
 	// walComplete: a -wal and the -shm index that reads it, both present.
 	walComplete
-	// walIncomplete: a -wal with no -shm, or sidecars that could not be
-	// examined at all. Neither DSN serves this state — the ordinary path
-	// creates the missing -shm and keeps it, and an immutable read
-	// silently omits every row the -wal holds.
+	// walIncomplete: a regular -wal with -shm confirmed absent. Neither
+	// DSN serves this state — the ordinary path creates the missing -shm
+	// and keeps it, and an immutable read silently omits every row the
+	// -wal holds. This is what an unclean shutdown leaves, and the one
+	// state a mutating command may proceed through: opening read-write
+	// recovers the log.
 	walIncomplete
+	// walUnknown: the sidecars could not be examined — a stat that failed
+	// for any reason other than absence, or a -wal that is not a regular
+	// file. Everyone refuses. Reporting this as walIncomplete would tell
+	// a mutating command it may proceed, on the strength of a question
+	// that was never answered.
+	walUnknown
 )
 
 // walStateOf classifies the sidecars beside path. A stat that fails for
 // any reason other than absence leaves the question open, and an open
-// question is never resolved as "no log": that is the one reading under
-// which a silent immutable read looks safe.
+// question is never resolved as "no log" — that is the one reading under
+// which a silent immutable read looks safe — nor as "a writer crashed",
+// which is the one reading under which a read-write open looks safe.
 func walStateOf(path string) walState {
 	wal, err := os.Stat(path + "-wal")
-	if errors.Is(err, fs.ErrNotExist) {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
 		return walNone
-	}
-	if err != nil || wal.IsDir() {
-		return walIncomplete
+	case err != nil:
+		return walUnknown
+	case !wal.Mode().IsRegular():
+		// A directory, device, or socket named state.db-wal is not a log
+		// this code understands, whatever else it may be.
+		return walUnknown
 	}
 	if _, err := os.Stat(path + "-shm"); err != nil {
-		return walIncomplete
+		if errors.Is(err, fs.ErrNotExist) {
+			return walIncomplete
+		}
+		return walUnknown
 	}
 	return walComplete
 }
 
-// incompleteWAL reports a log that cannot be read without writing.
-func incompleteWAL(path string) error {
+// unexaminableSidecars reports sidecars the filesystem would not describe.
+// It is not IncompleteWALError: that one asserts a writer crashed, which
+// is a licence to recover the log, and nothing here established that.
+func unexaminableSidecars(path string) error {
 	return fmt.Errorf(
-		"the state database at %s has a write-ahead log with no shared-memory index, "+
-			"which means a writer did not shut down cleanly; reading it would require "+
-			"recovering the log into the state directory, which an inspection must not do. "+
-			"The next mutating command recovers it", path)
+		"the state database at %s has write-ahead log files that could not be examined, "+
+			"so whether the log needs recovering is unknown; check the permissions and "+
+			"contents of the state directory", path)
 }
 
 // inspect connects and reads the two facts an inspection is made of.
@@ -223,3 +265,13 @@ func (s *ReadOnlyStore) Workspaces() ([]Record, error) { return queryWorkspaces(
 // database file does not exist — a fresh installation, in which nothing
 // is registered. Any other error is uncertainty, not absence.
 func IsMissingDatabase(err error) bool { return errors.Is(err, os.ErrNotExist) }
+
+// IsIncompleteWAL reports whether an OpenReadOnly error means the database
+// has a write-ahead log no reader can open without recovering it. Alone
+// among an inspection's refusals it is not a reason for a mutating command
+// to stop: opening the database read-write is what recovers the log. It is
+// false for sidecars that could not be examined, which stop everyone.
+func IsIncompleteWAL(err error) bool {
+	var e *IncompleteWALError
+	return errors.As(err, &e)
+}
