@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"strings"
@@ -31,11 +32,35 @@ func (r *Runner) configuration() Check {
 		item := Item{Subject: slug, Status: StatusOK}
 		if _, err := config.Load(r.ConfigRoot, r.Defaults, slug); err != nil {
 			item.Status = StatusFail
-			item.Detail = oneLine(err.Error())
+			item.Detail = summarizeProblems(config.ProblemsOf(err), slug)
 		}
 		check.Items = append(check.Items, item)
 	}
 	return check.aggregate()
+}
+
+// summarizeProblems describes a workspace's problems at doctor's altitude.
+//
+// It reports how many there are and where the first one is, then points at
+// the focused command for the rest. Doctor answers "is anything wrong across
+// this installation"; `config --validate` answers "what exactly, and where".
+// Reproducing every problem here would make one broken workspace crowd out
+// the others, which is what the old single-line flattening did badly in the
+// other direction — it discarded the detail instead of delegating it.
+func summarizeProblems(problems []config.Problem, slug string) string {
+	if len(problems) == 0 {
+		return ""
+	}
+	noun := "problems"
+	if len(problems) == 1 {
+		noun = "problem"
+	}
+	first := problems[0].Message
+	if len(problems[0].Origins) > 0 {
+		first = problems[0].Origins[0].String() + ": " + first
+	}
+	return fmt.Sprintf("%d %s, first at %s; run: projectmux config --validate %s",
+		len(problems), noun, first, slug)
 }
 
 // defaultsItem validates defaults.yaml on its own. Validation otherwise
@@ -68,9 +93,4 @@ func (r *Runner) defaultsItem() Item {
 			strings.Join(rendered, "; ")
 	}
 	return item
-}
-
-// oneLine flattens a multi-problem error into a single report line.
-func oneLine(s string) string {
-	return strings.Join(strings.Fields(strings.ReplaceAll(s, "\n", " ")), " ")
 }
