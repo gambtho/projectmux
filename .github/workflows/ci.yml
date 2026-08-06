@@ -24,6 +24,12 @@ jobs:
       # github-actions ecosystem; major bumps arrive as individual PRs because
       # its group covers only minor and patch.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # This workflow runs code from untrusted pull requests — `go test`
+          # executes whatever the PR contains. checkout otherwise leaves the
+          # token in .git/config where that code could read it. Nothing here
+          # needs authenticated git: `go mod tidy` and `git diff` are local.
+          persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
