@@ -203,13 +203,17 @@ func TestBeginMigrationTxRetriesOnBusy(t *testing.T) {
 		t.Fatalf("code = %d, want %d (SQLITE_BUSY)", sqliteErr.Code(), sqliteBusy)
 	}
 
+	// Start the clock before launching the releaser: the goroutine's sleep
+	// begins whenever it is scheduled, so timing from after the go
+	// statement would subtract any preemption in between from elapsed and
+	// could fail a run that retried correctly.
 	const hold = 100 * time.Millisecond
+	start := time.Now()
 	go func() {
 		time.Sleep(hold)
 		held.Rollback()
 	}()
 
-	start := time.Now()
 	tx, err := beginMigrationTx(contender)
 	elapsed := time.Since(start)
 	if err != nil {
