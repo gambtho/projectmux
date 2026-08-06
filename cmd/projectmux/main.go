@@ -1,7 +1,13 @@
-// Command projectmux orchestrates declarative tmux workspaces whose panes may
-// run on the host or inside a Dev Container.
+// Command projectmux orchestrates declarative tmux workspaces whose windows
+// may run on the host or inside a Dev Container.
 //
-// This build is an alpha and implements the read-only configuration slice only.
+// It observes what tmux and Docker actually hold, plans the difference against
+// the configured desired state, and reconciles it: open, attach, stop,
+// autostart, list, status, config, and doctor.
+//
+// This build is an alpha. The configuration schema and the exit codes may
+// still change below 1.0; the JSON envelopes carry a schema_version, and
+// human-readable output is deliberately not a compatibility contract.
 package main
 
 import (

@@ -24,7 +24,7 @@ var nestedWorktreeDirs = []string{".worktrees", ".claude/worktrees"}
 // Workspace is the identity derived from a canonical worktree path.
 type Workspace struct {
 	// ID is the hex SHA-256 of Worktree. It is stable for that path and is the
-	// key later slices use for stored operational state.
+	// key the state store records operational state under.
 	ID string
 	// Slug names the repository. A linked worktree inherits its parent
 	// repository's slug so that every tree of one project shares configuration.

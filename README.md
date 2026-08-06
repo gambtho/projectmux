@@ -10,14 +10,14 @@ match that description.
 
 ## Status: alpha
 
-**This is an early alpha and the current build is read-only.** The only
-implemented command is `projectmux config`, which loads, merges, validates, and
-prints the effective configuration for a workspace. Nothing yet creates,
-attaches to, or modifies a tmux session or a container.
+**The command surface is complete; the contracts are not yet stable.**
+ProjectMux opens, attaches to, stops, and reports on workspaces, starts
+containers at boot, and diagnoses its own installation. Every command listed
+below works.
 
 Breaking changes to the configuration schema, the command surface, and the exit
 codes should be expected while the version remains below 1.0. There is no
-migration support.
+migration support, and `v0.x` builds are published as prereleases.
 
 Two things are compatibility contracts even during the alpha:
 
@@ -32,9 +32,11 @@ Human-readable output is deliberately *not* a contract. Parse `--json` instead.
 Linux and WSL2 are the supported platforms for v1. macOS and native Windows are
 not supported and are not currently being tested.
 
-ProjectMux expects `git` on `PATH`. Later slices will additionally require
-`tmux` and, for container-backed windows, a Docker-compatible runtime and the
-Dev Containers CLI. The current read-only slice needs none of those.
+ProjectMux requires `git` and `tmux` on `PATH`. Container-backed windows
+additionally require a Docker-compatible runtime and the Dev Containers CLI;
+workspaces that keep every window on the host need neither.
+
+`projectmux doctor` reports which of these it can find, and their versions.
 
 ## Install and build
 
@@ -146,8 +148,8 @@ Alongside the configuration itself, the output reports the derived workspace
 identity: a stable ID for the worktree path, the repository slug, the proposed
 tmux session name, whether the tree is the repository's primary one, and a
 `sha256:`-prefixed digest of the normalized configuration. The digest is stable
-across cosmetic YAML edits and map ordering, so later slices can use it to tell
-real configuration drift from reformatting.
+across cosmetic YAML edits and map ordering, which is how `status` tells real
+configuration drift from reformatting.
 
 ### Exit codes
 
