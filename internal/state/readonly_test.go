@@ -546,3 +546,33 @@ func TestDBPath(t *testing.T) {
 		t.Fatalf("DBPath = %q, want %q", got, want)
 	}
 }
+
+// TestWALStateShmThatIsNotAFileIsUnknown pins the -shm side of the rule
+// the -wal side already carries. A directory named state.db-shm is not
+// the shared-memory index this code would be reasoning about, so its
+// presence establishes nothing: without this, the stat's success alone
+// read as walComplete and an unexaminable state root was diagnosed as a
+// healthy one.
+func TestWALStateShmThatIsNotAFileIsUnknown(t *testing.T) {
+	root := seedUnrecoveredWAL(t)
+	path := DBPath(root)
+
+	if err := os.Mkdir(path+"-shm", 0o700); err != nil {
+		t.Fatalf("creating a directory at the -shm path: %v", err)
+	}
+
+	if got := walStateOf(path); got != walUnknown {
+		t.Fatalf("walStateOf = %v, want walUnknown", got)
+	}
+
+	ro, _, err := OpenReadOnly(root)
+	if err == nil {
+		ro.Close()
+		t.Fatal("an unexaminable -shm opened cleanly")
+	}
+	// Uncertainty, not the crash case: IncompleteWALError is a licence to
+	// recover the log, and nothing here established a writer crashed.
+	if IsIncompleteWAL(err) {
+		t.Errorf("an unexaminable -shm was reported as an unrecovered log: %v", err)
+	}
+}

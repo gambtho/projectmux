@@ -55,8 +55,8 @@ the same refusal.
 A failing command writes nothing to stdout, so stdout can be piped without
 filtering diagnostics out of it. The deliberate exception is a command whose
 report *is* its output — a partially succeeding `stop`, an `autostart` batch,
-or `config --validate` finding problems. Those write the report to stdout and
-a one-line summary to stderr.
+`config --validate` finding problems, or a `rebuild` reporting conflicts.
+Those write the report to stdout and a one-line summary to stderr.
 
 ## projectmux config
 

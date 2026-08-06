@@ -908,3 +908,53 @@ func TestApplyDryRunPredictsTheRefusalForASessionThatDiedBeforeTheRun(t *testing
 		t.Errorf("dry run locked %v, want nothing", preview.locker.locked)
 	}
 }
+
+// The dry run's verdict must come from the same re-classification the
+// real run makes, not from the first pass's case. An adopt candidate
+// whose row disappeared before the run becomes a register, and a
+// register needs a digest — so a broken configuration refuses it. A
+// preview answering from the stale case would have loaded no digest,
+// seen no failure, and predicted a clean recovery for a workspace the
+// real run refuses.
+func TestApplyDryRunReclassifiesAnAdoptCandidateWhoseRowDisappeared(t *testing.T) {
+	ws := projectmux()
+	sess := liveSession(ws, "projectmux")
+	newPlan := func() Plan {
+		return Plan{Candidates: []Candidate{{Case: CaseAdopt, Session: sess}}}
+	}
+
+	// No row is seeded: the row the classification pass saw is gone.
+	actual := newHarness()
+	actual.know(ws, "sha256:desired")
+	actual.config.errs["projectmux"] = errors.New("projectmux.yaml is unreadable")
+	actual.observer.results = []controller.SessionObservation{observing(sess)}
+	actualReport := actual.applier().Apply(context.Background(), newPlan())
+
+	preview := newHarness()
+	preview.know(ws, "sha256:desired")
+	preview.config.errs["projectmux"] = errors.New("projectmux.yaml is unreadable")
+	preview.observer.results = []controller.SessionObservation{observing(sess)}
+	counting := &countingStore{Store: preview.fakeStore}
+	preview.store = counting
+	preview.dryRun = true
+	previewReport := preview.applier().Apply(context.Background(), newPlan())
+
+	if len(actualReport.Conflicts) != 1 {
+		t.Fatalf("real run Conflicts = %+v, want exactly one", actualReport.Conflicts)
+	}
+	if !reflect.DeepEqual(previewReport.Conflicts, actualReport.Conflicts) {
+		t.Errorf("dry Conflicts = %+v, real = %+v; they must be identical",
+			previewReport.Conflicts, actualReport.Conflicts)
+	}
+	if !reflect.DeepEqual(previewReport.Registered, actualReport.Registered) {
+		t.Errorf("dry Registered = %+v, real = %+v; they must be identical",
+			previewReport.Registered, actualReport.Registered)
+	}
+	if len(previewReport.Registered) != 0 {
+		t.Errorf("dry Registered = %+v, want none", previewReport.Registered)
+	}
+	if counting.registers != 0 || counting.adopts != 0 {
+		t.Errorf("dry run wrote: %d registers, %d adopts; want 0 and 0",
+			counting.registers, counting.adopts)
+	}
+}

@@ -219,8 +219,9 @@ The incomplete-WAL case is the harder one. `readonly.go:154-161` refuses a
 precisely the crash rebuild exists to recover from, so refusing there would
 refuse the main case. But it is currently an untyped `fmt.Errorf`,
 indistinguishable from a permission failure. **This slice adds a typed
-`state.IncompleteWALError`** beside the existing typed errors in `readonly.go`
-and returns it from `incompleteWAL`. Rebuild treats it as proceed; every other
+`state.IncompleteWALError`** beside the existing typed errors in `readonly.go`,
+returned directly from the WAL-state switch in `OpenReadOnly`. Rebuild treats
+it as proceed; every other
 error is a refusal. Doctor's behavior is unchanged — it reports the message
 either way.
 
@@ -251,7 +252,7 @@ type Plan struct {
 	Conflicts  []Conflict
 }
 
-func classify(live []controller.LiveSession, records []state.Record) Plan
+func Classify(live []controller.LiveSession, records []state.Record) Plan
 ```
 
 This is where §4's cases are sorted, and it is fully testable from
@@ -278,7 +279,7 @@ to be wrong.
    session that comes back need not be the one step 2 validated, and the writes
    are made from the observed session. This is the same re-check planning
    applies to `ByIdentity` (§7).
-6. Re-classify from that observation with the same `classify`.
+6. Re-classify from that observation with the same `Classify`.
 7. Write what the re-classification says: case 1 → `RegisterWorkspace` then
    `AdoptSessionName`; case 2 → `AdoptSessionName` only; a row that already
    records the observed session → nothing at all, reported as neither a
@@ -311,7 +312,7 @@ environment, and the `cli` wiring uses package variables as in
 `wiring.go:28-44` so command tests can substitute fakes.
 
 **Flow:** load defaults → inspect the database read-only and classify it (§5)
-→ open the store read-write → list live sessions → read records → classify →
+→ open the store read-write → list live sessions → read records → `Classify` →
 if `--dry-run`, run steps 1-3 per candidate, render, and stop → otherwise
 apply each candidate through steps 1-7 under its own lock → render.
 

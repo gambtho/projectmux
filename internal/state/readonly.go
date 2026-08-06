@@ -183,10 +183,16 @@ func walStateOf(path string) walState {
 		// this code understands, whatever else it may be.
 		return walUnknown
 	}
-	if _, err := os.Stat(path + "-shm"); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return walIncomplete
-		}
+	shm, err := os.Stat(path + "-shm")
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return walIncomplete
+	case err != nil:
+		return walUnknown
+	case !shm.Mode().IsRegular():
+		// Same rule as the -wal above: a directory or device named
+		// state.db-shm is not the index this code would be reasoning
+		// about, so its presence establishes nothing about the log.
 		return walUnknown
 	}
 	return walComplete

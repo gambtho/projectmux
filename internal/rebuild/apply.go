@@ -141,26 +141,13 @@ func (a *Applier) applyCandidate(ctx context.Context, cand Candidate) (*Register
 	}
 
 	if a.DryRun {
-		// Everything above is read-only, and so is the observation below.
 		// A preview runs every step except the two that change something:
-		// taking the lock and writing. Observing is what discovers that a
-		// session died between classification and now, and a preview that
-		// skipped it would report a clean 0 for a workspace the real run
-		// refuses — which is the one thing --dry-run must never do
-		// (spec §2).
-		//
-		// Observation comes before the digest here because it comes before
-		// the digest is consulted in the real run: a dead session with a
-		// broken configuration must preview as the dead-session refusal,
-		// which is the refusal it will actually get.
-		if _, conflict := a.observeLive(ctx, ws, sess); conflict != nil {
-			return nil, conflict
-		}
-		if digestErr != nil {
-			return nil, conflictf(sess.Name,
-				"loading the configuration for %q failed: %v", ws.Slug, digestErr)
-		}
-		return registeredFor(ws, sess.Name), nil
+		// taking the lock and writing. It goes through the same finalize
+		// as the real run so the two cannot drift — a preview that
+		// answered from the first pass's case would report a clean 0 for a
+		// workspace whose row moved underneath it, which is the one thing
+		// --dry-run must never do (spec §2).
+		return a.finalize(ctx, ws, cand, digest, digestErr)
 	}
 
 	release, err := a.Locker.Lock(ctx, ws.ID)
@@ -169,19 +156,26 @@ func (a *Applier) applyCandidate(ctx context.Context, cand Candidate) (*Register
 	}
 	defer release()
 
-	return a.writeUnderLock(ctx, ws, cand, digest, digestErr)
+	return a.finalize(ctx, ws, cand, digest, digestErr)
 }
 
-// writeUnderLock re-observes, re-reads, and re-classifies with the lock
-// held, then writes what that says rather than what the first pass said.
-// The lock package's rule is that the observation a mutation is decided
-// from must be taken after the lock (internal/lock/lock.go:1-5): the
-// classification pass is a work list, not evidence.
+// finalize re-observes, re-reads, and re-classifies, then acts on what
+// that says rather than on what the first pass said. The real run calls
+// it with the lock held; the dry run calls it without one and returns
+// before each write. The lock package's rule is that the observation a
+// mutation is decided from must be taken after the lock
+// (internal/lock/lock.go:1-5): the classification pass is a work list,
+// not evidence.
+//
+// Everything it does up to a write is read-only, which is what lets the
+// dry run share it and thereby predict the real run's report exactly,
+// including the settled no-op and the digest a re-classification newly
+// requires.
 //
 // digestErr is the configuration failure from before the lock, if any. It
 // is consulted only where a digest is actually written, so that it stops
 // exactly the candidates that still need one.
-func (a *Applier) writeUnderLock(ctx context.Context, ws resolve.Workspace, cand Candidate, digest string, digestErr error) (*Registered, *Conflict) {
+func (a *Applier) finalize(ctx context.Context, ws resolve.Workspace, cand Candidate, digest string, digestErr error) (*Registered, *Conflict) {
 	sess := cand.Session
 
 	observed, conflict := a.observeLive(ctx, ws, sess)
@@ -243,6 +237,9 @@ func (a *Applier) writeUnderLock(ctx context.Context, ws resolve.Workspace, cand
 			return nil, conflictf(live.Name,
 				"loading the configuration for %q failed: %v", ws.Slug, digestErr)
 		}
+		if a.DryRun {
+			return registeredFor(ws, live.Name), nil
+		}
 		if err := a.Store.RegisterWorkspace(ws, digest, now); err != nil {
 			return nil, conflictf(live.Name, "registering workspace %s: %v", ws.Slug, err)
 		}
@@ -264,6 +261,9 @@ func (a *Applier) writeUnderLock(ctx context.Context, ws resolve.Workspace, cand
 		// exact opposite of the fill-only guarantee. Fill-only is a
 		// property of which primitive each case calls, not of the
 		// primitives themselves.
+		if a.DryRun {
+			return registeredFor(ws, live.Name), nil
+		}
 		if err := a.Store.AdoptSessionName(ws.ID, live.Name, now); err != nil {
 			return nil, conflictf(live.Name, "adopting session name %q: %v", live.Name, err)
 		}
@@ -285,7 +285,7 @@ func (a *Applier) writeUnderLock(ctx context.Context, ws resolve.Workspace, cand
 // run never takes.
 //
 // This is also what closes the duplicate-workspace-ID race for
-// writeUnderLock's re-classification: matchSessions
+// finalize's re-classification: matchSessions
 // (internal/tmux/decode.go:63-73) errors the moment a second session
 // claims the queried workspace ID, so a duplicate becomes a conflict here
 // before re-classification ever runs against a single live session. That
