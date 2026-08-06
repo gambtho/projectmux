@@ -11,7 +11,7 @@ illustrative path so the examples stay readable.
 - Lifecycle — [`open`](#projectmux-open), [`attach`](#projectmux-attach),
   [`stop`](#projectmux-stop)
 - Operations — [`autostart`](#projectmux-autostart),
-  [systemd](#running-autostart-from-systemd)
+  [systemd](#running-autostart-from-systemd), [`rebuild`](#projectmux-rebuild)
 - [`version`](#projectmux-version)
 
 ## Conventions
@@ -357,6 +357,62 @@ systemctl --user enable --now projectmux-autostart.service
 
 Check what it did with `systemctl --user status projectmux-autostart.service`
 and `journalctl --user -u projectmux-autostart.service`.
+
+## projectmux rebuild
+
+```text
+projectmux rebuild [--dry-run] [--json] [--compact]
+```
+
+Recovers workspace registrations the state database has lost. Every live
+projectmux session carries three identity keys — the workspace ID, the slug,
+and the worktree — so a session that outlived its database still describes the
+workspace it belongs to. Rebuild reads those keys, re-derives the rest of the
+registration from the worktree itself, and writes the row back.
+
+```text
+$ projectmux rebuild
+registered  slabledger  slabledger
+```
+
+**What it does not do.** Rebuild recovers registrations *from live sessions*
+only. It does not rediscover worktrees from `repository_roots` — a workspace
+with no live session stays unregistered until the next `open` — and it does not
+restore container bindings, which the next `open` reacquires. The name is
+broader than the command.
+
+**It only fills in what is missing.** Rebuild never overwrites a recorded
+value. A workspace already recorded with a different session name, two live
+sessions claiming the same workspace, a session whose keys disagree with the
+worktree they name — each is reported as a conflict and skipped, and the run
+exits 6. Nothing that was already known is lost by running it, which is why it
+applies by default rather than requiring confirmation.
+
+Running it a second time over a recovered installation reports nothing and
+exits 0.
+
+`--dry-run` performs every read-only step — classification, resolution,
+identity verification, configuration loading — and stops before the writes. It
+is a preview rather than a partial pass: a dry run that reports a conflict is
+the conflict the real run would report, and it exits on that conflict with the
+same code, because the exit code describes the state of the world rather than
+whether anything was written.
+
+| Situation | Exit |
+| --- | --- |
+| Registered everything, or nothing to do | 0 |
+| Any conflict | 6, with the report on stdout |
+| tmux could not be observed | 6 |
+| `defaults.yaml` will not load | 5 |
+| The state database is corrupt | 1 |
+
+The report is the output, so it goes to stdout even on exit 6, with a one-line
+summary on stderr.
+
+A **corrupt** state database is refused rather than repaired, and the message
+names the database and both of its sidecars. Move all three aside and run
+rebuild again; a **missing** database needs no such step, since that is the
+case rebuild is built for.
 
 ## projectmux version
 
