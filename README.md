@@ -1,27 +1,102 @@
-# ProjectMux
+# ProjectMux — declarative tmux workspaces
 
-ProjectMux turns a declarative YAML description of a project workspace into a
-running tmux session, where individual windows may run on the host or inside a
-Dev Container.
+<p align="center">
+  <a href="https://github.com/gambtho/projectmux/releases"><img alt="Latest ProjectMux release" src="https://img.shields.io/github/v/release/gambtho/projectmux?include_prereleases&sort=semver"></a>
+  <a href="https://github.com/gambtho/projectmux/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/gambtho/projectmux/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/gambtho/projectmux"></a>
+</p>
 
-You describe a workspace once — its windows, what each one runs, where it runs,
-and which one gets focus — and ProjectMux is responsible for making the machine
-match that description.
+<p align="center">
+  <img
+    src="docs/assets/projectmux-hero.svg"
+    alt="ProjectMux turns a YAML workspace definition into a reconciled tmux session with windows running on the host or in Dev Containers."
+    width="100%"
+  >
+</p>
 
-## Status: alpha
+ProjectMux is a declarative tmux workspace manager for Linux and WSL. Define a
+project's windows in YAML — shells, commands, and CLI coding agents — and choose
+whether each one runs on the host or inside the repository's Dev Container.
+
+You describe a workspace once: its windows, what each one runs, where it runs,
+and which one gets focus. ProjectMux observes what tmux and the container
+runtime are actually doing, then makes the machine match that description.
+
+## Why ProjectMux
+
+- **One workspace definition.** Layer shared defaults, per-repository
+  configuration, and machine-local overrides without repeating every window.
+- **Host and container windows.** Each tmux window runs on the host or inside
+  the repository's Dev Container, decided per window.
+- **Reconciliation, not a startup script.** ProjectMux observes what exists,
+  explains the drift, and converges toward the declared workspace instead of
+  blindly recreating it.
+- **Worktree-aware lookup.** Open a repository by name from configured roots,
+  including linked git worktrees in the conventional directories.
+- **Readable by humans and machines.** Concise terminal reports, or a versioned
+  JSON envelope with documented exit codes.
+- **No replacement ecosystem.** Your tmux configuration, container runtime,
+  editor, shell, and `devcontainer.json` stay exactly as they are.
+
+## Quick start
+
+Install:
+
+```sh
+go install github.com/gambtho/projectmux/cmd/projectmux@latest
+```
+
+Create a minimal set of defaults:
+
+```sh
+mkdir -p ~/.config/projectmux
+
+cat > ~/.config/projectmux/defaults.yaml <<'YAML'
+version: 1
+
+repository_roots:
+  - /home/you/workspace
+
+devcontainer:
+  enabled: auto
+
+windows:
+  - name: shell
+    shell: true
+    focus: true
+YAML
+```
+
+Then open any repository under a configured root:
+
+```sh
+cd ~/workspace/my-project
+projectmux config --validate
+projectmux open
+```
+
+You attach, detach, and navigate with tmux exactly as you normally would.
+
+> [!IMPORTANT]
+> ProjectMux is alpha. Every documented command works, but the configuration
+> schema and the command surface may change before 1.0, and there is no
+> migration support for `v0.x` configuration. The versioned JSON envelope and
+> the documented exit codes are the compatibility contracts.
+
+## Project status
 
 **The command surface is complete; the contracts are not yet stable.**
 ProjectMux opens, attaches to, stops, and reports on workspaces, starts
 containers at boot, and diagnoses its own installation. Every command listed
 below works.
 
-Breaking changes to the configuration schema, the command surface, and the exit
-codes should be expected while the version remains below 1.0. There is no
-migration support, and `v0.x` builds are published as prereleases.
+Expect breaking changes to the configuration schema and the command surface
+while the version remains below 1.0. There is no migration support, and `v0.x`
+builds are published as prereleases.
 
 Two things are compatibility contracts even during the alpha:
 
-- The **JSON output** of `projectmux config --json`, which carries a
+- The **JSON output** of the reporting commands, which carries a
   `schema_version` field.
 - The **exit codes** listed below.
 
@@ -165,14 +240,14 @@ or `host` at load time.
 ## Usage
 
 ```sh
-cd ~/src/slabledger
+cd ~/workspace/my-project
 projectmux open          # create the session if needed, then attach
 projectmux status        # what is running, and what would change
 projectmux stop          # end the session
 ```
 
 `projectmux <workspace>` with no command is shorthand for `open`, so
-`projectmux slabledger` opens that workspace from anywhere.
+`projectmux my-project` opens that workspace from anywhere.
 
 ### Commands
 
@@ -223,13 +298,55 @@ detach, and navigate with tmux exactly as you normally would.
 **Dev Containers** provide the optional container a window can run in.
 ProjectMux reads the standard `devcontainer.json` your editor already uses and
 delegates to the Dev Containers CLI rather than defining a competing container
-format. `devcontainer.enabled: auto` means "use a container when this repository
-has a Dev Container configuration"; `true` requires one and fails if it is
-missing; `false` keeps every window on the host.
+format:
+
+- `devcontainer.enabled: auto` uses a container when the repository has a Dev
+  Container configuration.
+- `devcontainer.enabled: true` requires one and fails if it is missing.
+- `devcontainer.enabled: false` keeps every window on the host.
 
 The design goal is that a workspace remains usable without ProjectMux. Removing
 it should leave a working repository, a working tmux, and a working Dev
 Container.
+
+## Questions
+
+### Does ProjectMux replace tmux?
+
+No. It is a workspace controller built on tmux. Your existing key bindings,
+plugins, and `tmux.conf` keep working, and ProjectMux never edits them.
+
+### Does ProjectMux require Docker?
+
+Only for container-backed windows. A workspace whose windows all run on the
+host needs just `git` and `tmux` — no container runtime and no Dev Containers
+CLI are involved.
+
+### Can it run CLI coding agents?
+
+Yes. An `agent` window launches the configured command — `claude`, `codex`, or
+anything else on `PATH` — in an ordinary tmux window, on the host or in the Dev
+Container. ProjectMux manages the workspace lifecycle only: it does not assign
+tasks, coordinate models, or interpret agent output, and it is not an
+agent-orchestration platform.
+
+### Does it support git worktrees?
+
+Yes. Workspace lookup resolves linked worktrees, including those in the
+conventional `.worktrees/` and `.claude/worktrees/` directories, and workspace
+identity is collision-safe across them. A linked worktree shares its parent
+repository's configuration.
+
+### Does it create or manage worktrees?
+
+No. Managing project source and creating worktrees are explicit non-goals.
+ProjectMux opens worktrees that already exist; `git` and your existing tools
+remain responsible for creating them.
+
+### Which operating systems are supported?
+
+Linux and WSL2. macOS and native Windows are not supported and are not
+currently tested.
 
 ## Documentation
 
