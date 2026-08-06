@@ -159,7 +159,10 @@ jobs:
           cleanup() {
             if [ "${published:-no}" != "yes" ]; then
               echo "Publishing failed; deleting the draft so a retry starts clean."
-              gh release delete "$tag" --yes --cleanup-tag=false 2>/dev/null || true
+              # --cleanup-tag is deliberately not passed: the tag is what
+              # triggered this run and must survive for a retry. Deleting the
+              # draft release is the whole cleanup.
+              gh release delete "$tag" --yes 2>/dev/null || true
             fi
           }
           trap cleanup EXIT
