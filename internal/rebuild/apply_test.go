@@ -706,3 +706,68 @@ func TestApplyReportsAnObservationFailureAsAConflict(t *testing.T) {
 		t.Errorf("workspace err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestApplyRegisterThenFailedAdoptNamesBothHalvesAndASecondRunCompletesIt(t *testing.T) {
+	ws := projectmux()
+	sess := liveSession(ws, "projectmux")
+	h := newHarness()
+	h.know(ws, "sha256:desired")
+	h.store = &adoptFailStore{
+		Store: h.fakeStore,
+		err:   &state.SessionNameConflictError{Name: "projectmux"},
+	}
+	h.observer.results = []controller.SessionObservation{observing(sess), observing(sess)}
+	plan := Plan{Candidates: []Candidate{{Case: CaseRegister, Session: sess}}}
+
+	first := h.applier().Apply(context.Background(), plan)
+
+	if len(first.Registered) != 0 {
+		t.Fatalf("Registered = %+v, want none: only half the work landed", first.Registered)
+	}
+	if len(first.Conflicts) != 1 {
+		t.Fatalf("Conflicts = %+v, want exactly one", first.Conflicts)
+	}
+	// The operator must never be told the workspace was registered when
+	// only half of it was, nor that nothing happened when a row now
+	// exists. The reason names both halves.
+	reason := first.Conflicts[0].Reason
+	for _, want := range []string{
+		"was registered",
+		"adopting session name",
+		"already recorded for another workspace",
+		"later rebuild will complete it",
+	} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("Reason = %q, want it to contain %q", reason, want)
+		}
+	}
+
+	rec, err := h.fakeStore.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("the row must exist after a successful register: %v", err)
+	}
+	if rec.ActualSession != nil {
+		t.Fatalf("ActualSession = %q, want nil: the adoption failed", *rec.ActualSession)
+	}
+
+	// The half-written row is exactly the adopt case, so the next run
+	// completes it rather than needing a new atomic primitive.
+	second := h.applier().Apply(context.Background(), plan)
+
+	if len(second.Conflicts) != 0 {
+		t.Fatalf("second run Conflicts = %+v, want none", second.Conflicts)
+	}
+	if len(second.Registered) != 1 {
+		t.Fatalf("second run Registered = %+v, want one", second.Registered)
+	}
+	rec, err = h.fakeStore.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.ActualSession == nil || *rec.ActualSession != "projectmux" {
+		t.Errorf("ActualSession = %v, want %q", rec.ActualSession, "projectmux")
+	}
+	if rec.DesiredDigest == nil || *rec.DesiredDigest != "sha256:desired" {
+		t.Errorf("DesiredDigest = %v, want the digest written by the first run", rec.DesiredDigest)
+	}
+}

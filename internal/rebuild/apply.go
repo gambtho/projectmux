@@ -228,7 +228,15 @@ func (a *Applier) writeUnderLock(ctx context.Context, ws resolve.Workspace, cand
 			return nil, conflictf(live.Name, "registering workspace %s: %v", ws.Slug, err)
 		}
 		if err := a.Store.AdoptSessionName(ws.ID, live.Name, now); err != nil {
-			return nil, conflictf(live.Name, "adopting session name %q: %v", live.Name, err)
+			// Registration and adoption are separate transactions, so this
+			// leaves a row with no recorded session. That is not
+			// corruption — it is precisely the adopt case, which the next
+			// run completes. Both halves are named because reporting only
+			// the failure would tell the operator nothing was written.
+			return nil, conflictf(live.Name,
+				"workspace %s was registered, but adopting session name %q failed: %v; "+
+					"the row has no recorded session and a later rebuild will complete it",
+				ws.Slug, live.Name, err)
 		}
 	case CaseAdopt:
 		// Never RegisterWorkspace here. It is an upsert whose conflict
