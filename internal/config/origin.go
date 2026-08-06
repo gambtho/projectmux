@@ -2,6 +2,7 @@ package config
 
 import (
 	"cmp"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -17,6 +18,14 @@ import (
 type Origin struct {
 	File string
 	Line int
+}
+
+// String renders "file:line", dropping the line when it is unknown.
+func (o Origin) String() string {
+	if o.Line == 0 {
+		return o.File
+	}
+	return fmt.Sprintf("%s:%d", o.File, o.Line)
 }
 
 // originOf builds the origin of path within this layer.

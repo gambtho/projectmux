@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 )
 
@@ -16,6 +17,12 @@ import (
 func mergeLayers(base Merged, over Source) Merged {
 	out := base
 	layer := over.Layer
+	// Copying the struct copies the map header, not the map: without an
+	// explicit clone, merging would write attributions back into its own
+	// input, and two layers merged from one base would each report the
+	// other's file. Every lookup would still succeed, so the damage would be
+	// wrong output rather than a failure.
+	out.origins = maps.Clone(base.origins)
 	if over.File != "" && !slices.Contains(out.files, over.File) {
 		out.files = append(slices.Clone(out.files), over.File)
 	}

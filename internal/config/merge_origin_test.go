@@ -116,6 +116,48 @@ func TestMergeCreditsEnvironmentPerVariable(t *testing.T) {
 	wantOrigin(t, merged, root, "environment.EDITOR", "workspaces/dev.yaml", 2)
 }
 
+// Merging returns a new value and leaves its input alone.
+//
+// mergeLayers copies the struct, but a map copied by value is still the same
+// map. Without an explicit clone, two branches from one base would write into
+// each other's attributions and report the wrong file — silently, since every
+// lookup still succeeds.
+func TestMergeDoesNotMutateItsBase(t *testing.T) {
+	root := writeRoot(t, map[string]string{
+		"defaults.yaml":             "autostart: false\n",
+		"workspaces/dev.yaml":       "autostart: true\n",
+		"workspaces/dev.local.yaml": "autostart: false\n",
+	})
+	load := func(name string) Source {
+		t.Helper()
+		src, err := loadLayer(filepath.Join(root, name))
+		if err != nil {
+			t.Fatalf("loadLayer %s: %v", name, err)
+		}
+		return src
+	}
+
+	base := mergeLayers(Merged{root: root}, load("defaults.yaml"))
+	baseOrigin := base.origins["autostart"]
+
+	// Two independent branches from the same base.
+	left := mergeLayers(base, load("workspaces/dev.yaml"))
+	right := mergeLayers(base, load("workspaces/dev.local.yaml"))
+
+	if got := base.origins["autostart"]; got != baseOrigin {
+		t.Errorf("merging rewrote its base: autostart moved from %+v to %+v", baseOrigin, got)
+	}
+	if left.origins["autostart"] == right.origins["autostart"] {
+		t.Errorf("branches share attribution: both report %+v", left.origins["autostart"])
+	}
+	if want := filepath.Join(root, "workspaces/dev.yaml"); left.origins["autostart"].File != want {
+		t.Errorf("left credits %q, want %q", left.origins["autostart"].File, want)
+	}
+	if want := filepath.Join(root, "workspaces/dev.local.yaml"); right.origins["autostart"].File != want {
+		t.Errorf("right credits %q, want %q", right.origins["autostart"].File, want)
+	}
+}
+
 // A field no layer set has no origin at all. Zero is the honest answer;
 // attributing it to the last file loaded would point at innocent lines.
 func TestMergeLeavesUnsetFieldsUnattributed(t *testing.T) {

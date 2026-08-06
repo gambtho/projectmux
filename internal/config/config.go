@@ -131,14 +131,6 @@ func (p Problem) String() string {
 	return out
 }
 
-// String renders "file:line", dropping the line when it is unknown.
-func (o Origin) String() string {
-	if o.Line == 0 {
-		return o.File
-	}
-	return fmt.Sprintf("%s:%d", o.File, o.Line)
-}
-
 // InvalidConfigError reports configuration that must not reach any workspace
 // mutation. It carries every problem found rather than only the first, because
 // fixing configuration one error per run is needlessly slow.
