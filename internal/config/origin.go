@@ -284,6 +284,31 @@ func mapValue(node *yaml.Node, field string) *yaml.Node {
 	return nil
 }
 
+// windowLines returns the line of every window element carrying name, in
+// document order.
+//
+// It does not go through lineOf, which resolves a name to the first match:
+// a duplicate's whole point is that several elements share one name, and
+// reporting one of them would send the reader to a definition that looks
+// perfectly correct on its own.
+func windowLines(root *yaml.Node, name string) []int {
+	body := documentBody(root)
+	if body == nil {
+		return nil
+	}
+	seq := mapValue(body, "windows")
+	if seq == nil || seq.Kind != yaml.SequenceNode {
+		return nil
+	}
+	var lines []int
+	for _, element := range seq.Content {
+		if got := mapValue(element, "name"); got != nil && got.Value == name {
+			lines = append(lines, element.Line)
+		}
+	}
+	return lines
+}
+
 // windowElement finds the sequence element naming window.
 //
 // The name is matched whole, for the reason mergeWindows gives: a substring

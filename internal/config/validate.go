@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"fmt"
 	"maps"
 	"path/filepath"
@@ -33,26 +32,13 @@ var numericWindowName = regexp.MustCompile(`^[0-9]+$`)
 // which is why the caller reports these as a warning rather than a
 // rejection.
 func ValidateDefaults(src Source) []Problem {
-	merged, err := mergeLayers(Merged{root: filepath.Dir(src.File)}, src)
-	if err != nil {
-		// The only merge failure is a duplicate window name, which is a
-		// problem in its own right rather than a reason to report nothing.
-		return problemsOf(err)
-	}
+	merged := mergeLayers(Merged{root: filepath.Dir(src.File)}, src)
 	if merged.Layer.Version == nil {
 		supported := SchemaVersion
 		merged.Layer.Version = &supported
 	}
-	return validate(merged, normalize(merged.Layer))
-}
-
-// problemsOf unwraps the problems an invalid-configuration error carries.
-func problemsOf(err error) []Problem {
-	var bad *InvalidConfigError
-	if errors.As(err, &bad) {
-		return bad.Problems
-	}
-	return []Problem{{Message: err.Error()}}
+	problems := merged.duplicateWindows(src)
+	return append(problems, validate(merged, normalize(merged.Layer))...)
 }
 
 // validate returns every problem in the effective configuration. The merged

@@ -71,10 +71,11 @@ func LoadDefaults(root string) (Source, error) {
 // Load merges defaults with the workspace layers for slug and returns the
 // normalized, validated configuration and its digest.
 func Load(root string, defaults Source, slug string) (Effective, error) {
-	merged, err := mergeLayers(Merged{root: root}, defaults)
-	if err != nil {
-		return Effective{}, err
-	}
+	// Every layer is read before anything is checked, so a file that will
+	// not decode is still reported ahead of a semantic problem elsewhere —
+	// the ordering that held when duplicate detection lived in the merge.
+	sources := []Source{defaults}
+	merged := mergeLayers(Merged{root: root}, defaults)
 	for _, path := range []string{WorkspacePath(root, slug), LocalPath(root, slug)} {
 		src, err := loadLayer(path)
 		if err != nil {
@@ -84,14 +85,17 @@ func Load(root string, defaults Source, slug string) (Effective, error) {
 			return Effective{}, invalid(fmt.Sprintf(
 				"%s: repository_roots may only be set in defaults.yaml", path))
 		}
-		merged, err = mergeLayers(merged, src)
-		if err != nil {
-			return Effective{}, err
-		}
+		sources = append(sources, src)
+		merged = mergeLayers(merged, src)
 	}
 
+	var problems []Problem
+	for _, src := range sources {
+		problems = append(problems, merged.duplicateWindows(src)...)
+	}
 	cfg := normalize(merged.Layer)
-	if problems := validate(merged, cfg); len(problems) > 0 {
+	problems = append(problems, validate(merged, cfg)...)
+	if len(problems) > 0 {
 		return Effective{}, &InvalidConfigError{Problems: problems}
 	}
 	digest, err := digest(cfg)

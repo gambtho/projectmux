@@ -13,7 +13,7 @@ import (
 // The two must stay together: a merge rule and its attribution that drift
 // apart produce reports pointing at the wrong file, which is worse than no
 // report at all.
-func mergeLayers(base Merged, over Source) (Merged, error) {
+func mergeLayers(base Merged, over Source) Merged {
 	out := base
 	layer := over.Layer
 	if over.File != "" && !slices.Contains(out.files, over.File) {
@@ -35,12 +35,8 @@ func mergeLayers(base Merged, over Source) (Merged, error) {
 	out.Layer.DevContainer = mergeDevContainer(&out, over, base.Layer.DevContainer, layer.DevContainer)
 	out.Layer.Environment = mergeEnvironment(&out, over, base.Layer.Environment, layer.Environment)
 
-	windows, err := mergeWindows(&out, over, base.Layer.Windows, layer.Windows)
-	if err != nil {
-		return Merged{}, err
-	}
-	out.Layer.Windows = windows
-	return out, nil
+	out.Layer.Windows = mergeWindows(&out, over, base.Layer.Windows, layer.Windows)
+	return out
 }
 
 func mergeDevContainer(out *Merged, over Source, base, layer *DevContainerLayer) *DevContainerLayer {
@@ -97,14 +93,11 @@ func mergeEnvironment(out *Merged, over Source, base, layer map[string]string) m
 // adjust one window without restating the whole layout. Windows the base
 // already names keep their base position; windows only the overlay names are
 // appended in the overlay's own order.
-func mergeWindows(out *Merged, over Source, base, layer []WindowLayer) ([]WindowLayer, error) {
-	if err := rejectDuplicates(base); err != nil {
-		return nil, err
-	}
-	if err := rejectDuplicates(layer); err != nil {
-		return nil, err
-	}
-
+//
+// It merges and does not police: duplicate names are a per-layer property, so
+// duplicateWindows checks them where every caller reaches it, including the
+// defaults-only path that never merges anything.
+func mergeWindows(out *Merged, over Source, base, layer []WindowLayer) []WindowLayer {
 	// Match on the whole name. Substring matching would swallow a new window
 	// whose name is a substring of an existing one ("age" into "agent-1").
 	index := make(map[string]int, len(base))
@@ -123,7 +116,7 @@ func mergeWindows(out *Merged, over Source, base, layer []WindowLayer) ([]Window
 		merged = append(merged, w)
 		creditWindow(out, over, w, true)
 	}
-	return merged, nil
+	return merged
 }
 
 // creditWindow attributes the fields this layer stated about one window.
@@ -173,20 +166,6 @@ func modeKey(w WindowLayer) string {
 	default:
 		return "shell"
 	}
-}
-
-// rejectDuplicates catches a name repeated within one file. Repetition across
-// files is the merge working as intended; repetition inside a single file is
-// always a mistake.
-func rejectDuplicates(windows []WindowLayer) error {
-	seen := make(map[string]bool, len(windows))
-	for _, w := range windows {
-		if seen[w.Name] {
-			return invalid(fmt.Sprintf("window %q is defined more than once", w.Name))
-		}
-		seen[w.Name] = true
-	}
-	return nil
 }
 
 func mergeWindow(base, over WindowLayer) WindowLayer {

@@ -21,10 +21,7 @@ func mergeFixture(t *testing.T, defaults, workspace, local string) (Merged, stri
 		if err != nil {
 			t.Fatalf("loadLayer %s: %v", name, err)
 		}
-		merged, err = mergeLayers(merged, src)
-		if err != nil {
-			t.Fatalf("mergeLayers %s: %v", name, err)
-		}
+		merged = mergeLayers(merged, src)
 	}
 	return merged, root
 }
