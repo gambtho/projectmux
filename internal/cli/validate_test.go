@@ -187,6 +187,32 @@ func TestValidateInvalidOutranksUnknown(t *testing.T) {
 	}
 }
 
+// The summary counts the invalid findings, not every problem in the report.
+// Defaults warnings are report content and are not part of what makes the
+// command fail, so counting them would state a number matching neither the
+// failure nor any section above it.
+func TestValidateSummaryCountsOnlyInvalidProblems(t *testing.T) {
+	configOnly(t, map[string]string{
+		// One warning: defaults read alone has an unsupported version.
+		"defaults.yaml": "version: 9\n",
+		// One genuine failure in a workspace.
+		"workspaces/dev.yaml": "windows:\n  - name: broken\n",
+	})
+
+	code, stdout, stderr := run(t, "config", "--validate")
+	if code != ExitInvalidConfig {
+		t.Fatalf("exit = %d, want %d\n%s", code, ExitInvalidConfig, stdout)
+	}
+	// The workspace contributes the only invalid problems; the defaults
+	// warning must not inflate the count.
+	if strings.Contains(stderr, "(3 problems)") {
+		t.Errorf("summary counted the defaults warning:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "(2 problems)") {
+		t.Errorf("summary = %q, want the two invalid problems", strings.TrimSpace(stderr))
+	}
+}
+
 func TestValidateJSONShape(t *testing.T) {
 	configOnly(t, map[string]string{
 		"defaults.yaml": "version: 1\ndevcontainer:\n  enabled: 'false'\n",

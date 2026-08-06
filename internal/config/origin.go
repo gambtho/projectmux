@@ -266,31 +266,78 @@ func parseSegment(segment string) (field, window string) {
 	return segment[:open], segment[open+1 : len(segment)-1]
 }
 
+// maxAliasDepth bounds alias and merge-key following. yaml.v3 rejects a
+// cyclic anchor while decoding, so this only guards the node walk against
+// pathological nesting; it is not a correctness mechanism.
+const maxAliasDepth = 32
+
+// deref follows an alias to the node it names. Everything else is returned
+// unchanged.
+//
+// Strict decoding expands aliases into Layer, so a traversal that did not
+// follow them would disagree with the values being validated: the field would
+// have a value and no position.
+func deref(node *yaml.Node) *yaml.Node {
+	for i := 0; node != nil && node.Kind == yaml.AliasNode && i < maxAliasDepth; i++ {
+		node = node.Alias
+	}
+	return node
+}
+
+// mapPair finds the key and value nodes for field, following aliases and
+// expanding merge keys the way the decoder does.
+func mapPair(node *yaml.Node, field string, depth int) (key, value *yaml.Node) {
+	node = deref(node)
+	if node == nil || node.Kind != yaml.MappingNode || depth > maxAliasDepth {
+		return nil, nil
+	}
+
+	// An explicitly written key wins over anything merged in, matching YAML
+	// merge semantics, so direct entries are scanned first.
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if !isMergeKey(node.Content[i]) && node.Content[i].Value == field {
+			return node.Content[i], node.Content[i+1]
+		}
+	}
+
+	// Then the merge keys, in order: earlier entries win over later ones.
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if !isMergeKey(node.Content[i]) {
+			continue
+		}
+		merged := deref(node.Content[i+1])
+		if merged == nil {
+			continue
+		}
+		sources := []*yaml.Node{merged}
+		if merged.Kind == yaml.SequenceNode {
+			sources = merged.Content
+		}
+		for _, source := range sources {
+			if k, v := mapPair(source, field, depth+1); k != nil {
+				return k, v
+			}
+		}
+	}
+	return nil, nil
+}
+
+// isMergeKey reports the "<<" key that splices another mapping in.
+func isMergeKey(key *yaml.Node) bool {
+	return key.Tag == "!!merge" || key.Value == "<<"
+}
+
 // mapEntry returns the key node for field, or nil when the mapping does not
 // carry it.
 func mapEntry(node *yaml.Node, field string) *yaml.Node {
-	if node == nil || node.Kind != yaml.MappingNode {
-		return nil
-	}
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		if node.Content[i].Value == field {
-			return node.Content[i]
-		}
-	}
-	return nil
+	key, _ := mapPair(node, field, 0)
+	return key
 }
 
 // mapValue returns the value node for field.
 func mapValue(node *yaml.Node, field string) *yaml.Node {
-	if node == nil || node.Kind != yaml.MappingNode {
-		return nil
-	}
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		if node.Content[i].Value == field {
-			return node.Content[i+1]
-		}
-	}
-	return nil
+	_, value := mapPair(node, field, 0)
+	return value
 }
 
 // windowLines returns the line of every window element carrying name, in
@@ -312,6 +359,9 @@ func windowLines(root *yaml.Node, name string) []int {
 	var lines []int
 	for _, element := range seq.Content {
 		if got := mapValue(element, "name"); got != nil && got.Value == name {
+			// The element's own line, not the anchor's: an aliased entry is
+			// where this repeat of the window enters the document, and it is
+			// the line the reader has to delete.
 			lines = append(lines, element.Line)
 		}
 	}

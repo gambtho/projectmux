@@ -153,6 +153,19 @@ element whose `name` value is `dev`, matching the whole name exactly, for the
 same reason `mergeWindows` does: substring matching would swallow `age` into
 `agent-1`.
 
+**The walk follows aliases and merge keys, because the decoder does.** Strict
+decoding expands `*anchor` references and `<<` merge keys into `Layer`, so a
+traversal that ignored them would disagree with the values being validated:
+the field would have a value and no position. Two cases reach this in
+practice, since `KnownFields` already rejects the usual holding-pen idiom
+(`anchors:` is not a schema field):
+
+- a merge key inside a known mapping, which otherwise resolves to no line; and
+- an aliased sequence element, which makes two entries share a name and is
+  therefore a genuine duplicate. Here the walk reports the **alias element's
+  own line**, not the anchor's — the alias is where this repeat enters the
+  document, and it is the line the reader has to delete.
+
 ### 3.3 Two subtleties
 
 **Mode is a merge unit.** `setsMode()` replaces `agent`, `command`, and
@@ -230,7 +243,7 @@ ordering rule from §2 intact.
 
 ## 4. Command surface
 
-```
+```text
 projectmux config --validate [--json] [--compact] [<slug>]
 ```
 
@@ -281,7 +294,7 @@ directory means none.
 
 Human output:
 
-```
+```text
 defaults.yaml          ok
 workspaces/api.yaml    ok
 workspaces/dev.yaml    2 problems
@@ -397,7 +410,7 @@ Doctor keeps the `configuration` check and its whole-installation altitude.
 slug's `Item.Detail` becomes the problem count plus the first problem *with
 its provenance*, and points at the focused command.
 
-```
+```text
 configuration        fail
   defaults           ok
   api                ok

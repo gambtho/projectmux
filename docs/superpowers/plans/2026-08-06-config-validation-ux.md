@@ -14,7 +14,7 @@ green; the final state passes every CI gate including `go test -race`.
 
 A user with a broken configuration is now told what is wrong **and where**:
 
-```
+```text
 defaults.yaml  ok
 api            ok
 dev            3 problems (invalid)
@@ -102,7 +102,7 @@ New tests, all written before the code that satisfied them:
 
 The duplicate-detection hole was verified against `main` rather than asserted:
 
-```
+```text
 git show main:internal/config/validate.go   # ValidateDefaults calls validate directly
 git show main:internal/config/merge.go      # rejectDuplicates only inside mergeWindows
 ```

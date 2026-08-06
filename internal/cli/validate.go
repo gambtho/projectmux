@@ -201,9 +201,13 @@ func validationOutcome(report validationReport) error {
 	}
 	switch {
 	case len(found) > 0:
+		// The invalid findings only. report.Summary.Problems also counts
+		// defaults warnings, which are report content rather than part of
+		// what failed — including them would state a number matching neither
+		// the wrapped cause nor any section of the report.
 		return &reportedError{
-			msg: fmt.Sprintf("configuration is invalid (%d problems); the report is above",
-				report.Summary.Problems),
+			msg: fmt.Sprintf("configuration is invalid (%s); the report is above",
+				plural(len(found), "problem")),
 			err: &config.InvalidConfigError{Problems: found},
 		}
 	case unknown:
