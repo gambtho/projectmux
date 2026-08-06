@@ -280,20 +280,29 @@ func (a *Applier) writeUnderLock(ctx context.Context, ws resolve.Workspace, cand
 // observation is read-only, so a preview can make it and thereby predict
 // the refusals it discovers.
 //
-// The refusals are phrased in terms of the lock because a dry run's job
-// is to report the verdict the real run would reach, and that run reaches
-// these under the lock.
+// The refusals are worded identically on both paths — report parity is
+// asserted with reflect.DeepEqual — so they cannot claim a lock the dry
+// run never takes.
+//
+// This is also what closes the duplicate-workspace-ID race for
+// writeUnderLock's re-classification: matchSessions
+// (internal/tmux/decode.go:63-73) errors the moment a second session
+// claims the queried workspace ID, so a duplicate becomes a conflict here
+// before re-classification ever runs against a single live session. That
+// guarantee lives in this production observer, not in the
+// controller.SessionObserver interface contract — a future observer that
+// picked a claimant instead of erroring would silently reopen the race.
 func (a *Applier) observeLive(ctx context.Context, ws resolve.Workspace, sess controller.LiveSession) (*controller.LiveSession, *Conflict) {
 	obs, err := a.Sessions.ObserveSession(ctx, controller.SessionQuery{
 		WorkspaceID:    ws.ID,
 		CandidateNames: []string{sess.Name},
 	})
 	if err != nil {
-		return nil, conflictf(sess.Name, "re-observing tmux under the workspace lock: %v", err)
+		return nil, conflictf(sess.Name, "re-observing tmux before writing: %v", err)
 	}
 	if obs.ByIdentity == nil {
 		return nil, conflictf(sess.Name,
-			"the session was no longer live when the workspace lock was taken; nothing was written")
+			"the session was no longer live when rebuild went to write; nothing was written")
 	}
 	live := *obs.ByIdentity
 
@@ -309,6 +318,11 @@ func (a *Applier) observeLive(ctx context.Context, ws resolve.Workspace, sess co
 	return &live, nil
 }
 
+// registeredFor reports the resolver's identity for ws, not the stored
+// row's, by design. Slug and Worktree are provably equal to the row's —
+// the identity gate above requires it — so only IsPrimary can diverge,
+// and only if the worktree's primary-ness changed since registration. In
+// that case this reports the resolver's current view, not the row's.
 func registeredFor(ws resolve.Workspace, session string) *Registered {
 	return &Registered{
 		ID:        ws.ID,

@@ -21,9 +21,12 @@ func decodeRebuild(t *testing.T, stdout string) rebuildEnvelope {
 }
 
 // rebuildEnv wires every rebuild seam to a benign fake — a real git
-// repository with valid configuration, an isolated state root, a store
-// the command may mutate, and a scripted session observer that fails the
-// test if it is consulted — so a test can perturb exactly one of them.
+// repository with valid configuration, an isolated state root, and a
+// store the command may mutate — so a test can perturb exactly one of
+// them. The scripted session observer errors if consulted rather than
+// failing the test outright; a test relying on it not being reached must
+// assert the conflict reason, since observeLive turns any observation
+// error into a conflict (internal/rebuild/apply.go).
 // It returns the resolved workspace the repository represents.
 func rebuildEnv(t *testing.T, s *fake.Store, live []controller.LiveSession) resolve.Workspace {
 	t.Helper()
@@ -119,6 +122,13 @@ func TestRebuildReportsConflictsOnStdoutAndExitsRefused(t *testing.T) {
 	env := decodeRebuild(t, stdout)
 	if len(env.Conflicts) != 1 {
 		t.Fatalf("conflicts = %+v, want exactly one", env.Conflicts)
+	}
+	// The reason must be the session-mismatch finding, not an incidental
+	// conflict from the scripted observer erroring when consulted (which
+	// would produce a conflict for the wrong reason and pass this test
+	// regardless).
+	if !strings.Contains(env.Conflicts[0].Reason, "never overwrites") {
+		t.Errorf("conflict reason %q is not the session-mismatch finding", env.Conflicts[0].Reason)
 	}
 	if len(env.Registered) != 0 {
 		t.Errorf("registered = %+v, want nothing written on a conflict", env.Registered)
@@ -249,6 +259,9 @@ func TestRebuildDryRunReportsTheSameConflictsAndCode(t *testing.T) {
 	}
 	if len(env.Conflicts) != 1 {
 		t.Fatalf("conflicts = %+v, want the same conflict the real run reports", env.Conflicts)
+	}
+	if !strings.Contains(env.Conflicts[0].Reason, "never overwrites") {
+		t.Errorf("conflict reason %q is not the session-mismatch finding", env.Conflicts[0].Reason)
 	}
 	if len(env.Registered) != 0 {
 		t.Errorf("registered = %+v, want nothing", env.Registered)

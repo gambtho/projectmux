@@ -173,4 +173,18 @@ func TestRebuildDatabaseCheckProceedsWithAnUnrecoveredWAL(t *testing.T) {
 	if err := rebuildDatabaseCheck(root); err != nil {
 		t.Fatalf("rebuildDatabaseCheck refused an unrecovered log: %v", err)
 	}
+
+	// The point of proceeding is that state.Open recovers the log rather
+	// than merely tolerating it: id-2, staged only in the orphaned -wal,
+	// survives the recovery.
+	st, err = state.Open(root)
+	if err != nil {
+		t.Fatalf("open after recovery: %v", err)
+	}
+	if _, err := st.Workspace("id-2"); err != nil {
+		t.Errorf("workspace id-2: %v, want the WAL-recovered row", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
 }
