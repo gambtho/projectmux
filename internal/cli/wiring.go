@@ -200,6 +200,85 @@ var inspectDatabase = func(root string) (doctor.Database, doctor.Store, func()) 
 	return db, ro, closeDB
 }
 
+// rebuildDatabaseCheck decides whether rebuild may open the database
+// read-write. A nil error means proceed.
+//
+// state.Open is not a corruption test: against a database already at the
+// current schema it needs only a successful PRAGMA user_version, so
+// damage elsewhere in the file would surface mid-run, after rebuild had
+// begun writing. Rebuild therefore classifies the file the way doctor
+// does — read-only, through PRAGMA integrity_check — before opening it
+// to write (spec §5).
+//
+// Two verdicts differ from doctor's, both deliberately. A pending
+// migration is doctor's finding but rebuild's normal path, because
+// rebuild is a mutating command. An unrecovered write-ahead log is the
+// crash rebuild exists to recover from, so refusing it would refuse the
+// main case; state.Open recovers the log.
+var rebuildDatabaseCheck = func(root string) error {
+	path := state.DBPath(root)
+
+	ro, insp, err := state.OpenReadOnly(root)
+	if err != nil {
+		switch {
+		case state.IsMissingDatabase(err):
+			// A fresh installation. state.Open creates it and rebuild
+			// proceeds against an empty database; nothing is destroyed.
+			return nil
+		case state.IsIncompleteWAL(err):
+			return nil
+		default:
+			return corruptDatabaseError(path, err)
+		}
+	}
+	defer ro.Close()
+
+	usable := insp.Usable()
+	if usable == nil {
+		return nil
+	}
+	var pending *state.PendingMigrationError
+	if errors.As(usable, &pending) {
+		return nil
+	}
+	// A newer build's database is refused, but its contents are good and
+	// the message must not tell anyone to move them aside.
+	var future *state.FutureSchemaError
+	if errors.As(usable, &future) {
+		return futureSchemaError(path, usable)
+	}
+	// What is left is confirmed damage, and not something to guess past.
+	return corruptDatabaseError(path, usable)
+}
+
+// corruptDatabaseError is the refusal message, which is the deliverable
+// here. Naming the sidecars is not pedantry: moving state.db alone
+// leaves a stale write-ahead log that a freshly created database would
+// inherit.
+func corruptDatabaseError(path string, cause error) error {
+	return fmt.Errorf(
+		"the state database at %s cannot be read: %w\n"+
+			"rebuild will not move it aside for you. Move all three of %s, %s, and %s "+
+			"aside, then run projectmux rebuild again to recover what live tmux "+
+			"sessions still describe",
+		path, cause, path, path+"-wal", path+"-shm")
+}
+
+// futureSchemaError refuses a database this build is too old to write,
+// and says nothing about moving files. The data is intact and a newer
+// projectmux — probably still installed — reads it correctly; rebuilding
+// over it would discard everything the newer schema records that this one
+// has no column for. The wrapped error already names both versions and
+// says to upgrade, so this adds only the path and the reason not to
+// reach for the corrupt-database remedy.
+func futureSchemaError(path string, cause error) error {
+	return fmt.Errorf(
+		"the state database at %s was written by a newer projectmux: %w\n"+
+			"its contents are intact, and rebuilding with this build would discard "+
+			"what the newer schema records",
+		path, cause)
+}
+
 // newVersionRunner is doctor's dependency-probe seam.
 var newVersionRunner = func() doctor.VersionRunner { return toolProbe{} }
 
