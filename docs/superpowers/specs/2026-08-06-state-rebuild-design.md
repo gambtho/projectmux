@@ -262,7 +262,13 @@ to be wrong.
 
 1. `resolve.Resolve("", nil, worktree)`.
 2. `controller.SessionBelongsTo(session, workspace)` — all three keys (§3).
-3. `config.Load` for the desired digest.
+3. `config.Load` for the desired digest — for CaseRegister only, the only case
+   that writes a digest. A workspace whose configuration is broken can still
+   have its live session adopted, because adoption does not depend on the
+   digest. A failure here is carried to step 5 rather than ending the candidate:
+   the case may become an adoption once the lock-held re-classification runs,
+   and a candidate that no longer writes a digest is not blocked by one it could
+   not load.
 4. Take the per-workspace lock.
 5. **Re-observe under the lock:** `ObserveSession(SessionQuery{WorkspaceID,
    CandidateNames: []string{session.Name}})`, and re-read the workspace's row.
