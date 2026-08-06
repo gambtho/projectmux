@@ -134,7 +134,7 @@ func ensureWorkspace(ctx context.Context, name string) (controller.EnsureResult,
 	if err != nil {
 		return zero, resolve.Workspace{}, fmt.Errorf("determining the current directory: %w", err)
 	}
-	ws, err := resolve.Resolve(name, defaults.RepositoryRoots, cwd)
+	ws, err := resolve.Resolve(name, defaults.Layer.RepositoryRoots, cwd)
 	if err != nil {
 		return zero, resolve.Workspace{}, err
 	}

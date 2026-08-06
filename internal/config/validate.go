@@ -31,7 +31,8 @@ var numericWindowName = regexp.MustCompile(`^[0-9]+$`)
 // does state is checked as stated; a later layer may still override it,
 // which is why the caller reports these as a warning rather than a
 // rejection.
-func ValidateDefaults(l Layer) []string {
+func ValidateDefaults(src Source) []string {
+	l := src.Layer
 	if l.Version == nil {
 		supported := SchemaVersion
 		l.Version = &supported

@@ -406,7 +406,7 @@ func TestRepositoryRootsAreReadFromDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadDefaults: %v", err)
 	}
-	if got := strings.Join(defaults.RepositoryRoots, ","); got != "/tmp/a,/tmp/b" {
+	if got := strings.Join(defaults.Layer.RepositoryRoots, ","); got != "/tmp/a,/tmp/b" {
 		t.Errorf("repository_roots = %q", got)
 	}
 }

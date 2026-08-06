@@ -77,7 +77,7 @@ func buildAttach(ctx context.Context, name string) (attachEnvelope, string, erro
 	if err != nil {
 		return zero, "", fmt.Errorf("determining the current directory: %w", err)
 	}
-	ws, err := resolve.Resolve(name, defaults.RepositoryRoots, cwd)
+	ws, err := resolve.Resolve(name, defaults.Layer.RepositoryRoots, cwd)
 	if err != nil {
 		return zero, "", err
 	}
