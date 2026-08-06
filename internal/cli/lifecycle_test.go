@@ -44,6 +44,11 @@ func lifecycleRig(t *testing.T, label string) (resolve.Workspace, string) {
 	newSessionActuator = func() controller.SessionActuator {
 		return &tmux.Client{Socket: socket}
 	}
+	origLive := liveSessions
+	t.Cleanup(func() { liveSessions = origLive })
+	liveSessions = func(ctx context.Context) ([]controller.LiveSession, error) {
+		return (&tmux.Client{Socket: socket}).Sessions(ctx)
+	}
 	installContainerObserver(t, &fake.ContainerObserver{})
 
 	cwd, err := os.Getwd()
@@ -428,5 +433,91 @@ func TestLifecycleStopContainerThenAutostart(t *testing.T) {
 	}
 	if len(live) != 0 {
 		t.Errorf("autostart touched tmux: %+v", live)
+	}
+}
+
+// TestLifecycleRebuildAfterLosingTheDatabase performs the disaster this
+// slice exists for, against a real tmux server and the real store: the
+// state database is destroyed while the session it described is still
+// running. Rebuild re-registers the workspace from the session's
+// identity keys, recovering the two fields tmux does not carry —
+// is_primary and the proposed session name — and adopts the live name.
+// The second run is the idempotence claim, and the one most likely to
+// regress.
+func TestLifecycleRebuildAfterLosingTheDatabase(t *testing.T) {
+	ws, socket := lifecycleRig(t, "rebuild")
+
+	if env := openJSON(t); env.Action != "created" {
+		t.Fatalf("open = %+v", env)
+	}
+
+	// The disaster: the database and its sidecars are gone; the tmux
+	// session is not.
+	stateRoot := os.Getenv("PROJECTMUX_STATE_ROOT")
+	path := state.DBPath(stateRoot)
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("removing %s: %v", p, err)
+		}
+	}
+
+	code, stdout, stderr := run(t, "rebuild", "--json")
+	if code != ExitOK {
+		t.Fatalf("rebuild exit %d, stderr: %s\nstdout: %s", code, stderr, stdout)
+	}
+	env := decodeRebuild(t, stdout)
+	if len(env.Conflicts) != 0 {
+		t.Fatalf("conflicts = %+v, want none", env.Conflicts)
+	}
+	if len(env.Registered) != 1 {
+		t.Fatalf("registered = %+v, want exactly one workspace", env.Registered)
+	}
+	got := env.Registered[0]
+	if got.ID != ws.ID || got.Slug != ws.Slug || got.Worktree != ws.Worktree ||
+		got.Session != ws.SessionName || !got.IsPrimary {
+		t.Fatalf("registered = %+v, want %s at %s as primary session %q",
+			got, ws.Slug, ws.Worktree, ws.SessionName)
+	}
+
+	// The row is real, and it carries the two fields tmux never held.
+	st, err := state.Open(stateRoot)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	rec, err := st.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	if rec.ActualSession == nil || *rec.ActualSession != ws.SessionName {
+		t.Errorf("actual_session = %v, want %q adopted", rec.ActualSession, ws.SessionName)
+	}
+	if !rec.IsPrimary {
+		t.Error("is_primary was not recovered; autostart would stop starting this container")
+	}
+	if rec.ProposedSession != ws.SessionName {
+		t.Errorf("proposed_session = %q, want %q", rec.ProposedSession, ws.SessionName)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	// Idempotence: a fully recovered installation has nothing to do and
+	// says so.
+	code, stdout, stderr = run(t, "rebuild", "--json")
+	if code != ExitOK {
+		t.Fatalf("second rebuild exit %d, stderr: %s", code, stderr)
+	}
+	second := decodeRebuild(t, stdout)
+	if len(second.Registered) != 0 || len(second.Conflicts) != 0 {
+		t.Errorf("second rebuild = %+v, want an empty report", second)
+	}
+
+	// The session was adopted, never recreated or renamed.
+	live, err := (&tmux.Client{Socket: socket}).Sessions(context.Background())
+	if err != nil {
+		t.Fatalf("Sessions: %v", err)
+	}
+	if len(live) != 1 || live[0].Name != ws.SessionName || live[0].WorkspaceID != ws.ID {
+		t.Errorf("live = %+v; rebuild created or renamed sessions", live)
 	}
 }

@@ -2,6 +2,7 @@ package state
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -296,7 +297,109 @@ func TestOpenReadOnlyUnrecoveredWALIsUncertainty(t *testing.T) {
 	}
 }
 
-// TestWalStateOfClassifiesSidecars pins the three states apart, since
+// TestOpenReadOnlyUnrecoveredWALIsTyped pins the one refusal a mutating
+// command must tell apart from all the others. An unrecovered log is the
+// crash case rebuild exists to recover — state.Open recovers it — while a
+// permission failure is uncertainty rebuild must stop on. Untyped, the two
+// are the same error value. The message is asserted byte for byte because
+// doctor prints it unchanged and this change must not touch its output.
+func TestOpenReadOnlyUnrecoveredWALIsTyped(t *testing.T) {
+	root := seedUnrecoveredWAL(t)
+	path := DBPath(root)
+
+	ro, _, err := OpenReadOnly(root)
+	if err == nil {
+		ro.Close()
+		t.Fatal("an unrecovered write-ahead log opened cleanly")
+	}
+	var walErr *IncompleteWALError
+	if !errors.As(err, &walErr) {
+		t.Fatalf("OpenReadOnly error = %T (%v), want *IncompleteWALError", err, err)
+	}
+	if walErr.Path != path {
+		t.Errorf("Path = %q, want %q", walErr.Path, path)
+	}
+	if !IsIncompleteWAL(err) {
+		t.Error("IsIncompleteWAL = false on an unrecovered write-ahead log")
+	}
+
+	want := "the state database at " + path + " has a write-ahead log with no shared-memory index, " +
+		"which means a writer did not shut down cleanly; reading it would require " +
+		"recovering the log into the state directory, which an inspection must not do. " +
+		"The next mutating command recovers it"
+	if got := err.Error(); got != want {
+		t.Errorf("message changed:\n got %q\nwant %q", got, want)
+	}
+
+	// The predicate must be as narrow as the type: every other refusal is
+	// still a refusal, and a missing database is the nearest neighbour.
+	if IsMissingDatabase(err) {
+		t.Error("an unrecovered write-ahead log was reported as a missing database")
+	}
+	if _, _, missing := OpenReadOnly(t.TempDir()); IsIncompleteWAL(missing) {
+		t.Error("a missing database was reported as an unrecovered write-ahead log")
+	}
+}
+
+// TestOpenReadOnlyUnexaminableSidecarsAreNotTypedAsAnIncompleteWAL is the
+// reason walUnknown exists. Every case here is "the filesystem would not
+// tell us", which is uncertainty; the typed error means "we looked, and a
+// writer crashed", which a mutating command is licensed to proceed past.
+// Collapsing the two would let rebuild open a database it never examined.
+func TestOpenReadOnlyUnexaminableSidecarsAreNotTypedAsAnIncompleteWAL(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stage func(t *testing.T, path string)
+	}{
+		{
+			name: "a -wal that is not a regular file",
+			stage: func(t *testing.T, path string) {
+				if err := os.Mkdir(path+"-wal", 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+			},
+		},
+		{
+			name: "a -shm that cannot be stat'ed",
+			stage: func(t *testing.T, path string) {
+				if err := os.WriteFile(path+"-wal", []byte("log"), 0o600); err != nil {
+					t.Fatalf("writing the -wal: %v", err)
+				}
+				// A -shm inside an unsearchable directory: stat fails with
+				// EACCES rather than ENOENT, which is "we cannot tell"
+				// rather than "it is absent".
+				blocked := filepath.Join(t.TempDir(), "blocked")
+				if err := os.Mkdir(blocked, 0o000); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
+				if err := os.Symlink(filepath.Join(blocked, "target"), path+"-shm"); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+				if _, err := os.Stat(filepath.Join(blocked, "probe")); errors.Is(err, fs.ErrNotExist) {
+					t.Skip("this filesystem or user ignores directory permissions")
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := seedDatabase(t)
+			path := DBPath(root)
+			tc.stage(t, path)
+
+			ro, _, err := OpenReadOnly(root)
+			if err == nil {
+				ro.Close()
+				t.Fatal("an unexaminable sidecar opened cleanly")
+			}
+			if IsIncompleteWAL(err) {
+				t.Errorf("uncertainty was typed as a recoverable crash: %v", err)
+			}
+		})
+	}
+}
+
+// TestWalStateOfClassifiesSidecars pins the four states apart, since
 // which DSN is safe follows entirely from this classification.
 func TestWalStateOfClassifiesSidecars(t *testing.T) {
 	clean := DBPath(seedDatabase(t))
@@ -308,12 +411,14 @@ func TestWalStateOfClassifiesSidecars(t *testing.T) {
 		t.Errorf("a -wal with no -shm = %v, want walIncomplete", got)
 	}
 
-	// A sidecar that cannot be examined is not an absent one.
+	// A sidecar that cannot be examined is not an absent one — and it is
+	// not a crashed writer either. walIncomplete means "we looked, and a
+	// writer left a log behind"; this is "we could not look".
 	if err := os.Mkdir(clean+"-wal", 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if got := walStateOf(clean); got != walIncomplete {
-		t.Errorf("an unexaminable -wal = %v, want walIncomplete", got)
+	if got := walStateOf(clean); got != walUnknown {
+		t.Errorf("an unexaminable -wal = %v, want walUnknown", got)
 	}
 }
 
@@ -439,5 +544,35 @@ func TestOpenReadOnlyRefusesWrites(t *testing.T) {
 func TestDBPath(t *testing.T) {
 	if got, want := DBPath("/state"), filepath.Join("/state", "state.db"); got != want {
 		t.Fatalf("DBPath = %q, want %q", got, want)
+	}
+}
+
+// TestWALStateShmThatIsNotAFileIsUnknown pins the -shm side of the rule
+// the -wal side already carries. A directory named state.db-shm is not
+// the shared-memory index this code would be reasoning about, so its
+// presence establishes nothing: without this, the stat's success alone
+// read as walComplete and an unexaminable state root was diagnosed as a
+// healthy one.
+func TestWALStateShmThatIsNotAFileIsUnknown(t *testing.T) {
+	root := seedUnrecoveredWAL(t)
+	path := DBPath(root)
+
+	if err := os.Mkdir(path+"-shm", 0o700); err != nil {
+		t.Fatalf("creating a directory at the -shm path: %v", err)
+	}
+
+	if got := walStateOf(path); got != walUnknown {
+		t.Fatalf("walStateOf = %v, want walUnknown", got)
+	}
+
+	ro, _, err := OpenReadOnly(root)
+	if err == nil {
+		ro.Close()
+		t.Fatal("an unexaminable -shm opened cleanly")
+	}
+	// Uncertainty, not the crash case: IncompleteWALError is a licence to
+	// recover the log, and nothing here established a writer crashed.
+	if IsIncompleteWAL(err) {
+		t.Errorf("an unexaminable -shm was reported as an unrecovered log: %v", err)
 	}
 }

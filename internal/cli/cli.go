@@ -58,6 +58,10 @@ commands:
         observe one workspace and explain drift and dependency failures
   doctor [--json] [--compact]
         diagnose dependencies, configuration, state, and drift; changes nothing
+  rebuild [--dry-run] [--json] [--compact]
+        re-register workspaces the state database lost, from the identity
+        keys their live tmux sessions carry; does not rediscover worktrees
+        from repository_roots and does not restore container bindings
   version
         print the projectmux version
   help
@@ -148,6 +152,8 @@ func dispatch(ctx context.Context, args []string, stdout io.Writer) error {
 		return runStatus(ctx, rest, stdout)
 	case "doctor":
 		return runDoctor(ctx, rest, stdout)
+	case "rebuild":
+		return runRebuild(ctx, rest, stdout)
 	default:
 		if !strings.HasPrefix(command, "-") {
 			// Design §8: `projectmux <workspace>` is shorthand for
