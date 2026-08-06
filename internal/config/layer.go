@@ -43,6 +43,20 @@ type WindowLayer struct {
 	Cwd      *string `yaml:"cwd"`
 	Location *string `yaml:"location"`
 	Focus    *bool   `yaml:"focus"`
+	// Panes is a pointer to a slice so that an omitted key (inherit or
+	// default) is distinguishable from an explicit empty list (opt out of
+	// the default pane). It merges as a unit, like the mode trio.
+	Panes *[]PaneLayer `yaml:"panes"`
+}
+
+// PaneLayer is the undecided form of Pane.
+type PaneLayer struct {
+	Name    string  `yaml:"name"`
+	Agent   *string `yaml:"agent"`
+	Command *string `yaml:"command"`
+	Shell   *bool   `yaml:"shell"`
+	Cwd     *string `yaml:"cwd"`
+	Focus   *bool   `yaml:"focus"`
 }
 
 // setsMode reports whether this layer expresses how the window runs. Mode is

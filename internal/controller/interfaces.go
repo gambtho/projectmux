@@ -91,6 +91,16 @@ type WindowIntent struct {
 	RelDir   string // config cwd, relative; "" => workspace root
 	Focus    bool
 	Location WindowLocation
+	Panes    []PaneIntent
+}
+
+// PaneIntent is one additional pane as configuration describes it.
+// Panes have no location of their own: they inherit the window's.
+type PaneIntent struct {
+	Name    string
+	Command string // empty => shell pane
+	RelDir  string // config cwd, relative; "" => the window's directory
+	Focus   bool
 }
 
 // Clock supplies the timestamps the store persists.
@@ -102,6 +112,17 @@ type Clock interface {
 // the default shell; Dir is absolute (derivation resolves relative
 // cwds against the worktree).
 type WindowSpec struct {
+	Name    string
+	Command string
+	Dir     string
+	Focus   bool
+	Panes   []PaneSpec
+}
+
+// PaneSpec is one additional pane the actuator creates alongside the
+// window's primary pane. An empty Command means the default shell; Dir
+// is absolute. Focus marks the pane left active within its window.
+type PaneSpec struct {
 	Name    string
 	Command string
 	Dir     string

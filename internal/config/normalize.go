@@ -44,6 +44,26 @@ func normalize(l Layer) Config {
 		if w.Focus != nil {
 			window.Focus = *w.Focus
 		}
+		if w.Panes == nil {
+			window.Panes = []Pane{{Name: "shell", Shell: true}}
+		} else {
+			window.Panes = make([]Pane, 0, len(*w.Panes))
+			for _, p := range *w.Panes {
+				pane := Pane{
+					Name:    p.Name,
+					Agent:   p.Agent,
+					Command: p.Command,
+					Cwd:     p.Cwd,
+				}
+				if p.Shell != nil {
+					pane.Shell = *p.Shell
+				}
+				if p.Focus != nil {
+					pane.Focus = *p.Focus
+				}
+				window.Panes = append(window.Panes, pane)
+			}
+		}
 		cfg.Windows = append(cfg.Windows, window)
 	}
 	return cfg

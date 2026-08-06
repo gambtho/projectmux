@@ -57,6 +57,25 @@ type Window struct {
 	// plain repository unopenable in the Bash implementation.
 	Location *string `json:"location"`
 	Focus    bool    `json:"focus"`
+	// Panes are the window's additional panes beyond the primary the window
+	// fields above describe. Normalization materializes the default shell
+	// pane here, so the digested document states the panes that will render;
+	// an explicit `panes: []` stays empty (single-pane opt-out).
+	Panes []Pane `json:"panes"`
+}
+
+// Pane is one normalized additional pane of a window. Panes have no
+// location: they inherit the window's resolved location.
+type Pane struct {
+	Name string `json:"name"`
+	// Exactly one of Agent, Command, or Shell describes how the pane runs.
+	Agent   *string `json:"agent"`
+	Command *string `json:"command"`
+	Shell   bool    `json:"shell"`
+	// Cwd is an optional worktree-relative working directory; absent means
+	// the window's directory.
+	Cwd   *string `json:"cwd"`
+	Focus bool    `json:"focus"`
 }
 
 // Effective is the result of loading every layer for one workspace.

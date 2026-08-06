@@ -67,6 +67,10 @@ windows:
 YAML
 ```
 
+Every window opens with a second shell pane beside it by default — same
+directory, same container if the window runs in one. Add `panes: []` to a
+window to keep it single-pane, or declare your own `panes` list.
+
 Then open any repository under a configured root:
 
 ```sh

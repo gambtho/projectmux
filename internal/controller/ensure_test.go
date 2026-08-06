@@ -359,6 +359,44 @@ func TestEnsureCreationFailureIsRecorded(t *testing.T) {
 	}
 }
 
+func TestEnsureAcceptsPartialSessionAfterFailedCreation(t *testing.T) {
+	// A failed chained creation aborts mid-chain but leaves the session
+	// alive with its identity keys set (they come right after
+	// new-session). The next ensure must accept it as already-running
+	// with the drift flag set — never repair or recreate (spec §4).
+	r := newEnsureRig(t, absentStep(), absentStep())
+	r.actuator.Err = errors.New("tmux new-session exited 1: boom")
+
+	if _, err := r.ensure(t, ensureDesired()); err == nil {
+		t.Fatal("first ensure should fail with the actuator error")
+	}
+	rec, _ := r.store.Workspace("w1")
+	if rec.AppliedDigest != nil {
+		t.Error("a failed creation must not commit an applied digest")
+	}
+
+	// The chain died after identity was set: simulate the surviving
+	// partial session in the observer.
+	r.actuator.Err = nil
+	r.sessions.steps = []func(controller.SessionQuery) (controller.SessionObservation, error){
+		liveStep(ownSession("slab")),
+	}
+
+	res, err := r.ensure(t, ensureDesired())
+	if err != nil {
+		t.Fatalf("second ensure: %v", err)
+	}
+	if res.Action != controller.EnsureAlreadyRunning {
+		t.Errorf("action = %v, want already-running (accepted, not repaired)", res.Action)
+	}
+	if !res.Drifted {
+		t.Error("a partial session with no committed digest must report drift")
+	}
+	if calls := len(r.actuator.Created); calls != 1 {
+		t.Errorf("actuator calls across both runs = %d, want 1 (the failed attempt only; no repair/recreate)", calls)
+	}
+}
+
 func TestEnsurePostCreateConfirmationRejects(t *testing.T) {
 	mismatched := controller.LiveSession{
 		Name: "slab", WorkspaceID: "w1", Slug: "slab", Worktree: "/w/OTHER",

@@ -97,9 +97,15 @@ var (
 // windowIntents derives the actuator window intents purely from merged
 // configuration: implicit shell window when none is configured; the
 // location tri-state is resolved against the binding inside Ensure.
+// The implicit window also gets the default shell pane here — it lives
+// outside the digested config, so its pane arrives at derivation too
+// (the two-pane spec's §3 exception).
 func windowIntents(cfg config.Config) []controller.WindowIntent {
 	if len(cfg.Windows) == 0 {
-		return []controller.WindowIntent{{Name: "shell"}}
+		return []controller.WindowIntent{{
+			Name:  "shell",
+			Panes: []controller.PaneIntent{{Name: "shell"}},
+		}}
 	}
 	intents := make([]controller.WindowIntent, 0, len(cfg.Windows))
 	for _, w := range cfg.Windows {
@@ -115,6 +121,25 @@ func windowIntents(cfg config.Config) []controller.WindowIntent {
 		}
 		if w.Location != nil {
 			in.Location = controller.WindowLocation(*w.Location)
+		}
+		// Allocate only when panes exist so a pane-less window keeps a nil
+		// slice: normalized config always carries the list, but tests build
+		// Config values directly, and nil-vs-empty matters to DeepEqual.
+		if len(w.Panes) > 0 {
+			in.Panes = make([]controller.PaneIntent, 0, len(w.Panes))
+			for _, p := range w.Panes {
+				pane := controller.PaneIntent{Name: p.Name, Focus: p.Focus}
+				switch {
+				case p.Agent != nil:
+					pane.Command = *p.Agent
+				case p.Command != nil:
+					pane.Command = *p.Command
+				}
+				if p.Cwd != nil {
+					pane.RelDir = *p.Cwd
+				}
+				in.Panes = append(in.Panes, pane)
+			}
 		}
 		intents = append(intents, in)
 	}

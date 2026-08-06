@@ -293,6 +293,85 @@ func TestIntegrationCreateSessionNameEndingInSemicolon(t *testing.T) {
 	}
 }
 
+func TestCreateArgvSplitsPanes(t *testing.T) {
+	spec := actuateSpec()
+	spec.Windows[0].Panes = []controller.PaneSpec{{Name: "shell", Dir: "/w/slab"}}
+	spec.Windows[1].Panes = []controller.PaneSpec{{Name: "logs", Command: "tail -f d.log", Dir: "/w/slab/sub"}}
+	argv := createArgv(spec)
+	joined := strings.Join(argv, " ")
+
+	for _, want := range []string{
+		"; split-window -h -d -t slab:agent-1 -c /w/slab -e A_KEY=1 -e B_KEY=2",
+		"; split-window -h -d -t slab:shell -c /w/slab/sub -e A_KEY=1 -e B_KEY=2 tail -f d.log",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("argv %q\nmissing %q", joined, want)
+		}
+	}
+	// Identity keys must come before any split: a partial creation stays
+	// identity-tagged and recoverable (spec §4, partial failure).
+	if strings.Index(joined, "@dev_worktree") > strings.Index(joined, "split-window") {
+		t.Errorf("identity set-options must precede splits: %q", joined)
+	}
+	if strings.Contains(joined, "select-layout") {
+		t.Errorf("single extra pane needs no select-layout: %q", joined)
+	}
+}
+
+func TestCreateArgvFocusedPaneOmitsDetach(t *testing.T) {
+	spec := actuateSpec()
+	spec.Windows[0].Panes = []controller.PaneSpec{
+		{Name: "shell", Dir: "/w/slab", Focus: true},
+	}
+	argv := createArgv(spec)
+	joined := strings.Join(argv, " ")
+	if !strings.Contains(joined, "; split-window -h -t slab:agent-1 -c /w/slab") {
+		t.Errorf("focused pane must split without -d: %q", joined)
+	}
+	if strings.Contains(joined, "; split-window -h -d -t slab:agent-1") {
+		t.Errorf("focused pane must not carry -d: %q", joined)
+	}
+}
+
+func TestCreateArgvManyPanesEqualize(t *testing.T) {
+	spec := actuateSpec()
+	spec.Windows[0].Panes = []controller.PaneSpec{
+		{Name: "a", Dir: "/w/slab"},
+		{Name: "b", Dir: "/w/slab"},
+	}
+	argv := createArgv(spec)
+	joined := strings.Join(argv, " ")
+	if !strings.Contains(joined, "; select-layout -t slab:agent-1 even-horizontal") {
+		t.Errorf("two extra panes need even-horizontal: %q", joined)
+	}
+	if strings.Count(joined, "select-layout") != 1 {
+		t.Errorf("select-layout should appear exactly once: %q", joined)
+	}
+}
+
+func TestCreateArgvPaneEscaping(t *testing.T) {
+	// escapeChainArg escapes only a TRAILING ";" (tmux's chain parser
+	// inspects the last character of each argv element), so every
+	// adversarial value here ends in ";". The composite -t target ends in
+	// the window name, which is why the window name carries the ";".
+	spec := actuateSpec()
+	spec.Windows[0].Name = "agent;"
+	spec.Windows[0].Panes = []controller.PaneSpec{
+		{Name: "p", Command: "run;", Dir: "/w/dir;"},
+	}
+	argv := createArgv(spec)
+	joined := strings.Join(argv, " ")
+	for _, want := range []string{
+		`split-window -h -d -t slab:agent\;`,
+		`-c /w/dir\;`,
+		`run\;`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("argv %q\nmissing escaped %q", joined, want)
+		}
+	}
+}
+
 func TestKillSessionSuccessAndIdempotency(t *testing.T) {
 	fakeTmux(t, "#!/bin/sh\nexit 0\n")
 	if err := (&Client{}).KillSession(context.Background(), "slab"); err != nil {

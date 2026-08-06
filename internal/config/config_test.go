@@ -708,3 +708,202 @@ func TestRootPrefersExplicitOverrideThenXDG(t *testing.T) {
 		t.Errorf("Root = %q, want the ~/.config fallback", got)
 	}
 }
+
+func TestNormalizeDefaultsPanes(t *testing.T) {
+	shell := true
+	cfg := normalize(Layer{Windows: []WindowLayer{{Name: "dev", Shell: &shell}}})
+	if len(cfg.Windows) != 1 {
+		t.Fatalf("windows = %+v", cfg.Windows)
+	}
+	panes := cfg.Windows[0].Panes
+	if len(panes) != 1 || panes[0].Name != "shell" || !panes[0].Shell {
+		t.Errorf("omitted panes should normalize to the default shell pane, got %+v", panes)
+	}
+}
+
+func TestNormalizeEmptyPanesOptsOut(t *testing.T) {
+	shell := true
+	empty := []PaneLayer{}
+	cfg := normalize(Layer{Windows: []WindowLayer{
+		{Name: "dev", Shell: &shell, Panes: &empty},
+	}})
+	if panes := cfg.Windows[0].Panes; len(panes) != 0 || panes == nil {
+		t.Errorf("panes: [] should normalize to an empty non-nil list, got %#v", panes)
+	}
+}
+
+func TestNormalizeExplicitPanes(t *testing.T) {
+	shell := true
+	cmd := "tail -f log/dev.log"
+	cwd := "services/api"
+	declared := []PaneLayer{{Name: "logs", Command: &cmd, Cwd: &cwd}}
+	cfg := normalize(Layer{Windows: []WindowLayer{
+		{Name: "dev", Shell: &shell, Panes: &declared},
+	}})
+	panes := cfg.Windows[0].Panes
+	if len(panes) != 1 || panes[0].Name != "logs" ||
+		panes[0].Command == nil || *panes[0].Command != cmd ||
+		panes[0].Cwd == nil || *panes[0].Cwd != cwd {
+		t.Errorf("declared panes should pass through, got %+v", panes)
+	}
+}
+
+func TestDigestPanesBehavior(t *testing.T) {
+	shell := true
+	empty := []PaneLayer{}
+	base := Layer{Windows: []WindowLayer{{Name: "dev", Shell: &shell}}}
+	optOut := Layer{Windows: []WindowLayer{{Name: "dev", Shell: &shell, Panes: &empty}}}
+
+	dBase, err := digest(normalize(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dOptOut, err := digest(normalize(optOut))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dBase == dOptOut {
+		t.Error("omitted panes (default pane) and panes: [] must digest differently")
+	}
+
+	dAgain, err := digest(normalize(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dBase != dAgain {
+		t.Error("identical configuration must digest stably")
+	}
+}
+
+func TestDigestZeroWindowConfigCarriesNoPanes(t *testing.T) {
+	// The spec's §3 exception: a workspace with no windows digests an empty
+	// list; its implicit shell window (and that window's default pane) is
+	// invented at derivation, outside the digest. The canonical JSON must
+	// therefore contain no pane content at all.
+	cfg := normalize(Layer{})
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "panes") {
+		t.Errorf("zero-window config must not encode panes: %s", encoded)
+	}
+}
+
+func TestMergePanesAsUnit(t *testing.T) {
+	shell := true
+	cmd := "make watch"
+	basePanes := []PaneLayer{{Name: "watch", Command: &cmd}}
+	base := Source{File: "defaults.yaml", Layer: Layer{Windows: []WindowLayer{
+		{Name: "dev", Shell: &shell, Panes: &basePanes},
+	}}}
+
+	t.Run("absent inherits", func(t *testing.T) {
+		over := Source{File: "workspace.yaml", Layer: Layer{Windows: []WindowLayer{
+			{Name: "dev"},
+		}}}
+		m := mergeLayers(mergeLayers(Merged{}, base), over)
+		got := m.Layer.Windows[0].Panes
+		if got == nil || len(*got) != 1 || (*got)[0].Name != "watch" {
+			t.Errorf("absent panes must inherit the base list, got %#v", got)
+		}
+	})
+
+	t.Run("empty replaces", func(t *testing.T) {
+		empty := []PaneLayer{}
+		over := Source{File: "workspace.yaml", Layer: Layer{Windows: []WindowLayer{
+			{Name: "dev", Panes: &empty},
+		}}}
+		m := mergeLayers(mergeLayers(Merged{}, base), over)
+		got := m.Layer.Windows[0].Panes
+		if got == nil || len(*got) != 0 {
+			t.Errorf("panes: [] must replace the inherited list, got %#v", got)
+		}
+	})
+
+	t.Run("stated replaces whole list", func(t *testing.T) {
+		other := "htop"
+		overPanes := []PaneLayer{{Name: "mon", Command: &other}}
+		over := Source{File: "workspace.yaml", Layer: Layer{Windows: []WindowLayer{
+			{Name: "dev", Panes: &overPanes},
+		}}}
+		m := mergeLayers(mergeLayers(Merged{}, base), over)
+		got := m.Layer.Windows[0].Panes
+		if got == nil || len(*got) != 1 || (*got)[0].Name != "mon" {
+			t.Errorf("a stated panes list must replace, not merge, got %#v", got)
+		}
+	})
+}
+
+// TestLoadPanesThroughYAML routes panes through the package's real,
+// file-based load path (rather than building Layer/PaneLayer structs
+// directly) so the yaml.v3 behavior the opt-out relies on — an explicit
+// empty list decodes to a non-nil pointer, a bare key decodes to a nil
+// pointer just like an omitted key — is pinned in the repository, not just
+// verified externally.
+func TestLoadPanesThroughYAML(t *testing.T) {
+	t.Run("explicit empty list opts out end to end", func(t *testing.T) {
+		root := writeRoot(t, map[string]string{"defaults.yaml": `
+version: 1
+windows:
+  - name: dev
+    shell: true
+    panes: []
+`})
+		eff := mustLoad(t, root, "slabledger")
+		panes := window(t, eff.Config, "dev").Panes
+		if panes == nil || len(panes) != 0 {
+			t.Errorf("panes: [] should load to an empty non-nil list, got %#v", panes)
+		}
+	})
+
+	t.Run("declared pane list carries through", func(t *testing.T) {
+		root := writeRoot(t, map[string]string{"defaults.yaml": `
+version: 1
+windows:
+  - name: dev
+    shell: true
+    panes:
+      - name: logs
+        command: tail -f log/dev.log
+        cwd: services/api
+`})
+		eff := mustLoad(t, root, "slabledger")
+		panes := window(t, eff.Config, "dev").Panes
+		if len(panes) != 1 || panes[0].Name != "logs" ||
+			panes[0].Command == nil || *panes[0].Command != "tail -f log/dev.log" ||
+			panes[0].Cwd == nil || *panes[0].Cwd != "services/api" {
+			t.Errorf("declared panes should load through, got %+v", panes)
+		}
+	})
+
+	t.Run("unknown pane field is rejected", func(t *testing.T) {
+		root := writeRoot(t, map[string]string{"defaults.yaml": `
+version: 1
+windows:
+  - name: dev
+    shell: true
+    panes:
+      - name: logs
+        command: tail -f log/dev.log
+        location: host
+`})
+		_, err := load(t, root, "slabledger")
+		assertInvalid(t, err, "location")
+	})
+
+	t.Run("bare panes key behaves like omitted", func(t *testing.T) {
+		root := writeRoot(t, map[string]string{"defaults.yaml": `
+version: 1
+windows:
+  - name: dev
+    shell: true
+    panes:
+`})
+		eff := mustLoad(t, root, "slabledger")
+		panes := window(t, eff.Config, "dev").Panes
+		if len(panes) != 1 || panes[0].Name != "shell" || !panes[0].Shell {
+			t.Errorf("bare panes: should default to a single shell pane, got %+v", panes)
+		}
+	})
+}

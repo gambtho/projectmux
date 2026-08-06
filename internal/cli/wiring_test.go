@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -175,7 +176,7 @@ func TestWindowIntentsDerivation(t *testing.T) {
 		t.Fatalf("intents = %+v", intents)
 	}
 	for i := range want {
-		if intents[i] != want[i] {
+		if !reflect.DeepEqual(intents[i], want[i]) {
 			t.Errorf("intent %d = %+v, want %+v", i, intents[i], want[i])
 		}
 	}
@@ -186,5 +187,43 @@ func TestWindowIntentsImplicitShellWindow(t *testing.T) {
 	if len(intents) != 1 || intents[0].Name != "shell" || intents[0].Command != "" ||
 		intents[0].Location != controller.WindowAuto {
 		t.Errorf("intents = %+v, want one implicit auto shell window", intents)
+	}
+}
+
+func TestWindowIntentsCarryPanes(t *testing.T) {
+	agent := "claude"
+	cmd := "tail -f dev.log"
+	cwd := "services/api"
+	cfg := config.Config{Windows: []config.Window{{
+		Name:  "dev",
+		Agent: &agent,
+		Panes: []config.Pane{
+			{Name: "shell", Shell: true},
+			{Name: "logs", Command: &cmd, Cwd: &cwd, Focus: true},
+		},
+	}}}
+	intents := windowIntents(cfg)
+	panes := intents[0].Panes
+	if len(panes) != 2 {
+		t.Fatalf("panes = %+v", panes)
+	}
+	if panes[0].Command != "" || panes[0].Name != "shell" {
+		t.Errorf("shell pane should map to an empty command, got %+v", panes[0])
+	}
+	if panes[1].Command != cmd || panes[1].RelDir != cwd || !panes[1].Focus {
+		t.Errorf("command pane not mapped, got %+v", panes[1])
+	}
+}
+
+func TestWindowIntentsImplicitWindowGetsDefaultPane(t *testing.T) {
+	// Spec §3 exception: the implicit window lives outside the digest, so
+	// its default pane is supplied here, at derivation.
+	intents := windowIntents(config.Config{})
+	if len(intents) != 1 || intents[0].Name != "shell" {
+		t.Fatalf("intents = %+v", intents)
+	}
+	panes := intents[0].Panes
+	if len(panes) != 1 || panes[0].Name != "shell" || panes[0].Command != "" {
+		t.Errorf("implicit window should carry the default shell pane, got %+v", panes)
 	}
 }

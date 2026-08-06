@@ -158,6 +158,86 @@ func validateWindow(m Merged, w Window) []Problem {
 			problems = append(problems, m.problem(windowField(w.Name, "cwd"), msg))
 		}
 	}
+	problems = append(problems, validatePanes(m, w)...)
+	return problems
+}
+
+// validatePanes checks one window's additional panes. The rules mirror
+// validateWindow where they carry over; there is no numeric-name rule
+// because panes are never addressed by name in a tmux target, and no
+// location rule because panes inherit the window's location by design.
+//
+// Duplicates are checked here rather than in duplicateWindows: panes
+// merge as a unit, so the merged window's list comes verbatim from one
+// layer and survives to the normalized config intact. A duplicated list
+// in a layer that a later layer replaced is deliberately not reported —
+// the whole list was overridden, exactly as an overridden bad agent in
+// the mode trio goes unreported; defaults.yaml read on its own is still
+// covered because ValidateDefaults normalizes and validates that single
+// layer, which reaches this check.
+func validatePanes(m Merged, w Window) []Problem {
+	var problems []Problem
+	seen := map[string]bool{}
+	reported := map[string]bool{}
+	var focused []string
+	for _, p := range w.Panes {
+		pane := fmt.Sprintf("windows[%s].panes[%s]", w.Name, p.Name)
+
+		if !windowNamePattern.MatchString(p.Name) {
+			problems = append(problems, m.problem(pane, fmt.Sprintf(
+				"pane %q of window %q has an invalid name; use characters from [A-Za-z0-9._-]",
+				p.Name, w.Name)))
+		}
+		switch {
+		case !seen[p.Name]:
+			seen[p.Name] = true
+		case !reported[p.Name]:
+			reported[p.Name] = true
+			problems = append(problems, m.problem(pane, fmt.Sprintf(
+				"pane %q of window %q is defined more than once", p.Name, w.Name)))
+		}
+
+		var modes []string
+		if p.Agent != nil {
+			modes = append(modes, "agent")
+		}
+		if p.Command != nil {
+			modes = append(modes, "command")
+		}
+		if p.Shell {
+			modes = append(modes, "shell")
+		}
+		if len(modes) != 1 {
+			detail := "it sets none"
+			if len(modes) > 1 {
+				detail = "it sets " + strings.Join(modes, " and ")
+			}
+			problems = append(problems, m.problem(pane, fmt.Sprintf(
+				"pane %q of window %q must set exactly one of agent, command, or shell: true (%s)",
+				p.Name, w.Name, detail)))
+		}
+		if p.Agent != nil && strings.TrimSpace(*p.Agent) == "" {
+			problems = append(problems, m.problem(pane+".agent", fmt.Sprintf(
+				"pane %q of window %q has an empty agent", p.Name, w.Name)))
+		}
+		if p.Command != nil && strings.TrimSpace(*p.Command) == "" {
+			problems = append(problems, m.problem(pane+".command", fmt.Sprintf(
+				"pane %q of window %q has an empty command", p.Name, w.Name)))
+		}
+		if p.Cwd != nil {
+			if msg := checkContained(fmt.Sprintf("pane %q of window %q cwd", p.Name, w.Name), *p.Cwd); msg != "" {
+				problems = append(problems, m.problem(pane+".cwd", msg))
+			}
+		}
+		if p.Focus {
+			focused = append(focused, p.Name)
+		}
+	}
+	if len(focused) > 1 {
+		problems = append(problems, m.problem(fmt.Sprintf("windows[%s].panes", w.Name), fmt.Sprintf(
+			"more than one pane of window %q sets focus: %s",
+			w.Name, strings.Join(focused, ", "))))
+	}
 	return problems
 }
 

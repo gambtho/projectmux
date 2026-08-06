@@ -5,6 +5,16 @@ import (
 	"testing"
 )
 
+// validConfig returns the minimal Config that validate accepts with no
+// problems: a supported version and a positive start timeout. Tests that
+// exercise one facet build on this rather than repeating the boilerplate.
+func validConfig() Config {
+	return Config{
+		Version:      SchemaVersion,
+		DevContainer: DevContainer{StartTimeout: Duration(DefaultStartTimeout)},
+	}
+}
+
 // validateDefaults loads a defaults document and validates it standalone,
 // the way doctor examines an installation with no workspace files.
 func validateDefaults(t *testing.T, body string) []string {
@@ -71,6 +81,68 @@ func TestValidateDefaultsReportsProblemsInWhatItStates(t *testing.T) {
 			// An omitted version is supplied, never reported.
 			if strings.Contains(joined, "version is required") {
 				t.Errorf("an omitted version was reported: %v", problems)
+			}
+		})
+	}
+}
+
+func TestValidatePanes(t *testing.T) {
+	str := func(s string) *string { return &s }
+
+	cases := []struct {
+		name  string
+		panes []Pane
+		want  string // substring of the expected problem message; "" = valid
+	}{
+		{"default is valid", []Pane{{Name: "shell", Shell: true}}, ""},
+		{"empty is valid", []Pane{}, ""},
+		{"no mode", []Pane{{Name: "p1"}},
+			`pane "p1" of window "dev" must set exactly one of agent, command, or shell: true`},
+		{"two modes", []Pane{{Name: "p1", Agent: str("claude"), Shell: true}},
+			`pane "p1" of window "dev" must set exactly one of agent, command, or shell: true`},
+		{"empty agent", []Pane{{Name: "p1", Agent: str("  ")}},
+			`pane "p1" of window "dev" has an empty agent`},
+		{"empty command", []Pane{{Name: "p1", Command: str("")}},
+			`pane "p1" of window "dev" has an empty command`},
+		{"bad name", []Pane{{Name: "sp ace", Shell: true}},
+			`invalid name`},
+		{"absolute cwd", []Pane{{Name: "p1", Shell: true, Cwd: str("/etc")}},
+			`must be relative to the worktree`},
+		{"escaping cwd", []Pane{{Name: "p1", Shell: true, Cwd: str("../out")}},
+			`must not escape the worktree`},
+		{"duplicate names", []Pane{{Name: "p1", Shell: true}, {Name: "p1", Shell: true}},
+			`pane "p1" of window "dev" is defined more than once`},
+		{"two focused", []Pane{
+			{Name: "p1", Shell: true, Focus: true},
+			{Name: "p2", Shell: true, Focus: true}},
+			`more than one pane of window "dev" sets focus`},
+	}
+
+	// validate's version check reads m.Layer.Version, not cfg.Version, so an
+	// empty Merged always reports "version is required" regardless of cfg;
+	// set it here the way a real caller (ValidateDefaults, Load) does.
+	version := SchemaVersion
+	m := Merged{Layer: Layer{Version: &version}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Windows = []Window{{Name: "dev", Shell: true, Panes: tc.panes}}
+			problems := validate(m, cfg)
+			if tc.want == "" {
+				if len(problems) != 0 {
+					t.Fatalf("expected valid, got %v", problems)
+				}
+				return
+			}
+			found := false
+			for _, p := range problems {
+				if strings.Contains(p.Message, tc.want) {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("problems %v\nmissing %q", problems, tc.want)
 			}
 		})
 	}
