@@ -19,9 +19,13 @@ jobs:
         # promises, plus the current stable release to catch drift early.
         go: ["1.25.x", "stable"]
     steps:
-      - uses: actions/checkout@v4
+      # Pinned to immutable commits rather than mutable tags, matching the
+      # other workflows. Dependabot keeps the pins current via the
+      # github-actions ecosystem; major bumps arrive as individual PRs because
+      # its group covers only minor and patch.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go }}
           check-latest: true
