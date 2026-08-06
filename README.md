@@ -10,14 +10,14 @@ match that description.
 
 ## Status: alpha
 
-**This is an early alpha and the current build is read-only.** The only
-implemented command is `projectmux config`, which loads, merges, validates, and
-prints the effective configuration for a workspace. Nothing yet creates,
-attaches to, or modifies a tmux session or a container.
+**The command surface is complete; the contracts are not yet stable.**
+ProjectMux opens, attaches to, stops, and reports on workspaces, starts
+containers at boot, and diagnoses its own installation. Every command listed
+below works.
 
 Breaking changes to the configuration schema, the command surface, and the exit
 codes should be expected while the version remains below 1.0. There is no
-migration support.
+migration support, and `v0.x` builds are published as prereleases.
 
 Two things are compatibility contracts even during the alpha:
 
@@ -32,11 +32,49 @@ Human-readable output is deliberately *not* a contract. Parse `--json` instead.
 Linux and WSL2 are the supported platforms for v1. macOS and native Windows are
 not supported and are not currently being tested.
 
-ProjectMux expects `git` on `PATH`. Later slices will additionally require
-`tmux` and, for container-backed windows, a Docker-compatible runtime and the
-Dev Containers CLI. The current read-only slice needs none of those.
+ProjectMux requires `git` and `tmux` on `PATH`. Container-backed windows
+additionally require a Docker-compatible runtime and the Dev Containers CLI;
+workspaces that keep every window on the host need neither.
 
-## Install and build
+`projectmux doctor` reports which of these it can find, and their versions.
+
+## Install
+
+### From a release
+
+Releases publish static `linux/amd64` and `linux/arm64` binaries with a
+`SHA256SUMS` file. Download both, verify, then install:
+
+```sh
+VERSION=v0.1.0
+ARCH=amd64   # or arm64
+BASE=https://github.com/gambtho/projectmux/releases/download/$VERSION
+
+curl -fsSLO $BASE/projectmux-linux-$ARCH
+curl -fsSLO $BASE/SHA256SUMS
+
+sha256sum --check --ignore-missing SHA256SUMS
+
+mkdir -p ~/.local/bin
+install -m 0755 projectmux-linux-$ARCH ~/.local/bin/projectmux
+```
+
+`--ignore-missing` lets you verify the one binary you downloaded against the
+file covering both. Verification is the point of publishing checksums — if
+`sha256sum` does not print `OK`, do not install the binary.
+
+While the version is below 1.0, releases are marked as prereleases.
+
+### With `go install`
+
+```sh
+go install github.com/gambtho/projectmux/cmd/projectmux@latest
+```
+
+The binary reports its version correctly when installed this way; see
+[`version`](docs/commands.md#projectmux-version).
+
+### From source
 
 ```sh
 git clone https://github.com/gambtho/projectmux
@@ -126,28 +164,40 @@ or `host` at load time.
 
 ## Usage
 
-```text
-projectmux config [--json] [--compact] [<workspace>]
-```
-
-With no argument, the workspace is resolved from the current directory. With an
-argument, it is looked up by name under the configured `repository_roots`,
-including linked worktrees kept in the conventional `.worktrees/` and
-`.claude/worktrees/` directories.
-
 ```sh
-projectmux config                # human-readable summary of the current tree
-projectmux config --json         # the versioned JSON envelope
-projectmux config --compact      # the same envelope on one line, implies --json
-projectmux config slabledger     # look a workspace up by name
+cd ~/src/slabledger
+projectmux open          # create the session if needed, then attach
+projectmux status        # what is running, and what would change
+projectmux stop          # end the session
 ```
 
-Alongside the configuration itself, the output reports the derived workspace
-identity: a stable ID for the worktree path, the repository slug, the proposed
-tmux session name, whether the tree is the repository's primary one, and a
-`sha256:`-prefixed digest of the normalized configuration. The digest is stable
-across cosmetic YAML edits and map ordering, so later slices can use it to tell
-real configuration drift from reformatting.
+`projectmux <workspace>` with no command is shorthand for `open`, so
+`projectmux slabledger` opens that workspace from anywhere.
+
+### Commands
+
+| Command | What it does |
+| --- | --- |
+| [`open`](docs/commands.md#projectmux-open) | observe, ensure, record, and attach the workspace session |
+| [`attach`](docs/commands.md#projectmux-attach) | attach to a live session; never creates one |
+| [`stop`](docs/commands.md#projectmux-stop) | end the session, and with `--container` its container |
+| [`autostart`](docs/commands.md#projectmux-autostart) | start containers for registered primary worktrees at boot |
+| [`config`](docs/commands.md#projectmux-config) | print the merged configuration, or `--validate` it |
+| [`list`](docs/commands.md#projectmux-list) | recorded workspaces and live identity-carrying sessions |
+| [`status`](docs/commands.md#projectmux-status) | observe one workspace and explain drift |
+| [`doctor`](docs/commands.md#projectmux-doctor) | diagnose dependencies, config, state, and drift |
+| [`version`](docs/commands.md#projectmux-version) | print the version |
+
+Every command that produces a report accepts `--json` for a versioned envelope
+and `--compact` for that envelope on one line.
+
+**[Full command reference →](docs/commands.md)** — flags, arguments, real
+output, and the exit code each command returns.
+
+Commands that accept `<workspace>` resolve it from the current directory when
+you omit it, or look it up by name under the configured `repository_roots`,
+including linked worktrees in the conventional `.worktrees/` and
+`.claude/worktrees/` directories.
 
 ### Exit codes
 
@@ -159,6 +209,7 @@ real configuration drift from reformatting.
 | 3 | the workspace name matched more than one worktree |
 | 4 | the workspace name matched no worktree |
 | 5 | invalid configuration |
+| 6 | the plan refused: a conflict or uncertainty; do not blindly retry |
 
 ## Relationship to tmux and Dev Containers
 
@@ -180,9 +231,12 @@ The design goal is that a workspace remains usable without ProjectMux. Removing
 it should leave a working repository, a working tmux, and a working Dev
 Container.
 
-## Design
+## Documentation
 
-The full design document lives at [`docs/design.md`](docs/design.md).
+- [Command reference](docs/commands.md) — every command, its flags, its output,
+  and its exit codes.
+- [Design](docs/design.md) — the full design document: architecture, identity
+  and state, reconciliation, and the decisions behind them.
 
 ## License
 

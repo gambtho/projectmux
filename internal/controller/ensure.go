@@ -65,9 +65,10 @@ func (e *ContainerWindowError) Error() string {
 }
 
 // ErrContainerActionUnsupported reports a plan requiring container
-// support this build does not have. The gate is capability-shaped: a
-// controller with a container actuator (a later slice) executes these
-// actions instead of refusing, without changes here.
+// support this controller was not given. The gate is capability-shaped
+// rather than build-shaped: a controller constructed with a container
+// actuator executes these actions instead of refusing, with no changes
+// here. It fires when one was not supplied.
 var ErrContainerActionUnsupported = errors.New(
 	"this workspace requires container support, which is not implemented in this build")
 

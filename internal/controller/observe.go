@@ -10,9 +10,8 @@ import (
 	"github.com/gambtho/projectmux/internal/state"
 )
 
-// Controller observes, plans, and (in later slices) ensures, stops, and
-// reports a workspace. It depends on interfaces rather than subprocess
-// details.
+// Controller observes, plans, ensures, and stops a workspace. It depends on
+// interfaces rather than subprocess details.
 type Controller struct {
 	Store      Store
 	Sessions   SessionObserver

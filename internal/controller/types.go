@@ -1,7 +1,8 @@
 // Package controller owns the workspace domain types, the interfaces it
-// consumes, snapshot assembly (Observe), and pure planning (BuildPlan).
-// It depends on interfaces rather than subprocess details; adapters are
-// later slices.
+// consumes, snapshot assembly (Observe), pure planning (BuildPlan), and
+// reconciliation (Ensure, Stop). It depends on interfaces rather than
+// subprocess details; the adapters that satisfy them live in internal/tmux,
+// internal/container, and internal/state.
 package controller
 
 // The tmux session-scoped identity keys, reused verbatim from the Phase 1

@@ -1,0 +1,222 @@
+name: Release
+
+# A tag is not a review.
+#
+# A `v*` tag can point at any commit, and GitHub runs the copy of this file at
+# that commit. Tag-push alone would therefore hand release authority to code
+# that never passed review. Three controls apply, in decreasing order of how
+# much they actually protect:
+#
+#   1. The `release` environment on the publish job, with required reviewers.
+#      This is the real boundary: it is enforced server-side from repository
+#      settings and cannot be edited by the tagged commit.
+#   2. Least privilege. `verify` builds with contents: read; only `publish`
+#      receives contents: write, and it does nothing but upload what `verify`
+#      produced.
+#   3. The ancestry check below. It catches the honest mistake of tagging a
+#      branch, and nothing more — it lives in the file an attacker would
+#      already control, so it is advisory.
+#
+# A reader who implements 2 and 3 and skips 1 has bought almost nothing: both
+# are self-attestations by the code under suspicion.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+# One release at a time, per tag.
+#
+# Runs are never cancelled: a cancelled publish would fire its cleanup trap
+# and delete a draft it no longer owns. Two tags pushed seconds apart get
+# distinct groups and proceed independently, which is correct — they are
+# different releases. The group exists so a re-run of the *same* tag cannot
+# race the run already publishing it, where one run's cleanup could delete the
+# other's finished release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: "1.25.x"
+
+jobs:
+  verify:
+    name: Verify and build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The ancestry check needs history, not just the tagged commit.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Tag must be on the default branch
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA is not reachable from origin/main."
+            echo "Tags must point at reviewed commits that have landed on main."
+            exit 1
+          fi
+
+      - name: Formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Module tidiness
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race ./...
+
+      - name: Vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          version="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            GOOS=linux GOARCH="$arch" go build \
+              -trimpath \
+              -ldflags "-s -w -X github.com/gambtho/projectmux/internal/cli.version=${version}" \
+              -o "dist/projectmux-linux-${arch}" \
+              ./cmd/projectmux
+          done
+
+      - name: Confirm the binaries are static
+        run: |
+          # CGO_ENABLED=0 is a release gate, not an aspiration (design §11).
+          # A dynamically linked binary here means the build silently picked up
+          # cgo and would fail on a host without the matching libc.
+          for f in dist/projectmux-linux-*; do
+            if file "$f" | grep -q "dynamically linked"; then
+              echo "::error::$f is dynamically linked; expected a static binary"
+              file "$f"
+              exit 1
+            fi
+          done
+          file dist/*
+
+      - name: Confirm the stamped version
+        run: |
+          # The amd64 binary runs on the runner, so the stamp can be checked
+          # rather than assumed. arm64 cannot be executed here.
+          got=$(./dist/projectmux-linux-amd64 version)
+          if [ "$got" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::version reports '$got', expected '${GITHUB_REF_NAME}'"
+            exit 1
+          fi
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum projectmux-linux-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-artifacts
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: verify
+    runs-on: ubuntu-latest
+    # The real trust boundary. Configured in repository settings, not here.
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-artifacts
+          path: dist
+
+      - name: Publish, draft first
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+
+          # Publication is atomic: assemble a draft, verify it, publish last.
+          # A failure partway through leaves an invisible draft rather than a
+          # public release missing a binary or carrying checksums that do not
+          # describe what shipped — the state in which someone downloads a
+          # binary that fails verification and blames the checksum file.
+          # Cleanup deletes only a draft this run created, and only while it is
+          # still a draft.
+          #
+          # Both guards are load-bearing. Re-running this workflow for a tag
+          # that already published makes `gh release create` fail, which under
+          # `set -e` jumps straight to the trap — and a cleanup that checked
+          # only "did we publish?" would then delete the existing, public
+          # release. draft_created answers "is this ours"; isDraft answers "is
+          # it still unpublished". Neither alone is enough.
+          cleanup() {
+            [ "${published:-no}" = "yes" ] && return 0
+            [ "${draft_created:-no}" = "yes" ] || return 0
+            if [ "$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)" != "true" ]; then
+              echo "Release $tag is not a draft; leaving it alone."
+              return 0
+            fi
+            echo "Publishing failed; deleting the draft so a retry starts clean."
+            # --cleanup-tag is deliberately not passed: the tag is what
+            # triggered this run and must survive for a retry. Deleting the
+            # draft release is the whole cleanup.
+            gh release delete "$tag" --yes 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          prerelease=""
+          case "$tag" in
+            v0.*) prerelease="--prerelease" ;;
+          esac
+
+          # shellcheck disable=SC2086  # $prerelease is a flag or empty by design
+          gh release create "$tag" \
+            --draft \
+            $prerelease \
+            --title "$tag" \
+            --generate-notes
+          draft_created=yes
+
+          gh release upload "$tag" \
+            dist/projectmux-linux-amd64 \
+            dist/projectmux-linux-arm64 \
+            dist/SHA256SUMS
+
+          # Verify what was actually uploaded, not what we meant to upload.
+          mkdir -p verify && cd verify
+          gh release download "$tag" --pattern 'projectmux-linux-*'
+          gh release download "$tag" --pattern 'SHA256SUMS'
+          sha256sum --check SHA256SUMS
+          cd ..
+
+          gh release edit "$tag" --draft=false
+          published=yes
+          echo "Published $tag"
