@@ -170,3 +170,43 @@ func TestMergeLeavesUnsetFieldsUnattributed(t *testing.T) {
 		t.Errorf("a field of an absent window was credited to %+v", got)
 	}
 }
+
+// A layer that states panes credits the whole list to itself, so the reader
+// who opts out with "panes: []" is pointed at the file that did it.
+func TestMergeCreditsPanes(t *testing.T) {
+	shell := true
+	empty := []PaneLayer{}
+	base := Source{File: "defaults.yaml", Layer: Layer{Windows: []WindowLayer{
+		{Name: "dev", Shell: &shell},
+	}}}
+	over := Source{File: "workspace.yaml", Layer: Layer{Windows: []WindowLayer{
+		{Name: "dev", Panes: &empty},
+	}}}
+	m := mergeLayers(mergeLayers(Merged{}, base), over)
+	origin := m.origins["windows[dev].panes"]
+	if origin.File != "workspace.yaml" {
+		t.Errorf("windows[dev].panes should be credited to workspace.yaml, got %+v", origin)
+	}
+}
+
+// The origin fallback ladder (originFor + enclosingWindow in
+// internal/config/origin.go) reduces a field via its LAST bracket:
+// "windows[dev].panes[mon].cwd" falls back to "windows[dev].panes[mon]",
+// never to "windows[dev].panes". Each pane path must therefore be credited
+// itself, or nested pane problems print with no position.
+func TestMergeCreditsEachPanePath(t *testing.T) {
+	cmd := "htop"
+	panes := []PaneLayer{{Name: "mon", Command: &cmd}}
+	over := Source{File: "workspace.yaml", Layer: Layer{Windows: []WindowLayer{
+		{Name: "dev", Panes: &panes},
+	}}}
+	m := mergeLayers(Merged{}, over)
+	for _, field := range []string{
+		"windows[dev].panes[mon]",
+		"windows[dev].panes[mon].cwd",
+	} {
+		if o, ok := m.originFor(field); !ok || o.File != "workspace.yaml" {
+			t.Errorf("originFor(%s) = %+v %v, want workspace.yaml", field, o, ok)
+		}
+	}
+}

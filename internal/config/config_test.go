@@ -789,3 +789,48 @@ func TestDigestZeroWindowConfigCarriesNoPanes(t *testing.T) {
 		t.Errorf("zero-window config must not encode panes: %s", encoded)
 	}
 }
+
+func TestMergePanesAsUnit(t *testing.T) {
+	shell := true
+	cmd := "make watch"
+	basePanes := []PaneLayer{{Name: "watch", Command: &cmd}}
+	base := Source{File: "defaults.yaml", Layer: Layer{Windows: []WindowLayer{
+		{Name: "dev", Shell: &shell, Panes: &basePanes},
+	}}}
+
+	t.Run("absent inherits", func(t *testing.T) {
+		over := Source{File: "workspace.yaml", Layer: Layer{Windows: []WindowLayer{
+			{Name: "dev"},
+		}}}
+		m := mergeLayers(mergeLayers(Merged{}, base), over)
+		got := m.Layer.Windows[0].Panes
+		if got == nil || len(*got) != 1 || (*got)[0].Name != "watch" {
+			t.Errorf("absent panes must inherit the base list, got %#v", got)
+		}
+	})
+
+	t.Run("empty replaces", func(t *testing.T) {
+		empty := []PaneLayer{}
+		over := Source{File: "workspace.yaml", Layer: Layer{Windows: []WindowLayer{
+			{Name: "dev", Panes: &empty},
+		}}}
+		m := mergeLayers(mergeLayers(Merged{}, base), over)
+		got := m.Layer.Windows[0].Panes
+		if got == nil || len(*got) != 0 {
+			t.Errorf("panes: [] must replace the inherited list, got %#v", got)
+		}
+	})
+
+	t.Run("stated replaces whole list", func(t *testing.T) {
+		other := "htop"
+		overPanes := []PaneLayer{{Name: "mon", Command: &other}}
+		over := Source{File: "workspace.yaml", Layer: Layer{Windows: []WindowLayer{
+			{Name: "dev", Panes: &overPanes},
+		}}}
+		m := mergeLayers(mergeLayers(Merged{}, base), over)
+		got := m.Layer.Windows[0].Panes
+		if got == nil || len(*got) != 1 || (*got)[0].Name != "mon" {
+			t.Errorf("a stated panes list must replace, not merge, got %#v", got)
+		}
+	})
+}

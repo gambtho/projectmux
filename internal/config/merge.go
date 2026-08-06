@@ -157,6 +157,20 @@ func creditWindow(out *Merged, over Source, w WindowLayer, introduced bool) {
 	if w.Focus != nil {
 		out.credit(over, prefix+".focus")
 	}
+	if w.Panes != nil {
+		out.credit(over, prefix+".panes")
+		// The origin fallback ladder reduces a field via its last bracket,
+		// so "…panes[p].cwd" falls back to "…panes[p]" — never to the panes
+		// key. Credit every pane path to the panes key's position: the whole
+		// list comes from this one layer (unit merge), so that position is
+		// true for all of them, exactly like the mode trio above.
+		for _, p := range *w.Panes {
+			pane := prefix + ".panes[" + p.Name + "]"
+			out.creditAs(over.originOf(prefix+".panes"), pane,
+				pane+".agent", pane+".command", pane+".shell",
+				pane+".cwd", pane+".focus")
+		}
+	}
 }
 
 // modeKey names the mode key this layer wrote, for attributing the unit.
@@ -188,6 +202,13 @@ func mergeWindow(base, over WindowLayer) WindowLayer {
 	}
 	if over.Focus != nil {
 		out.Focus = over.Focus
+	}
+	// Panes merges as a unit, like the mode trio: a layer that states the
+	// key replaces the whole list. Per-pane merging would make `panes: []`
+	// merge nothing and silently inherit, so opting out would be
+	// impossible to express.
+	if over.Panes != nil {
+		out.Panes = over.Panes
 	}
 	return out
 }
