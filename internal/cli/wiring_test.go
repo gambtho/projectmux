@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -175,7 +176,7 @@ func TestWindowIntentsDerivation(t *testing.T) {
 		t.Fatalf("intents = %+v", intents)
 	}
 	for i := range want {
-		if intents[i] != want[i] {
+		if !reflect.DeepEqual(intents[i], want[i]) {
 			t.Errorf("intent %d = %+v, want %+v", i, intents[i], want[i])
 		}
 	}

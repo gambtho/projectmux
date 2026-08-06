@@ -249,11 +249,29 @@ func renderWindows(intents []WindowIntent, d Desired, container *ContainerObserv
 				ContainerUser: container.ContainerUser,
 				Workdir:       container.Workdir,
 			}
+			panes := make([]PaneSpec, 0, len(in.Panes))
+			for _, p := range in.Panes {
+				// A pane inherits the window's directory unless it sets
+				// its own; inside the container that is the exec relDir,
+				// while the host-side -c stays the worktree, matching the
+				// window itself.
+				relDir := in.RelDir
+				if p.RelDir != "" {
+					relDir = p.RelDir
+				}
+				panes = append(panes, PaneSpec{
+					Name:    p.Name,
+					Command: act.ExecCommand(binding, p.Command, relDir, d.Config.Environment),
+					Dir:     d.Workspace.Worktree,
+					Focus:   p.Focus,
+				})
+			}
 			specs = append(specs, WindowSpec{
 				Name:    in.Name,
 				Command: act.ExecCommand(binding, in.Command, in.RelDir, d.Config.Environment),
 				Dir:     d.Workspace.Worktree,
 				Focus:   in.Focus,
+				Panes:   panes,
 			})
 			continue
 		}
@@ -261,8 +279,18 @@ func renderWindows(intents []WindowIntent, d Desired, container *ContainerObserv
 		if in.RelDir != "" {
 			dir = filepath.Join(d.Workspace.Worktree, in.RelDir)
 		}
+		panes := make([]PaneSpec, 0, len(in.Panes))
+		for _, p := range in.Panes {
+			paneDir := dir
+			if p.RelDir != "" {
+				paneDir = filepath.Join(d.Workspace.Worktree, p.RelDir)
+			}
+			panes = append(panes, PaneSpec{
+				Name: p.Name, Command: p.Command, Dir: paneDir, Focus: p.Focus,
+			})
+		}
 		specs = append(specs, WindowSpec{
-			Name: in.Name, Command: in.Command, Dir: dir, Focus: in.Focus,
+			Name: in.Name, Command: in.Command, Dir: dir, Focus: in.Focus, Panes: panes,
 		})
 	}
 	return specs, nil
