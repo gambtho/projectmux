@@ -155,12 +155,22 @@ this slice adds no third convention.
 Stated because it is already half-solved, and the documentation must not
 overpromise. `versionString()` has three rungs:
 
-1. **Release binary** — `-ldflags -X` stamps the tag; reports `v0.2.0`.
-2. **`go install .../cmd/projectmux@v0.2.0`** — no ldflags, but
-   `debug.ReadBuildInfo()` supplies `Main.Version`; reports `v0.2.0` anyway.
-   This works today.
-3. **Local `go build` from a checkout** — build info reports `(devel)`, which
-   the ladder rejects; reports `dev`.
+1. **Release binary** — `-ldflags -X` stamps the tag; reports `v0.1.0`.
+   Confirmed by building with the flag.
+2. **`go install .../cmd/projectmux@v0.1.0`** — no ldflags, but
+   `debug.ReadBuildInfo()` supplies `Main.Version`; reports `v0.1.0` anyway.
+3. **Local `go build` from a checkout** — reports a **pseudo-version** such as
+   `v0.0.0-20260806051648-1ccf6afb9c41`, which encodes the commit timestamp
+   and hash.
+
+**Corrected against a real run.** This spec originally claimed rung 3 reports
+`dev`, on the assumption that build info yields `(devel)`. It does not: Go
+embeds VCS metadata, so a local build — clean *or* dirty working tree, both
+measured — reports a pseudo-version identifying the exact commit. `dev` appears
+only when no version information exists at all, such as a build from an
+extracted tarball with no git metadata. The documentation states all three
+forms and calls each normal, because "why does my binary say
+`v0.0.0-2026...`" is otherwise a support question.
 
 The release workflow therefore does not create version reporting; it upgrades
 rung 1 from `dev` to a real tag. `docs/commands.md` documents all three,
