@@ -71,6 +71,29 @@ func createArgv(spec controller.SessionSpec) []string {
 		}
 	}
 
+	// Panes split after every window exists; identity keys are already set,
+	// so a mid-chain failure leaves an identity-tagged, recoverable session
+	// (two-pane spec §4). The focused pane's split omits -d — split-window
+	// without -d makes the new pane active — because a pane-index target
+	// would depend on the user's pane-base-index option.
+	for _, w := range spec.Windows {
+		winTarget := escapeChainArg(spec.Name + ":" + w.Name)
+		for _, p := range w.Panes {
+			argv = append(argv, ";", "split-window", "-h")
+			if !p.Focus {
+				argv = append(argv, "-d")
+			}
+			argv = append(argv, "-t", winTarget, "-c", escapeChainArg(p.Dir))
+			argv = append(argv, envArgs(spec.Env)...)
+			if p.Command != "" {
+				argv = append(argv, escapeChainArg(p.Command))
+			}
+		}
+		if len(w.Panes) >= 2 {
+			argv = append(argv, ";", "select-layout", "-t", winTarget, "even-horizontal")
+		}
+	}
+
 	for _, w := range spec.Windows {
 		if w.Focus {
 			// Escape the complete composite target rather than
