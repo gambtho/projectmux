@@ -398,3 +398,74 @@ func TestApplyRefusesASessionWhoseIdentityKeysContradictTheWorkspace(t *testing.
 		t.Errorf("workspace err = %v, want ErrNotFound: a refused session writes nothing", err)
 	}
 }
+
+func TestApplyDryRunMatchesTheRealRunAndWritesNothing(t *testing.T) {
+	ws := projectmux()
+	sess := liveSession(ws, "projectmux")
+	gone := controller.LiveSession{
+		ID:          "$2",
+		Name:        "vanished",
+		WorkspaceID: "2222222222222222222222222222222222222222222222222222222222222222",
+		Slug:        "vanished",
+		Worktree:    "/src/vanished",
+	}
+	planConflict := Conflict{Subject: "ghost", Reason: "two live sessions claim workspace dddd"}
+	newPlan := func() Plan {
+		return Plan{
+			Candidates: []Candidate{
+				{Case: CaseRegister, Session: gone},
+				{Case: CaseRegister, Session: sess},
+			},
+			Conflicts: []Conflict{planConflict},
+		}
+	}
+
+	actual := newHarness()
+	actual.know(ws, "sha256:desired")
+	actual.resolver.errs["/src/vanished"] = errors.New("worktree /src/vanished does not exist")
+	actual.observer.results = []controller.SessionObservation{observing(sess)}
+	actualReport := actual.applier().Apply(context.Background(), newPlan())
+
+	preview := newHarness()
+	preview.know(ws, "sha256:desired")
+	preview.resolver.errs["/src/vanished"] = errors.New("worktree /src/vanished does not exist")
+	counting := &countingStore{Store: preview.fakeStore}
+	preview.store = counting
+	preview.dryRun = true
+	previewReport := preview.applier().Apply(context.Background(), newPlan())
+
+	if !previewReport.DryRun {
+		t.Errorf("dry run DryRun = false, want true")
+	}
+	if actualReport.DryRun {
+		t.Errorf("real run DryRun = true, want false")
+	}
+	// The verdict is the deliverable: a dry run that says "would register"
+	// has established every fact registration depends on except the
+	// outcome of the writes themselves.
+	if !reflect.DeepEqual(previewReport.Registered, actualReport.Registered) {
+		t.Errorf("dry Registered = %+v, real = %+v; they must be identical",
+			previewReport.Registered, actualReport.Registered)
+	}
+	if !reflect.DeepEqual(previewReport.Conflicts, actualReport.Conflicts) {
+		t.Errorf("dry Conflicts = %+v, real = %+v; they must be identical",
+			previewReport.Conflicts, actualReport.Conflicts)
+	}
+	if counting.registers != 0 || counting.adopts != 0 {
+		t.Errorf("dry run wrote: %d registers, %d adopts; want 0 and 0",
+			counting.registers, counting.adopts)
+	}
+	if len(preview.locker.locked) != 0 {
+		t.Errorf("dry run locked %v, want nothing", preview.locker.locked)
+	}
+	if preview.observer.calls != 0 {
+		t.Errorf("dry run called ObserveSession %d times, want 0", preview.observer.calls)
+	}
+	recs, err := preview.fakeStore.Workspaces()
+	if err != nil {
+		t.Fatalf("Workspaces: %v", err)
+	}
+	if len(recs) != 0 {
+		t.Errorf("dry run left %d records, want 0", len(recs))
+	}
+}

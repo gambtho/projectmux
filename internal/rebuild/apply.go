@@ -130,6 +130,14 @@ func (a *Applier) applyCandidate(ctx context.Context, cand Candidate) (*Register
 			"loading the configuration for %q failed: %v", ws.Slug, err)
 	}
 
+	if a.DryRun {
+		// Everything above is read-only, which is exactly what lets a dry
+		// run predict the real run's verdict and exit code (spec §2). A
+		// preview that stopped after pure classification would report a
+		// clean 0 for a vanished worktree the real run refuses.
+		return registeredFor(ws, sess.Name), nil
+	}
+
 	release, err := a.Locker.Lock(ctx, ws.ID)
 	if err != nil {
 		return nil, conflictf(sess.Name, "taking the workspace lock: %v", err)
