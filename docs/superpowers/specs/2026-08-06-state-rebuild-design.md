@@ -50,8 +50,15 @@ No workspace argument: rebuild works over the whole installation, like
 
 It applies by default. That is safe because of two properties established
 below: rebuild only ever inserts state that was missing (§4), and re-running
-it is idempotent (§8). `--dry-run` classifies and reports without writing.
-`list` already serves as a read-only preview of the same drift.
+it is idempotent (§8).
+
+`--dry-run` performs every read-only step of the real run — classification,
+resolution, identity verification, configuration loading — and stops before
+the lock and the two writes. It is a preview rather than a partial pass: a
+dry run that reports a conflict is the conflict the real run would report,
+and a dry run that says "would register" has already established every fact
+registration depends on except the outcome of the writes themselves (§6).
+`list` remains a cheaper read-only view of the same drift.
 
 The name follows §7/§8's own vocabulary rather than introducing a new term,
 so roots rediscovery can extend this command later instead of forcing a
@@ -85,11 +92,19 @@ the digest. Three consequences:
    cannot run there, so `IsPrimary` and the slug are unknowable. That session
    is reported as a conflict and skipped, consistent with doctor already
    flagging it as `worktree no longer exists`.
-2. **Rebuild gets an integrity check for free.** `resolve` derives the ID as
-   `sha256(canonical worktree)`. A derived ID that does not equal the
-   session's `@dev_workspace_id` means the keys are internally inconsistent —
-   a stale key after a tree moved, or a hand-set option. Rebuild refuses that
-   row rather than registering identity it cannot confirm.
+2. **Rebuild gets an integrity check for free, and it checks all three keys.**
+   `resolve` derives the ID as `sha256(canonical worktree)`, along with the
+   slug and the canonical worktree path. Rebuild accepts a session only when
+   the resolved workspace agrees with the live session on *all three* keys —
+   the `controller.SessionBelongsTo` predicate (`plan.go:107-114`), whose own
+   comment states the reason: "a session with the right workspace ID but a
+   contradictory slug or worktree is evidence of corruption or collision, not
+   a match". Checking the derived ID alone would admit a session carrying a
+   stale or hand-set `@dev_slug`, or a non-canonical worktree spelling: it
+   would be registered from resolved values that silently disagree with the
+   live keys, and the *next* rebuild would then report that row as a case-4
+   conflict instead of a clean no-op. Rebuild calls `SessionBelongsTo` rather
+   than restating the rule.
 3. **The digest comes from current configuration.** Registering with today's
    `desired_digest` and a nil `applied_digest` means the next `open` sees
    drift and reconciles — the correct outcome, since the configuration was
@@ -105,14 +120,18 @@ the digest.
 
 ## 4. Classification: fill-only
 
-`internal/cli/list.go:124-142` already distinguishes the cases rebuild meets.
-Sorted by what rebuild would do:
+The vocabulary comes from `internal/cli/list.go:124-142`, which already
+distinguishes claimant count and slug/worktree mismatch. The classification
+below is nevertheless new work rather than reuse: `buildList` never compares a
+sole claimant's name against the recorded `actual_session`, and never detects
+that a live name is some *other* record's `actual_session`, so cases 0, 2, 3,
+and 6 are rebuild's own semantics. Sorted by what rebuild would do:
 
 | # | Situation | Action |
 | --- | --- | --- |
 | 0 | Row exists, `actual_session` already equals the live name | Nothing; not reported |
 | 1 | Live session, no row at all | **Register + adopt** |
-| 2 | Row exists, `actual_session` nil, one live session claims it | **Adopt** |
+| 2 | Row exists, `actual_session` nil, one live session claims it | **Adopt only** |
 | 3 | Row exists with `actual_session` set, live name differs | Conflict, skip |
 | 4 | Live `@dev_worktree`/`@dev_slug` differ from the recorded ones | Conflict, skip |
 | 5 | Two live sessions carry the same `@dev_workspace_id` | Conflict, skip |
@@ -130,8 +149,24 @@ conflict during application (§6) — most commonly a worktree that no longer
 exists (§3), which cannot be detected during classification because
 classification performs no I/O.
 
-**Rebuild never overwrites a recorded value. It only fills in what is
-missing.** A mistaken run therefore costs nothing that was already known.
+**Fill-only is a property of which primitive each case calls, not of the
+primitives themselves.** `RegisterWorkspace` is an upsert whose conflict
+branch overwrites `slug`, `worktree`, `is_primary`, `proposed_session`, and
+`desired_digest` (`store.go:43-49`) — correct for re-registration, wrong for
+repair. Rebuild therefore calls it in **case 1 only**, where no row exists and
+the insert branch runs. Case 2 already has a row and calls `AdoptSessionName`
+alone; it never re-registers, so no recorded field can be rewritten. Cases 3-6
+write nothing, and case 0 has nothing to write.
+
+The one path that could still reach the upsert branch is a race: another
+process registers the workspace between classification and the write. The
+final observation under the lock (§6) closes it — a case-1 candidate whose row
+appeared in the gap is re-classified there as case 2 and adopts instead of
+registering.
+
+Under those rules, **rebuild never overwrites a recorded value. It only fills
+in what is missing.** A mistaken run therefore costs nothing that was already
+known.
 
 This extends rules the codebase already follows rather than inventing one.
 Case 6 is forced by §7 ("Collision resolution and assignment happen in one
@@ -154,8 +189,40 @@ The two damaged-database cases behave differently in the existing code:
 - **Missing.** `openStore` → `state.Open(root)` creates the file and runs
   migrations. Rebuild proceeds against a fresh empty database. Nothing is
   destroyed. This is the primary recovery path.
-- **Corrupt.** `state.Open` fails (SQLITE_CORRUPT / SQLITE_NOTADB). Rebuild
-  cannot obtain a handle.
+- **Corrupt.** Detected *before* the read-write open, not by it.
+
+**`state.Open` is not a corruption test.** It calls `os.MkdirAll`, opens the
+pool, and migrates (`state.go:57-75`); against a database already at the
+current schema, `migrate` needs only a successful `PRAGMA user_version`
+(`migrate.go:64`). Damage elsewhere in the file passes that and surfaces later
+as a generic read failure — mid-run, after rebuild has begun writing.
+
+Rebuild therefore classifies the database the way doctor does, before opening
+it read-write: `state.OpenReadOnly(root)`, which runs `PRAGMA
+integrity_check` (`readonly.go:163-194`), then `Inspection.Usable`.
+
+| `OpenReadOnly` result | Rebuild |
+| --- | --- |
+| `IsMissingDatabase` | Proceed; `state.Open` creates it |
+| `IntegrityErr` set | Refuse, exit 1, with the message below |
+| `FutureSchemaError` | Refuse, exit 1: a newer build wrote this database |
+| `PendingMigrationError` | Proceed; `state.Open` migrates |
+| Incomplete WAL | Proceed; `state.Open` recovers the log |
+| Any other error | Refuse, exit 1: uncertainty, never a guess |
+
+Two rows differ from doctor's handling, both deliberately. A pending migration
+is doctor's finding but rebuild's normal path — doctor must not migrate, and
+rebuild is a mutating command.
+
+The incomplete-WAL case is the harder one. `readonly.go:154-161` refuses a
+`-wal` with no `-shm`, which means a writer died without checkpointing —
+precisely the crash rebuild exists to recover from, so refusing there would
+refuse the main case. But it is currently an untyped `fmt.Errorf`,
+indistinguishable from a permission failure. **This slice adds a typed
+`state.IncompleteWALError`** beside the existing typed errors in `readonly.go`
+and returns it from `incompleteWAL`. Rebuild treats it as proceed; every other
+error is a refusal. Doctor's behavior is unchanged — it reports the message
+either way.
 
 **Rebuild refuses on a corrupt database.** It does not move the file aside.
 That keeps this slice purely additive and keeps `stop` the only destructive
@@ -191,12 +258,31 @@ This is where §4's cases are sorted, and it is fully testable from
 literals — which matters, because the case analysis is the part most likely
 to be wrong.
 
-**Application** performs, per candidate: `resolve.Resolve("", nil, worktree)`
-→ verify the derived ID equals the session's key → `config.Load` for the
-digest → take the per-workspace lock → `RegisterWorkspace` →
-`AdoptSessionName`. A failure at any step becomes a conflict in the report
-rather than aborting the batch, matching how `autostart` treats one
-workspace's failure.
+**Application** performs, per candidate, in this order:
+
+1. `resolve.Resolve("", nil, worktree)`.
+2. `controller.SessionBelongsTo(session, workspace)` — all three keys (§3).
+3. `config.Load` for the desired digest.
+4. Take the per-workspace lock.
+5. **Re-observe under the lock:** `ObserveSession(SessionQuery{WorkspaceID,
+   CandidateNames: []string{session.Name}})`, and re-read the workspace's row.
+6. Re-classify from that observation with the same `classify`.
+7. Write what the re-classification says: case 1 → `RegisterWorkspace` then
+   `AdoptSessionName`; case 2 → `AdoptSessionName` only; anything else →
+   report a conflict and write nothing.
+
+Steps 1-3 are read-only, which is what lets `--dry-run` stop after step 3 and
+still predict the real run's verdict (§2). A failure at any step becomes a
+conflict in the report rather than aborting the batch, matching how
+`autostart` treats one workspace's failure.
+
+**Partial application.** `RegisterWorkspace` and `AdoptSessionName` are
+separate transactions, so a case-1 candidate can register and then fail to
+adopt, leaving a row with a nil `actual_session`. That state needs no new
+atomic primitive: it is exactly case 2, so the next rebuild completes it. It
+is reported as a conflict at the time, naming both what was written and what
+was not — the operator is never told a workspace was registered when only half
+of it was.
 
 **Report** is `Report{Registered []Registered, Conflicts []Conflict}`,
 deterministically ordered by slug then session name.
@@ -205,30 +291,40 @@ Dependencies are interfaces so each half is testable without a live
 environment, and the `cli` wiring uses package variables as in
 `wiring.go:28-44` so command tests can substitute fakes.
 
-**Flow:** load defaults → open store (corrupt refuses here, §5) → list live
-sessions → read records → classify → if `--dry-run`, render and stop →
-otherwise apply each candidate under its own lock → render.
+**Flow:** load defaults → inspect the database read-only and classify it (§5)
+→ open the store read-write → list live sessions → read records → classify →
+if `--dry-run`, run steps 1-3 per candidate, render, and stop → otherwise
+apply each candidate through steps 1-7 under its own lock → render.
 
 **This slice adds no new state mutations.** `RegisterWorkspace` and
 `AdoptSessionName` both already exist and are already covered;
 `internal/controller/fake` already implements all three methods rebuild
-needs. Rebuild is new composition of existing primitives.
+needs. Its only change to an existing package is the typed
+`state.IncompleteWALError` (§5), which adds no behavior of its own. Rebuild is
+new composition of existing primitives.
 
 ### Concurrency
 
-Classification is a snapshot, and the workspace lock is taken per candidate at
-apply time, so another process can register in the gap. This degrades safely
-without a global rebuild lock:
+The first classification is a snapshot taken outside any lock, so another
+process can register a workspace, rename a session, or kill one in the gap.
+What closes that gap is the rule the lock package states for every mutating
+command — take the lock *before* the final observation and hold it through the
+resulting state commit (`lock.go:1-5`). Rebuild follows it: the observation in
+step 5 above is taken after the lock, and it is the one the writes are decided
+from. The initial pass is a work list, not evidence.
 
-- `RegisterWorkspace` is an upsert, so a duplicate registration is idempotent
-  and preserves `registered_at`, the assigned session name, the applied
-  digest, and any binding (`store.go:26-30`).
-- `AdoptSessionName` resolves the name in one transaction and returns
-  `SessionNameConflictError` if another workspace won the race — already a
-  conflict rebuild reports.
+Two residual races remain, both benign:
 
-The store's transactional guarantees cover the race; a global lock would add a
-new failure mode for no gain.
+- **The session dies between step 5 and the write.** The row then records a
+  session name that is no longer live — the ordinary state every crash
+  produces, which `list`, `doctor`, and the next `open` already handle.
+- **Another workspace wins the name.** `AdoptSessionName` resolves the name in
+  one transaction and returns `SessionNameConflictError` — already a conflict
+  rebuild reports.
+
+A global rebuild lock would add a new failure mode for no gain: rebuild's
+writes are per-workspace, and per-workspace locking is what every other
+mutating command uses.
 
 ## 7. Exit codes and output
 
@@ -267,8 +363,12 @@ would hide the conflicts in exactly the case they need reading.
 
 **`--dry-run` uses the same codes.** Conflicts found in a dry run still exit
 6: the exit code describes the state of the world, not whether anything was
-written. Otherwise `--dry-run` would report a clean 0 for a situation the real
-run refuses.
+written. That holds only because a dry run performs the read-only steps 1-3
+(§6) — a vanished worktree fails in `resolve`, and a broken workspace
+configuration fails in `config.Load`, so both reach the dry run's exit code
+too. A dry run that stopped after pure classification would report a clean 0
+for situations the real run refuses, which is a preview that misleads in
+exactly the case worth previewing.
 
 JSON envelope (additive to `schema_version: 1`):
 
@@ -297,7 +397,7 @@ per conflict; that layout is not a compatibility contract.
 
 ## 8. Testing
 
-Three layers.
+Five layers.
 
 **Classification — table tests, pure, exhaustive.** All seven cases from
 literals, plus the precedence order. Every case needs a test that fails if it
@@ -312,9 +412,28 @@ case 5, not case 6.
 so these need real repositories; `internal/resolve/resolve_test.go:14-45`
 already has `git`/`makeRepo`/`addWorktree` helpers to lift. Mocking git would
 test the mock. Cases: primary versus linked worktree registering with the
-correct `IsPrimary`; the derived-ID mismatch refusal; a vanished worktree
-becoming a conflict; one workspace's configuration failure not aborting the
-batch.
+correct `IsPrimary`; a session whose `@dev_slug` or `@dev_worktree` disagrees
+with the resolved workspace being refused even though the derived ID matches
+(§3); a vanished worktree becoming a conflict; one workspace's configuration
+failure not aborting the batch; and a `--dry-run` over those same fixtures
+reporting the identical conflicts and exit code as the real run, with the
+store observing no writes.
+
+**Lock-time reclassification — fake observer, real store.** The step-5
+observation is where the fill-only guarantee actually lives, so it needs its
+own tests: an observer whose second call differs from its first must change
+the write. A case-1 candidate whose row appears in the gap must adopt rather
+than register, leaving every pre-existing field byte-identical — the
+assertion that would fail if application skipped straight to
+`RegisterWorkspace`. A session that vanishes between the two observations must
+become a conflict, not a registration. A register-then-failed-adopt must be
+reported as a conflict naming both halves, and a second run over that row must
+complete it as case 2.
+
+**Corruption — real files.** Overwrite `state.db` with garbage and assert
+rebuild refuses with exit 1, names all three paths, and left the file
+untouched. Separately, a `-wal` with no `-shm` must *proceed* rather than
+refuse (§5) — the crash case rebuild exists for.
 
 **Lifecycle — real tmux, end to end.** One new test in
 `internal/cli/lifecycle_test.go` performing the actual disaster: `open` a
@@ -325,10 +444,11 @@ second run is the idempotence claim and the one most likely to regress.
 
 **Verification before any completion claim:** `gofmt -l .`, `go vet ./...`,
 `CGO_ENABLED=0 go build ./cmd/projectmux`, `go test ./... -count=1 -race`.
-Plus mutation testing of the load-bearing assertions — specifically, inverting
-the fill-only rule so classification overwrites case 3, and confirming a test
-actually fails. A test that passes when the safety rule is inverted is not
-testing the safety rule.
+Plus mutation testing of the load-bearing assertions — inverting the fill-only
+rule so classification overwrites case 3, and separately making case 2 call
+`RegisterWorkspace` instead of adopting, then confirming a test actually fails
+in each. A test that passes when the safety rule is inverted is not testing
+the safety rule.
 
 ## 9. Documentation
 
@@ -347,5 +467,9 @@ testing the safety rule.
   fill-only default should not change.
 - **Corrupt-database recovery stays manual** (§5). `--replace-corrupt` is the
   follow-up if that proves annoying.
+- **Registration and adoption are not atomic** (§6). The half-written row is
+  benign and self-healing, but it is a state a reader can observe. If it turns
+  out to be common, a combined `RegisterAndAdopt` transaction in `state` is
+  the clean fix; adding one speculatively is not.
 - **Record pruning and roots rediscovery** remain open, each deserving its own
   slice.
