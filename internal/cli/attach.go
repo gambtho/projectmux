@@ -56,6 +56,13 @@ func runAttach(ctx context.Context, args []string, stdout io.Writer) error {
 	if *asJSON {
 		return writeJSON(stdout, env, *compact)
 	}
+	// Refuse before announcing: a successful attach execs away and can
+	// never print afterwards, so the line has to come first — which
+	// makes "attaching to X" a lie if we then decline. Everything the
+	// refusal depends on is knowable here.
+	if err := crossServerRefusal(); err != nil {
+		return err
+	}
 	fmt.Fprintf(stdout, "attaching to %s\n", session)
 	return attachTerminal(ctx, session)
 }

@@ -179,9 +179,24 @@ daemon, or Dev Containers CLI.
 ## Configuration
 
 Configuration lives under `$XDG_CONFIG_HOME/projectmux` (falling back to
-`~/.config/projectmux` when `XDG_CONFIG_HOME` is unset). Set
-`PROJECTMUX_CONFIG_ROOT` to point at a different directory; this is intended for
-tests and for trying out a configuration without disturbing your own.
+`~/.config/projectmux` when `XDG_CONFIG_HOME` is unset), and state under
+`$XDG_STATE_HOME/projectmux` (falling back to `~/.local/state/projectmux`).
+
+Three environment variables override where ProjectMux looks. Each is intended
+for tests, and for running a second ProjectMux beside a working one without
+disturbing it:
+
+| Variable | Overrides |
+| --- | --- |
+| `PROJECTMUX_CONFIG_ROOT` | the configuration directory |
+| `PROJECTMUX_STATE_ROOT` | the state directory holding `state.db` |
+| `PROJECTMUX_TMUX_SOCKET` | the tmux server, passed to tmux as `-L <name>` |
+
+Set together, they give a fully separate installation: it cannot see or change
+the sessions or records of the default one. Because tmux cannot move a client
+between servers, `open` and `attach` refuse with exit code 6 when your terminal
+is attached to a different server than `PROJECTMUX_TMUX_SOCKET` names — detach
+first, or use `open --no-attach`.
 
 Three layers are read, in order, and later layers override earlier ones:
 
