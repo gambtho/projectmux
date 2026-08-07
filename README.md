@@ -40,6 +40,9 @@ runtime are actually doing, then makes the machine match that description.
 
 ## Quick start
 
+You need `git` and `tmux` on `PATH`, on Linux or WSL2. Container-backed windows
+need more; see [Platform support](#platform-support).
+
 Install:
 
 ```sh
