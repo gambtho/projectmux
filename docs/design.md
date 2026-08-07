@@ -450,6 +450,26 @@ reproduces the same digests; that needs a rebuild elsewhere, and claiming it
 from this step would restate the dishonesty the phasing note was written to
 avoid.
 
+The step failed on its first real run, and the failure was in the check
+rather than the binaries. Go embeds `vcs.modified` — computed from
+`git status --porcelain`, which counts untracked files — in every binary.
+`dist/` is gitignored, so release builds leave the tree clean; the original
+step rebuilt into `rebuild/`, which is not ignored, so writing the first
+binary there dirtied the tree and stamped every later binary
+`vcs.modified=true`. `amd64` matched and `arm64` differed, separated only by
+which one the loop builds first. The rebuild now goes to `$RUNNER_TEMP`,
+outside the work tree, and the step asserts the tree is clean before
+comparing — a dirty tree would mean the *release* binaries carry
+`vcs.modified=true`, making "reproducible" a claim about a state nobody can
+reproduce from the tag.
+
+Worth recording alongside it: the local pre-merge check that reported both
+architectures identical was structurally unable to catch this. It built
+`dist/` and `rebuild/` interleaved per architecture, so both `arm64` builds
+saw an equally dirty tree and the discrepancy cancelled. A verification that
+perturbs its own subject can report success for the same reason it should
+have reported failure.
+
 With both gates enforced, the prerelease flag needs no change: it already keys
 on the tag pattern, so `v0.*` continues to publish as a prerelease and `v1.0.0`
 publishes as a full release.

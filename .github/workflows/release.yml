@@ -144,28 +144,52 @@ jobs:
         run: |
           # -trimpath and CGO_ENABLED=0 remove the two usual sources of
           # variation, but intent is not verification (design §12). Build a
-          # second time into a separate directory and require bit-identical
-          # output.
+          # second time and require bit-identical output.
           #
-          # This proves reproducibility *within one runner*, which is what
-          # catches the realistic regression: an embedded timestamp, a map
-          # iterated in a nondeterministic order, a path leaking into the
-          # binary. It does not prove that a different machine reproduces
-          # these digests — that needs an independent rebuild, and claiming
-          # otherwise from this step would be the dishonest version of the
-          # gate §12 wanted closed.
+          # The rebuild goes to $RUNNER_TEMP, outside the work tree, and that
+          # placement is load-bearing rather than tidiness. Go embeds
+          # `vcs.modified` in every binary, derived from `git status
+          # --porcelain`, which counts untracked files. `dist/` is gitignored
+          # so the release build leaves the tree clean; a `rebuild/` inside
+          # the repo is not ignored, so writing the first binary into it
+          # dirties the tree and every subsequent binary is stamped
+          # `vcs.modified=true`. The first version of this step did exactly
+          # that: amd64 matched, arm64 differed, and the only thing separating
+          # them was that amd64 is built first. The check perturbed what it
+          # measured.
+          #
+          # This proves reproducibility *within one runner*, which catches the
+          # realistic regression: an embedded timestamp, a map iterated in a
+          # nondeterministic order, a path leaking into the binary. It does
+          # not prove that a different machine reproduces these digests —
+          # that needs an independent rebuild, and claiming otherwise from
+          # this step would be the dishonest version of the gate §12 wanted
+          # closed.
           version="${GITHUB_REF_NAME}"
-          mkdir -p rebuild
+
+          # A dirty tree makes the comparison meaningless in the other
+          # direction too: the release binaries would carry
+          # vcs.modified=true and "reproducible" would be measuring a state
+          # nobody can reproduce from the tag. Fail loudly instead.
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::The work tree is not clean; build stamps are not reproducible from the tag."
+            git status --porcelain
+            exit 1
+          fi
+
+          rebuild="${RUNNER_TEMP}/rebuild"
+          rm -rf "$rebuild"
+          mkdir -p "$rebuild"
           for arch in amd64 arm64; do
             GOOS=linux GOARCH="$arch" go build \
               -trimpath \
               -ldflags "-s -w -X github.com/gambtho/projectmux/internal/cli.version=${version}" \
-              -o "rebuild/projectmux-linux-${arch}" \
+              -o "${rebuild}/projectmux-linux-${arch}" \
               ./cmd/projectmux
           done
           for arch in amd64 arm64; do
             a="dist/projectmux-linux-${arch}"
-            b="rebuild/projectmux-linux-${arch}"
+            b="${rebuild}/projectmux-linux-${arch}"
             if ! cmp -s "$a" "$b"; then
               echo "::error::$arch is not reproducible: rebuilding produced a different binary"
               sha256sum "$a" "$b"
@@ -173,7 +197,7 @@ jobs:
             fi
           done
           echo "Both architectures rebuilt bit-identically."
-          rm -rf rebuild
+          rm -rf "$rebuild"
 
       - name: Checksums
         run: |
