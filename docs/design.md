@@ -454,6 +454,17 @@ With both gates enforced, the prerelease flag needs no change: it already keys
 on the tag pattern, so `v0.*` continues to publish as a prerelease and `v1.0.0`
 publishes as a full release.
 
+**What the prerelease flag now signals.** The phasing note above gave a reason
+for it that has since expired — that `v0.x` artifacts were "reproducible in
+intent and not yet verified to be so." From `v0.4.0` on they are verified. The
+flag stays because the *other* reason is untouched: the configuration schema
+and the command surface are still unfrozen, and there is no migration support
+for `v0.x` configuration. Closing these two gates was release engineering, not
+a compatibility commitment. `v1.0.0` is deliberately not being cut on the
+strength of it, because the number would promise a stability the project has
+not yet decided to offer — and a 1.0 that quietly means "our CI got better"
+teaches readers to distrust the version number.
+
 ## 13. Extraction sequence
 
 The merged Bash platform is a maintenance-only behavioral reference during
