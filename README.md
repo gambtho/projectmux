@@ -125,7 +125,7 @@ Releases publish static `linux/amd64` and `linux/arm64` binaries with a
 `SHA256SUMS` file. Download both, verify, then install:
 
 ```sh
-VERSION=v0.1.0
+VERSION=v0.2.0
 ARCH=amd64   # or arm64
 BASE=https://github.com/gambtho/projectmux/releases/download/$VERSION
 
@@ -265,6 +265,7 @@ projectmux stop          # end the session
 | [`list`](docs/commands.md#projectmux-list) | recorded workspaces and live identity-carrying sessions |
 | [`status`](docs/commands.md#projectmux-status) | observe one workspace and explain drift |
 | [`doctor`](docs/commands.md#projectmux-doctor) | diagnose dependencies, config, state, and drift |
+| [`rebuild`](docs/commands.md#projectmux-rebuild) | recover lost registrations from the identity keys live sessions carry |
 | [`version`](docs/commands.md#projectmux-version) | print the version |
 
 Every command that produces a report accepts `--json` for a versioned envelope
