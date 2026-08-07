@@ -68,7 +68,7 @@ func Open(root string) (*Store, error) {
 		return nil, fmt.Errorf("opening the state database: %w", err)
 	}
 	if err := migrate(db); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return &Store{db: db}, nil

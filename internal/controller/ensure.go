@@ -82,7 +82,7 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowInte
 	if err != nil {
 		return EnsureResult{}, err
 	}
-	defer lk.Release()
+	defer func() { _ = lk.Release() }()
 
 	if err := c.Store.RegisterWorkspace(d.Workspace, d.Digest, c.Clock.Now()); err != nil {
 		return EnsureResult{}, fmt.Errorf("registering the workspace: %w", err)

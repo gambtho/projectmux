@@ -33,7 +33,7 @@ func (s *Store) RegisterWorkspace(ws resolve.Workspace, desiredDigest string, no
 	if err != nil {
 		return fmt.Errorf("beginning a transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	_, err = tx.Exec(`
 		INSERT INTO workspaces
@@ -93,7 +93,7 @@ func queryWorkspaces(db *sql.DB) ([]Record, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listing workspaces: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []Record
 	for rows.Next() {
@@ -210,7 +210,7 @@ func (s *Store) AllocateSessionName(workspaceID string, now time.Time) (string, 
 	if err != nil {
 		return "", fmt.Errorf("beginning a transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var proposed string
 	var actual sql.NullString
@@ -268,7 +268,7 @@ func (s *Store) RecordContainerObservation(workspaceID string, obs ContainerObse
 	if err != nil {
 		return fmt.Errorf("beginning a transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if err := recordContainer(tx, workspaceID, obs, now); err != nil {
 		return err
 	}
@@ -342,7 +342,7 @@ func (s *Store) RecordOperation(workspaceID string, op Operation, now time.Time)
 	if err != nil {
 		return fmt.Errorf("beginning a transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if err := recordOperation(tx, workspaceID, op, now); err != nil {
 		return err
 	}
@@ -385,7 +385,7 @@ func (s *Store) CommitReconciliation(workspaceID string, r ReconciliationResult,
 	if err != nil {
 		return fmt.Errorf("beginning a transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if r.AppliedDigest != nil {
 		res, err := tx.Exec(
@@ -428,7 +428,7 @@ func (s *Store) AdoptSessionName(workspaceID, name string, now time.Time) error 
 	if err != nil {
 		return fmt.Errorf("beginning a transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var current sql.NullString
 	err = tx.QueryRow(

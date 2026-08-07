@@ -150,7 +150,7 @@ func buildStatus(ctx context.Context, name string) (statusEnvelope, error) {
 	if err != nil {
 		return statusEnvelope{}, err
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	ctrl := controller.Controller{
 		Store:      st,

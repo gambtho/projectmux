@@ -207,7 +207,7 @@ func TestIntegrationCreateSession(t *testing.T) {
 		if err == nil && strings.Contains(string(out), "ENVRESULT=visible") {
 			return
 		}
-		exec.Command("sleep", "0.1").Run()
+		_ = exec.Command("sleep", "0.1").Run()
 	}
 	t.Error("PROJECTMUX_TEST_ENV did not reach the first window's pane")
 }
@@ -250,7 +250,7 @@ func TestIntegrationCreateSessionEnvValueEndingInSemicolon(t *testing.T) {
 		if err == nil && strings.Contains(string(out), "ENVRESULT=visible;") {
 			return
 		}
-		exec.Command("sleep", "0.1").Run()
+		_ = exec.Command("sleep", "0.1").Run()
 	}
 	t.Error("env value ending in ';' did not reach the pane verbatim")
 }

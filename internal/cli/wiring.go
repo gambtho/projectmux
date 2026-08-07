@@ -318,7 +318,7 @@ var rebuildDatabaseCheck = func(root string) error {
 			return corruptDatabaseError(path, err)
 		}
 	}
-	defer ro.Close()
+	defer func() { _ = ro.Close() }()
 
 	usable := insp.Usable()
 	if usable == nil {

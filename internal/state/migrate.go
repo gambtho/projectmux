@@ -59,7 +59,7 @@ func applyNext(db *sql.DB) (done bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("beginning a migration transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var version int
 	if err := tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {

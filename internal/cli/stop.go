@@ -90,7 +90,7 @@ func runStop(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	stateRoot, err := state.Root()
 	if err != nil {
 		return err

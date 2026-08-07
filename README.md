@@ -164,11 +164,13 @@ CGO_ENABLED=0 go build -o projectmux ./cmd/projectmux
 Go 1.25 or newer is required. The binary is statically linked and has no runtime
 dependency on cgo.
 
-Run the tests, the vet pass, and a formatting check the same way CI does:
+Run the tests, the vet pass, the linter, and a formatting check the same way CI
+does:
 
 ```sh
 test -z "$(gofmt -l .)"
 go vet ./...
+go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./...
 go test -race ./...
 ```
 

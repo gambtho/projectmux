@@ -399,7 +399,7 @@ that Docker unavailability never masquerades as container loss.
 
 ### Gate phasing below 1.0
 
-Two of the gates above are not enforced by the `v0.x` release workflow, and
+Two of the gates above were not enforced by the `v0.x` release workflow, and
 this records that as a decision rather than leaving the list aspirational:
 
 - **Linting.** `gofmt`, `go vet`, and `go test -race` run on every pull
@@ -415,6 +415,44 @@ prereleases, which is the honest signal: they are reproducible in intent and
 not yet verified to be so. Vulnerability scanning (`govulncheck`) *is*
 enforced on release, and a release failing any enforced gate publishes
 nothing.
+
+#### Amendment: both gates closed after v0.3.0
+
+**Linting.** `golangci-lint` runs on every pull request and every release,
+invoked through `go run` at a pinned version — the same shape as
+`govulncheck`, so no third-party action needs pinning and the version that
+runs is the version written in the workflow. The linter set is golangci-lint's
+defaults: `errcheck`, `govet`, `ineffassign`, `staticcheck`, `unused`. Four of
+those five were already clean when the gate was introduced, so the defaults are
+what the codebase holds itself to rather than a compromise.
+
+The backlog the phasing note anticipated was 116 `errcheck` findings. Of those,
+68 were `fmt.Fprint*` calls on the CLI's output-writer seam; `.golangci.yml`
+exempts those functions, on the ground that a failed write to stdout is the one
+error that cannot be reported — errcheck exempts bare `fmt.Print*` for the same
+reason, and these are caught only because output is routed through an
+`io.Writer` so tests can capture it. The exemption names those three functions
+and nothing else: `Close`, `Rollback`, and `Release` stay checked everywhere,
+including tests. The remaining 48 were fixed.
+
+The configuration also sets `max-same-issues: 0` and `max-issues-per-linter: 0`.
+golangci-lint truncates by default, and the run that first measured this
+backlog reported 48 of 116 without saying so. A gate that stops counting past a
+threshold reports clean for the wrong reason.
+
+**Reproducible release checks.** The release workflow builds both
+architectures a second time into a separate directory and requires `cmp` to
+find the binaries bit-identical, before any checksum is computed or artifact
+uploaded. This proves reproducibility *within one runner*, which catches the
+realistic regression — an embedded timestamp, a nondeterministic map order, a
+path leaking into the binary. It does not prove an independent machine
+reproduces the same digests; that needs a rebuild elsewhere, and claiming it
+from this step would restate the dishonesty the phasing note was written to
+avoid.
+
+With both gates enforced, the prerelease flag needs no change: it already keys
+on the tag pattern, so `v0.*` continues to publish as a prerelease and `v1.0.0`
+publishes as a full release.
 
 ## 13. Extraction sequence
 

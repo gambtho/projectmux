@@ -53,16 +53,16 @@ func Acquire(ctx context.Context, dir, workspaceID string, timeout time.Duration
 			return &Lock{f: f}, nil
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			f.Close()
+			_ = f.Close()
 			return nil, fmt.Errorf("locking workspace %s: %w", workspaceID, err)
 		}
 		if time.Now().After(deadline) {
-			f.Close()
+			_ = f.Close()
 			return nil, &ErrLockHeld{WorkspaceID: workspaceID}
 		}
 		select {
 		case <-ctx.Done():
-			f.Close()
+			_ = f.Close()
 			return nil, fmt.Errorf("waiting for the workspace lock: %w", ctx.Err())
 		case <-time.After(pollInterval):
 		}
@@ -72,7 +72,9 @@ func Acquire(ctx context.Context, dir, workspaceID string, timeout time.Duration
 // Release unlocks and closes the lock file.
 func (l *Lock) Release() error {
 	if err := syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN); err != nil {
-		l.f.Close()
+		// The unlock error is the one worth reporting; closing is
+		// best-effort cleanup of an fd we are abandoning either way.
+		_ = l.f.Close()
 		return fmt.Errorf("unlocking: %w", err)
 	}
 	return l.f.Close()

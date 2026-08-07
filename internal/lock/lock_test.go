@@ -34,7 +34,7 @@ func TestAcquireTimesOutWithTypedError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
-	defer held.Release()
+	defer func() { _ = held.Release() }()
 
 	start := time.Now()
 	_, err = Acquire(context.Background(), dir, "w1", 200*time.Millisecond)
@@ -56,12 +56,12 @@ func TestDifferentWorkspacesDoNotContend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire w1: %v", err)
 	}
-	defer l1.Release()
+	defer func() { _ = l1.Release() }()
 	l2, err := Acquire(context.Background(), dir, "w2", 200*time.Millisecond)
 	if err != nil {
 		t.Fatalf("Acquire w2 while w1 held: %v", err)
 	}
-	defer l2.Release()
+	defer func() { _ = l2.Release() }()
 }
 
 func TestMutualExclusionUnderConcurrency(t *testing.T) {
@@ -99,7 +99,7 @@ func TestCancelledContextStopsWaiting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
-	defer held.Release()
+	defer func() { _ = held.Release() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {

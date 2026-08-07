@@ -148,7 +148,7 @@ func ensureWorkspace(ctx context.Context, name string) (controller.EnsureResult,
 	if err != nil {
 		return zero, ws, err
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	stateRoot, err := state.Root()
 	if err != nil {

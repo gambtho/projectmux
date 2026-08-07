@@ -192,7 +192,7 @@ func buildRebuild(ctx context.Context, dryRun bool) (rebuild.Report, error) {
 	if err != nil {
 		return rebuild.Report{}, err
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	live, err := liveSessions(ctx)
 	if err != nil {
