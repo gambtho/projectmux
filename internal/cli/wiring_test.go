@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +15,7 @@ import (
 	"github.com/gambtho/projectmux/internal/controller/fake"
 	"github.com/gambtho/projectmux/internal/resolve"
 	"github.com/gambtho/projectmux/internal/state"
+	"github.com/gambtho/projectmux/internal/tmux"
 )
 
 var cliTestTime = time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
@@ -103,8 +107,8 @@ func strPtr(s string) *string { return &s }
 
 func TestAttachTerminalChoosesByTmuxEnv(t *testing.T) {
 	var execCalls, switchCalls []string
-	origExec, origSwitch, origInside := execAttach, switchClient, insideTmux
-	t.Cleanup(func() { execAttach, switchClient, insideTmux = origExec, origSwitch, origInside })
+	origExec, origSwitch, origSocket := execAttach, switchClient, currentSocket
+	t.Cleanup(func() { execAttach, switchClient, currentSocket = origExec, origSwitch, origSocket })
 	execAttach = func(session string) error {
 		execCalls = append(execCalls, session)
 		return nil
@@ -114,16 +118,82 @@ func TestAttachTerminalChoosesByTmuxEnv(t *testing.T) {
 		return nil
 	}
 
-	insideTmux = func() bool { return false }
+	currentSocket = func() string { return "" }
 	if err := attachTerminal(context.Background(), "slab"); err != nil {
 		t.Fatalf("attachTerminal: %v", err)
 	}
-	insideTmux = func() bool { return true }
+	currentSocket = func() string { return tmux.DefaultSocket }
 	if err := attachTerminal(context.Background(), "slab"); err != nil {
 		t.Fatalf("attachTerminal: %v", err)
 	}
 	if len(execCalls) != 1 || len(switchCalls) != 1 {
 		t.Errorf("execCalls = %v, switchCalls = %v; want one each", execCalls, switchCalls)
+	}
+}
+
+// TestAttachTerminalRefusesAcrossServers covers the case the socket
+// override exists for: a terminal attached to one tmux server while
+// projectmux drives another. tmux cannot move a client between servers,
+// so the refusal must come before any tmux command runs.
+func TestAttachTerminalRefusesAcrossServers(t *testing.T) {
+	cases := []struct {
+		name, env, attached string
+		wantRefusal         bool
+	}{
+		{name: "default both ways", attached: tmux.DefaultSocket},
+		{name: "override matches", env: "pmxvalidate", attached: "pmxvalidate"},
+		{name: "override, attached to default", env: "pmxvalidate",
+			attached: tmux.DefaultSocket, wantRefusal: true},
+		{name: "no override, attached elsewhere", attached: "pmxvalidate",
+			wantRefusal: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var execCalls, switchCalls []string
+			origExec, origSwitch, origSocket := execAttach, switchClient, currentSocket
+			t.Cleanup(func() {
+				execAttach, switchClient, currentSocket = origExec, origSwitch, origSocket
+			})
+			execAttach = func(s string) error { execCalls = append(execCalls, s); return nil }
+			switchClient = func(_ context.Context, s string) error {
+				switchCalls = append(switchCalls, s)
+				return nil
+			}
+			currentSocket = func() string { return tc.attached }
+			t.Setenv(tmux.SocketEnv, tc.env)
+
+			err := attachTerminal(context.Background(), "slab")
+			var refusal *controller.RefusalError
+			if got := errors.As(err, &refusal); got != tc.wantRefusal {
+				t.Fatalf("refusal = %v (err %v), want %v", got, err, tc.wantRefusal)
+			}
+			if tc.wantRefusal {
+				if len(execCalls) != 0 || len(switchCalls) != 0 {
+					t.Errorf("refusal ran tmux anyway: exec %v, switch %v",
+						execCalls, switchCalls)
+				}
+				for _, want := range []string{tc.attached, cmp.Or(tc.env, tmux.DefaultSocket)} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("refusal %q does not name %q", err, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestTmuxArgvAppliesSocket pins the hand-built argv the attach seams
+// use, which cannot go through tmux.Client.
+func TestTmuxArgvAppliesSocket(t *testing.T) {
+	t.Setenv(tmux.SocketEnv, "")
+	if got := tmuxArgv("attach-session", "-t", "=slab"); !slices.Equal(got,
+		[]string{"tmux", "attach-session", "-t", "=slab"}) {
+		t.Errorf("default socket argv = %v", got)
+	}
+	t.Setenv(tmux.SocketEnv, "pmxvalidate")
+	if got := tmuxArgv("attach-session", "-t", "=slab"); !slices.Equal(got,
+		[]string{"tmux", "-L", "pmxvalidate", "attach-session", "-t", "=slab"}) {
+		t.Errorf("override argv = %v", got)
 	}
 }
 

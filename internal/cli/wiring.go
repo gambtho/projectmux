@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -36,10 +38,10 @@ var (
 		return state.Open(root)
 	}
 	liveSessions = func(ctx context.Context) ([]controller.LiveSession, error) {
-		return (&tmux.Client{}).Sessions(ctx)
+		return (&tmux.Client{Socket: tmux.EnvSocket()}).Sessions(ctx)
 	}
 	newSessionObserver = func() controller.SessionObserver {
-		return &tmux.Client{}
+		return &tmux.Client{Socket: tmux.EnvSocket()}
 	}
 )
 
@@ -80,7 +82,7 @@ func storedContainer(b *state.ContainerBinding) *storedContainerInfo {
 
 // newSessionActuator is the mutation seam mirroring newSessionObserver.
 var newSessionActuator = func() controller.SessionActuator {
-	return &tmux.Client{}
+	return &tmux.Client{Socket: tmux.EnvSocket()}
 }
 
 // Container observation and actuation seams; the defaults are the real
@@ -146,6 +148,18 @@ func windowIntents(cfg config.Config) []controller.WindowIntent {
 	return intents
 }
 
+// tmuxArgv builds a tmux command line, inserting -L when an alternate
+// server is configured. The attach seams below cannot use tmux.Client —
+// one execs and one needs a live client — so this is the single place
+// the socket flag is applied to a hand-built argv.
+func tmuxArgv(args ...string) []string {
+	argv := []string{"tmux"}
+	if socket := tmux.EnvSocket(); socket != "" {
+		argv = append(argv, "-L", socket)
+	}
+	return append(argv, args...)
+}
+
 // Terminal attachment seams: a real attach replaces the process and a
 // real switch-client needs a live tmux client, so tests substitute all
 // three (open/attach spec §8).
@@ -156,11 +170,11 @@ var (
 			return fmt.Errorf("finding tmux: %w", err)
 		}
 		return syscall.Exec(path,
-			[]string{"tmux", "attach-session", "-t", "=" + session}, os.Environ())
+			tmuxArgv("attach-session", "-t", "="+session), os.Environ())
 	}
 	switchClient = func(ctx context.Context, session string) error {
 		res, err := runner.Run(ctx, runner.Command{
-			Argv:    []string{"tmux", "switch-client", "-t", "=" + session},
+			Argv:    tmuxArgv("switch-client", "-t", "="+session),
 			Timeout: tmux.DefaultTimeout,
 		})
 		if err != nil {
@@ -172,16 +186,48 @@ var (
 		}
 		return nil
 	}
-	insideTmux = func() bool { return os.Getenv("TMUX") != "" }
+	// currentSocket names the server this terminal's tmux client is
+	// attached to, or "" when the terminal is not inside tmux at all.
+	// $TMUX is "<socket-path>,<server-pid>,<session-index>", and
+	// -L <name> resolves to <socket-dir>/<name>, so the base name of the
+	// path is the socket name. It is one seam rather than two because
+	// "am I inside tmux" and "which server" must never disagree.
+	currentSocket = func() string {
+		v := os.Getenv("TMUX")
+		if v == "" {
+			return ""
+		}
+		path, _, _ := strings.Cut(v, ",")
+		return filepath.Base(path)
+	}
 )
 
 // attachTerminal connects the terminal to the session: switch-client
 // inside tmux, an exec of attach-session outside (open/attach spec §2).
+//
+// Attaching across servers is refused rather than attempted: tmux
+// switch-client is intra-server only and attach-session refuses to
+// nest, so the operation cannot succeed, and the failure it guards
+// against — touching a session on the other server — is the whole point
+// of running on a separate socket (design §13 step 6). A tmux started
+// with -S <path> rather than -L <name> yields a base name that will not
+// match, so it is refused too; refusing is the safe direction.
 func attachTerminal(ctx context.Context, session string) error {
-	if insideTmux() {
-		return switchClient(ctx, session)
+	got := currentSocket()
+	if got == "" {
+		return execAttach(session)
 	}
-	return execAttach(session)
+	want := tmux.EnvSocket()
+	if want == "" {
+		want = tmux.DefaultSocket
+	}
+	if got != want {
+		return &controller.RefusalError{Reason: fmt.Sprintf(
+			"this terminal is attached to the tmux server %q, but projectmux "+
+				"is driving %q; tmux cannot move a client between servers. "+
+				"Detach first, or run with --no-attach.", got, want)}
+	}
+	return switchClient(ctx, session)
 }
 
 // sessionListerFunc adapts the liveSessions seam to doctor's bulk

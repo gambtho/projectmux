@@ -34,6 +34,19 @@ workspace name and exits 4, not 2 — a documented trade for the shorthand.
 compatibility contracts. Human-readable output is not — its layout may change
 in any release. Parse `--json`.
 
+**Environment.** Three variables move the resources every command touches:
+
+| Variable | Overrides |
+| --- | --- |
+| `PROJECTMUX_CONFIG_ROOT` | the configuration directory |
+| `PROJECTMUX_STATE_ROOT` | the state directory holding `state.db` |
+| `PROJECTMUX_TMUX_SOCKET` | the tmux server, passed to tmux as `-L <name>` |
+
+Set together they give a fully separate installation, which is how a new
+ProjectMux is validated beside a working one: sessions on another tmux server
+are invisible to it, and unreachable by it, even when they carry the same
+identity keys.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -299,6 +312,13 @@ Attach hands the terminal to tmux, so it has no captured transcript here: on
 success you are simply inside tmux, and from there you attach, detach, and
 navigate exactly as you normally would. Use `open` when you want the session
 created if it is missing, and `attach` when you want to be told instead.
+
+Both `open` and `attach` refuse with exit 6 when your terminal is already
+attached to a tmux server other than the one `PROJECTMUX_TMUX_SOCKET` selects.
+tmux cannot move a client between servers — `switch-client` works within one
+server and `attach-session` refuses to nest — so this is not a policy but the
+honest report of an impossible operation. Detach first, or use
+`open --no-attach`.
 
 ## projectmux stop
 

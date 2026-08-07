@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/gambtho/projectmux/internal/controller"
@@ -15,12 +16,28 @@ import (
 // timeout is the hang defense for unattended callers (spec §5).
 const DefaultTimeout = 5 * time.Second
 
+// SocketEnv names the environment variable selecting an alternate tmux
+// server, passed to tmux as -L. It exists so a second installation can
+// run beside a working one without observing or mutating its sessions
+// (design §13 step 6).
+const SocketEnv = "PROJECTMUX_TMUX_SOCKET"
+
+// DefaultSocket is the server tmux uses when no -L is given. It is the
+// name to compare against when the override is unset.
+const DefaultSocket = "default"
+
+// EnvSocket returns the configured socket name, or "" for the default
+// server. It mirrors state.Root and config.Root: each package owns the
+// override for the resource it addresses.
+func EnvSocket() string { return os.Getenv(SocketEnv) }
+
 // tmuxBinary is the executable to invoke; tests substitute a script.
 var tmuxBinary = "tmux"
 
 // Client observes live tmux sessions. Socket, when non-empty, is passed
-// as -L for isolated servers (integration tests); Timeout bounds every
-// subprocess, with the zero value meaning DefaultTimeout.
+// as -L for an isolated server — EnvSocket in production, a per-test
+// name in integration tests; Timeout bounds every subprocess, with the
+// zero value meaning DefaultTimeout.
 type Client struct {
 	Socket  string
 	Timeout time.Duration

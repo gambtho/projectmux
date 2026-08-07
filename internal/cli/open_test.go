@@ -12,6 +12,7 @@ import (
 	"github.com/gambtho/projectmux/internal/controller/fake"
 	"github.com/gambtho/projectmux/internal/resolve"
 	"github.com/gambtho/projectmux/internal/state"
+	"github.com/gambtho/projectmux/internal/tmux"
 )
 
 // openTestStore lets open mutate a fake store (guardedStore is for
@@ -61,12 +62,12 @@ func installFakeActuator(t *testing.T) *fake.SessionActuator {
 
 func installAttachSpies(t *testing.T) (execs, switches *[]string) {
 	t.Helper()
-	origExec, origSwitch, origInside := execAttach, switchClient, insideTmux
-	t.Cleanup(func() { execAttach, switchClient, insideTmux = origExec, origSwitch, origInside })
+	origExec, origSwitch, origSocket := execAttach, switchClient, currentSocket
+	t.Cleanup(func() { execAttach, switchClient, currentSocket = origExec, origSwitch, origSocket })
 	var e, s []string
 	execAttach = func(session string) error { e = append(e, session); return nil }
 	switchClient = func(_ context.Context, session string) error { s = append(s, session); return nil }
-	insideTmux = func() bool { return false }
+	currentSocket = func() string { return "" }
 	return &e, &s
 }
 
@@ -193,7 +194,7 @@ func TestOpenSwitchesClientInsideTmux(t *testing.T) {
 	installOpenStore(t, fake.NewStore())
 	installFakeActuator(t)
 	execs, switches := installAttachSpies(t)
-	insideTmux = func() bool { return true }
+	currentSocket = func() string { return tmux.DefaultSocket }
 	installScriptedSessions(t,
 		cliAbsent(), cliAbsent(), cliLive(ownLive(ws, ws.SessionName)))
 

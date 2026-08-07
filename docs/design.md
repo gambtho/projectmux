@@ -454,6 +454,31 @@ the Go application.
    - preserve the old state directory as a dated backup through the validation
      window, then remove it explicitly because no data migration is promised.
 
+### Step 6 amendment: how the two installations are separated
+
+Step 6's separate state root already existed as `PROJECTMUX_STATE_ROOT`. The
+separate socket did not: `tmux.Client` carried a `Socket` field, but only
+integration tests ever set it, so every shipped command drove the default tmux
+server. `PROJECTMUX_TMUX_SOCKET` closes that gap, following the same
+per-package override convention as `PROJECTMUX_STATE_ROOT` and
+`PROJECTMUX_CONFIG_ROOT`.
+
+The gap mattered because the identity keys are not a distinguishing feature
+here. Bash-created sessions carry the same `@dev_workspace_id`, `@dev_slug`,
+and `@dev_worktree` that ProjectMux keys on, so on a shared server ProjectMux
+would observe the running installation's sessions as its own and could rename
+or kill them — during the one phase whose purpose is to leave them alone. The
+socket, not the identity keys, is what makes the two installations disjoint.
+
+Attaching is the one operation that cannot be made socket-agnostic: tmux
+`switch-client` is intra-server and `attach-session` refuses to nest, so a
+terminal attached to one server cannot be moved to another. Rather than
+attempt it and produce a confusing failure — or worse, act on the wrong
+server — `open` and `attach` refuse with exit 6 when the terminal's server
+does not match the configured one. Step 7 deliberately runs on the *default*
+socket, since adopting a live Bash-created session is the thing being proved;
+this is why the setting is an environment variable rather than configuration.
+
 ## 14. Decisions recorded
 
 - Maintainability is the primary reason for extraction.
