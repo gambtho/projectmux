@@ -183,6 +183,17 @@ func TestAttachTerminalRefusesAcrossServers(t *testing.T) {
 						t.Errorf("refusal %q does not name %q", err, want)
 					}
 				}
+				return
+			}
+			// A matching socket must not merely avoid the refusal: it has
+			// to reach switch-client, which is the whole point of not
+			// refusing. Any other error would otherwise pass unnoticed.
+			if err != nil {
+				t.Fatalf("attachTerminal: %v", err)
+			}
+			if len(execCalls) != 0 || len(switchCalls) != 1 {
+				t.Errorf("matching socket: exec %v, switch %v; want no exec and one switch",
+					execCalls, switchCalls)
 			}
 		})
 	}
