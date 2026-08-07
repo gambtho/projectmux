@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"reflect"
@@ -122,7 +121,7 @@ func TestAttachTerminalChoosesByTmuxEnv(t *testing.T) {
 	if err := attachTerminal(context.Background(), "slab"); err != nil {
 		t.Fatalf("attachTerminal: %v", err)
 	}
-	currentSocket = func() string { return tmux.DefaultSocket }
+	currentSocket = func() string { return tmux.SocketPath("") }
 	if err := attachTerminal(context.Background(), "slab"); err != nil {
 		t.Fatalf("attachTerminal: %v", err)
 	}
@@ -135,17 +134,24 @@ func TestAttachTerminalChoosesByTmuxEnv(t *testing.T) {
 // override exists for: a terminal attached to one tmux server while
 // projectmux drives another. tmux cannot move a client between servers,
 // so the refusal must come before any tmux command runs.
+//
+// attached is a socket path, as $TMUX carries it, because that is what
+// distinguishes two servers — the last case is a client on a -S socket
+// whose base name collides with the configured -L name.
 func TestAttachTerminalRefusesAcrossServers(t *testing.T) {
 	cases := []struct {
 		name, env, attached string
 		wantRefusal         bool
 	}{
-		{name: "default both ways", attached: tmux.DefaultSocket},
-		{name: "override matches", env: "pmxvalidate", attached: "pmxvalidate"},
+		{name: "default both ways", attached: tmux.SocketPath("")},
+		{name: "override matches", env: "pmxvalidate",
+			attached: tmux.SocketPath("pmxvalidate")},
 		{name: "override, attached to default", env: "pmxvalidate",
-			attached: tmux.DefaultSocket, wantRefusal: true},
-		{name: "no override, attached elsewhere", attached: "pmxvalidate",
-			wantRefusal: true},
+			attached: tmux.SocketPath(""), wantRefusal: true},
+		{name: "no override, attached elsewhere",
+			attached: tmux.SocketPath("pmxvalidate"), wantRefusal: true},
+		{name: "same base name, different directory", env: "pmxvalidate",
+			attached: "/tmp/pmx-elsewhere/pmxvalidate", wantRefusal: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -172,7 +178,7 @@ func TestAttachTerminalRefusesAcrossServers(t *testing.T) {
 					t.Errorf("refusal ran tmux anyway: exec %v, switch %v",
 						execCalls, switchCalls)
 				}
-				for _, want := range []string{tc.attached, cmp.Or(tc.env, tmux.DefaultSocket)} {
+				for _, want := range []string{tc.attached, tmux.SocketPath(tc.env)} {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("refusal %q does not name %q", err, want)
 					}

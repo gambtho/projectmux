@@ -188,3 +188,23 @@ func TestIntegrationCreateSessionWithPanes(t *testing.T) {
 		t.Error("PANE_PROBE never appeared inside the split pane; split-window -e did not deliver the environment")
 	}
 }
+
+// TestIntegrationSocketPathMatchesTmux grounds SocketPath in tmux's own
+// behavior rather than in a restatement of the rule: it asks a real
+// server where its socket is. The refusal in internal/cli compares this
+// path against $TMUX, so a divergence here would silently turn a
+// cross-server refusal into a mismatch that never fires.
+func TestIntegrationSocketPathMatchesTmux(t *testing.T) {
+	socket := isolatedSocket(t, "socketpath")
+	tmuxOK(t, socket, "new-session", "-d", "-s", "alpha")
+
+	out, err := exec.Command("tmux", "-L", socket,
+		"display-message", "-p", "#{socket_path}").Output()
+	if err != nil {
+		t.Fatalf("asking tmux for its socket path: %v", err)
+	}
+	reported := strings.TrimSpace(string(out))
+	if got := SocketPath(socket); got != reported {
+		t.Errorf("SocketPath(%q) = %q, tmux reports %q", socket, got, reported)
+	}
+}

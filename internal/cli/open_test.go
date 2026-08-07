@@ -194,7 +194,7 @@ func TestOpenSwitchesClientInsideTmux(t *testing.T) {
 	installOpenStore(t, fake.NewStore())
 	installFakeActuator(t)
 	execs, switches := installAttachSpies(t)
-	currentSocket = func() string { return tmux.DefaultSocket }
+	currentSocket = func() string { return tmux.SocketPath("") }
 	installScriptedSessions(t,
 		cliAbsent(), cliAbsent(), cliLive(ownLive(ws, ws.SessionName)))
 

@@ -186,19 +186,23 @@ var (
 		}
 		return nil
 	}
-	// currentSocket names the server this terminal's tmux client is
-	// attached to, or "" when the terminal is not inside tmux at all.
-	// $TMUX is "<socket-path>,<server-pid>,<session-index>", and
-	// -L <name> resolves to <socket-dir>/<name>, so the base name of the
-	// path is the socket name. It is one seam rather than two because
-	// "am I inside tmux" and "which server" must never disagree.
+	// currentSocket is the path of the socket this terminal's tmux client
+	// is attached to, or "" when the terminal is not inside tmux at all.
+	// $TMUX is "<socket-path>,<server-pid>,<session-index>", so the first
+	// field is the path. It is one seam rather than two because "am I
+	// inside tmux" and "which server" must never disagree.
+	//
+	// The whole path is kept, not its base name: a client started with
+	// "tmux -S /elsewhere/pmx" has the same base name as "-L pmx" while
+	// addressing a different server, and comparing names would call that
+	// a match.
 	currentSocket = func() string {
 		v := os.Getenv("TMUX")
 		if v == "" {
 			return ""
 		}
 		path, _, _ := strings.Cut(v, ",")
-		return filepath.Base(path)
+		return path
 	}
 )
 
@@ -209,24 +213,24 @@ var (
 // tmux switch-client is intra-server only and attach-session refuses to
 // nest, so attaching across servers cannot succeed; and the failure it
 // guards against — acting on the other server's sessions — is the whole
-// point of running on a separate socket (design §13 step 6). A tmux
-// started with -S <path> rather than -L <name> yields a base name that
-// will not match, so it is refused too; refusing is the safe direction.
+// point of running on a separate socket (design §13 step 6).
+//
+// Servers are compared by socket path, which is what actually
+// distinguishes them. A tmux started with -S outside the default socket
+// directory therefore never matches and is refused; refusing is the safe
+// direction.
 func crossServerRefusal() error {
 	got := currentSocket()
 	if got == "" {
 		return nil
 	}
-	want := tmux.EnvSocket()
-	if want == "" {
-		want = tmux.DefaultSocket
-	}
-	if got == want {
+	want := tmux.SocketPath(tmux.EnvSocket())
+	if filepath.Clean(got) == want {
 		return nil
 	}
 	return &controller.RefusalError{Reason: fmt.Sprintf(
-		"this terminal is attached to the tmux server %q, but projectmux "+
-			"is driving %q; tmux cannot move a client between servers. "+
+		"this terminal is attached to the tmux server at %s, but projectmux "+
+			"is driving %s; tmux cannot move a client between servers. "+
 			"Detach first, or run with --no-attach.", got, want)}
 }
 

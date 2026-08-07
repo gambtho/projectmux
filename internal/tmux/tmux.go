@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/gambtho/projectmux/internal/controller"
@@ -30,6 +31,27 @@ const DefaultSocket = "default"
 // server. It mirrors state.Root and config.Root: each package owns the
 // override for the resource it addresses.
 func EnvSocket() string { return os.Getenv(SocketEnv) }
+
+// SocketPath resolves a -L socket name to the filesystem path tmux will
+// use, so a caller holding a socket path from $TMUX can compare servers
+// by identity rather than by name. tmux places -L sockets in
+// "<TMUX_TMPDIR or /tmp>/tmux-<uid>/<name>" (tmux(1), "the socket is
+// stored in a directory"); measured against tmux with and without
+// TMUX_TMPDIR set.
+//
+// Names alone cannot answer "same server?": a client on
+// "tmux -S /elsewhere/pmx" and one on "-L pmx" share a base name while
+// addressing different servers. An empty name means the default socket.
+func SocketPath(name string) string {
+	if name == "" {
+		name = DefaultSocket
+	}
+	dir := os.Getenv("TMUX_TMPDIR")
+	if dir == "" {
+		dir = "/tmp"
+	}
+	return filepath.Join(dir, fmt.Sprintf("tmux-%d", os.Getuid()), name)
+}
 
 // tmuxBinary is the executable to invoke; tests substitute a script.
 var tmuxBinary = "tmux"

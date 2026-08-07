@@ -77,7 +77,7 @@ func TestAttachAcrossServersRefusesBeforeAnnouncing(t *testing.T) {
 	}
 	installSessionObserver(t, controller.SessionObservation{ByIdentity: &live}, nil)
 	execs, switches := installAttachSpies(t)
-	currentSocket = func() string { return tmux.DefaultSocket }
+	currentSocket = func() string { return tmux.SocketPath("") }
 	t.Setenv(tmux.SocketEnv, "pmxvalidate")
 
 	code, stdout, stderr := run(t, "attach")

@@ -475,9 +475,13 @@ Attaching is the one operation that cannot be made socket-agnostic: tmux
 terminal attached to one server cannot be moved to another. Rather than
 attempt it and produce a confusing failure — or worse, act on the wrong
 server — `open` and `attach` refuse with exit 6 when the terminal's server
-does not match the configured one. Step 7 deliberately runs on the *default*
-socket, since adopting a live Bash-created session is the thing being proved;
-this is why the setting is an environment variable rather than configuration.
+does not match the configured one. The comparison is by socket *path*, not by
+socket name: `$TMUX` carries the path, and a client on `tmux -S /elsewhere/pmx`
+shares a base name with `-L pmx` while addressing a different server, so
+comparing names would call that a match. Step 7 deliberately runs on the
+*default* socket, since adopting a live Bash-created session is the thing being
+proved; this is why the setting is an environment variable rather than
+configuration.
 
 Step 6 was then performed against a live installation on 2026-08-07. With
 `PROJECTMUX_CONFIG_ROOT`, `PROJECTMUX_STATE_ROOT`, and `PROJECTMUX_TMUX_SOCKET`
