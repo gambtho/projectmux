@@ -202,30 +202,42 @@ var (
 	}
 )
 
-// attachTerminal connects the terminal to the session: switch-client
-// inside tmux, an exec of attach-session outside (open/attach spec §2).
+// crossServerRefusal reports the terminal being attached to a tmux
+// server other than the one projectmux drives, and nil otherwise
+// (including when the terminal is not inside tmux at all).
 //
-// Attaching across servers is refused rather than attempted: tmux
-// switch-client is intra-server only and attach-session refuses to
-// nest, so the operation cannot succeed, and the failure it guards
-// against — touching a session on the other server — is the whole point
-// of running on a separate socket (design §13 step 6). A tmux started
-// with -S <path> rather than -L <name> yields a base name that will not
-// match, so it is refused too; refusing is the safe direction.
-func attachTerminal(ctx context.Context, session string) error {
+// tmux switch-client is intra-server only and attach-session refuses to
+// nest, so attaching across servers cannot succeed; and the failure it
+// guards against — acting on the other server's sessions — is the whole
+// point of running on a separate socket (design §13 step 6). A tmux
+// started with -S <path> rather than -L <name> yields a base name that
+// will not match, so it is refused too; refusing is the safe direction.
+func crossServerRefusal() error {
 	got := currentSocket()
 	if got == "" {
-		return execAttach(session)
+		return nil
 	}
 	want := tmux.EnvSocket()
 	if want == "" {
 		want = tmux.DefaultSocket
 	}
-	if got != want {
-		return &controller.RefusalError{Reason: fmt.Sprintf(
-			"this terminal is attached to the tmux server %q, but projectmux "+
-				"is driving %q; tmux cannot move a client between servers. "+
-				"Detach first, or run with --no-attach.", got, want)}
+	if got == want {
+		return nil
+	}
+	return &controller.RefusalError{Reason: fmt.Sprintf(
+		"this terminal is attached to the tmux server %q, but projectmux "+
+			"is driving %q; tmux cannot move a client between servers. "+
+			"Detach first, or run with --no-attach.", got, want)}
+}
+
+// attachTerminal connects the terminal to the session: switch-client
+// inside tmux, an exec of attach-session outside (open/attach spec §2).
+func attachTerminal(ctx context.Context, session string) error {
+	if err := crossServerRefusal(); err != nil {
+		return err
+	}
+	if currentSocket() == "" {
+		return execAttach(session)
 	}
 	return switchClient(ctx, session)
 }

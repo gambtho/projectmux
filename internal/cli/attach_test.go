@@ -8,6 +8,7 @@ import (
 
 	"github.com/gambtho/projectmux/internal/controller"
 	"github.com/gambtho/projectmux/internal/controller/fake"
+	"github.com/gambtho/projectmux/internal/tmux"
 )
 
 func decodeAttach(t *testing.T, stdout string) attachEnvelope {
@@ -61,6 +62,33 @@ func TestAttachPerformsTerminalAttachment(t *testing.T) {
 	}
 	if len(*execs) != 1 || (*execs)[0] != ws.SessionName || len(*switches) != 0 {
 		t.Errorf("exec = %v, switch = %v", *execs, *switches)
+	}
+}
+
+// TestAttachAcrossServersRefusesBeforeAnnouncing pins both halves: the
+// exit code, and that stdout stays empty. A successful attach execs
+// away and can never print afterwards, so "attaching to X" has to be
+// written first — which makes it a lie unless the refusal precedes it.
+func TestAttachAcrossServersRefusesBeforeAnnouncing(t *testing.T) {
+	ws := statusWorkspace(t)
+	installFakeStore(t, fake.NewStore())
+	live := controller.LiveSession{
+		Name: ws.SessionName, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.Worktree,
+	}
+	installSessionObserver(t, controller.SessionObservation{ByIdentity: &live}, nil)
+	execs, switches := installAttachSpies(t)
+	currentSocket = func() string { return tmux.DefaultSocket }
+	t.Setenv(tmux.SocketEnv, "pmxvalidate")
+
+	code, stdout, stderr := run(t, "attach")
+	if code != ExitRefused {
+		t.Fatalf("exit %d, want %d; stderr: %s", code, ExitRefused, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty on a refusal", stdout)
+	}
+	if len(*execs) != 0 || len(*switches) != 0 {
+		t.Errorf("refusal ran tmux anyway: exec = %v, switch = %v", *execs, *switches)
 	}
 }
 

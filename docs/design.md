@@ -479,6 +479,16 @@ does not match the configured one. Step 7 deliberately runs on the *default*
 socket, since adopting a live Bash-created session is the thing being proved;
 this is why the setting is an environment variable rather than configuration.
 
+Step 6 was then performed against a live installation on 2026-08-07. With
+`PROJECTMUX_CONFIG_ROOT`, `PROJECTMUX_STATE_ROOT`, and `PROJECTMUX_TMUX_SOCKET`
+all pointed at throwaway locations, a full `open --no-attach` / `list` /
+`status` / `stop` cycle ran while a Bash-created session was live on the
+default server. That session carried all three identity keys, read back
+directly from tmux, and `projectmux list` did not report it; the default
+server's session name, window count, and key values were identical before and
+after. Attaching from a terminal on the default server exited 6 and ran no
+tmux command.
+
 ## 14. Decisions recorded
 
 - Maintainability is the primary reason for extraction.
