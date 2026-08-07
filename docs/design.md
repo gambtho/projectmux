@@ -546,6 +546,65 @@ use `RefusalError` and exit 6 like every other refusal, not Bash's exit 10.
 Until then the in-container failure is an ordinary "command not found", which
 names the problem accurately.
 
+### Step 8 amendment: what removal actually removed, and what it kept
+
+Step 8 was performed against the live installation on 2026-08-07. Its runtime
+half is a script, `tools/projectmux/migrate-from-dev.sh` in the dotfiles
+repository, rather than a list of one-time commands: the "otherwise warn and
+preserve the user's replacement" branch is real behavior, and behavior that
+only ever exists in a runbook is behavior nobody tested.
+
+Three findings from performing it, each of which changed the implementation.
+
+**`pane-died` is global-window scoped.** It is registered with `-gw`, which
+makes it invisible to both `show-hooks -g` and `show-hooks -w -t <window>`. An
+inspection using either flag reports it absent and concludes three hooks are
+live. Four are. Only `show-hooks -gw` reports it, and only `set-hook -gwu`
+clears it.
+
+**Matching must be a substring test, not equality.** The step says to unset the
+hooks "only when they still match the managed `dev-event` commands", which
+invites comparing against the current `dev.tmux.conf`. On the live machine that
+comparison fails on all four: the hooks were set by an older revision, so
+`pane-died` lacked the later `'pane=#{@dev_pane}'` argument, and tmux had
+expanded `~` to an absolute path at registration time. Exact matching would
+therefore take the preserve branch on every hook, report success, and leave all
+four set permanently — precisely the outcome the preserve branch exists to
+prevent. The `dev-event` command string is the only evidence that survives in a
+server started weeks earlier, so it is what the script matches. Unsetting is
+per array index, so a handler the user appended beside the managed one
+survives.
+
+**The marker block is an ordering constraint, not a cleanup step.** While
+`dev-workspace-config` remains in `tools/tmux/tmux.conf.symlink`, every new
+tmux server sources `dev.tmux.conf` and re-registers the hooks, so unsetting
+them on the running server is undone by the next server start. The script is
+only correct when run from a checkout that no longer has the block. Reloading
+the configuration afterwards and observing that no hook returns is what proves
+the removal took.
+
+Where systemd is unreachable, an installed `dev-autostart.service` is
+deliberately left in place rather than deleted. Removing the unit file without
+being able to `systemctl --user disable` it strands the enablement symlink in
+`default.target.wants/` pointing at a unit that no longer exists, which fails
+on every login and is harder to clear than what it replaced. The run warns that
+it was incomplete instead of reporting a clean skip.
+
+**`bin/dev` is retained as a thin wrapper, contrary to the step's text.** The
+step lists it for removal alongside the Bash sources. It remains what step 7
+made it: two lines that `exec projectmux "$@"`. The step's purpose is to retire
+the Bash implementation, and that implementation is gone; removing the wrapper
+would additionally retire the `dev` entry point people type, which is a separate
+decision the extraction never argued for. Recorded here as a deliberate
+deviation rather than left as a silent gap.
+
+One behavior did not survive the port. The Bash default workspace put
+`location: host` on a *pane*; `config.PaneLayer` has no `Location` field, since
+panes inherit their window's resolved location, and the validator reports the
+key as an unknown field — which reads like a typo rather than a missing
+feature. Nothing in the shipped configuration template uses it, so this is
+recorded rather than resolved.
+
 ## 14. Decisions recorded
 
 - Maintainability is the primary reason for extraction.
