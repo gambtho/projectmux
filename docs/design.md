@@ -89,6 +89,9 @@ requirement.
 - Managing project source, creating worktrees, or replacing the Dev Containers
   CLI.
 - Cross-platform support beyond Linux and WSL in the first release.
+- Detecting that `projectmux` is itself running inside a container and
+  refusing on that basis. See the step 7 amendment in §13 for why the Bash
+  guard was not carried over.
 
 ## 4. Repository and ownership boundary
 
@@ -493,6 +496,56 @@ server's session name, window count, and key values were identical before and
 after. Attaching from a terminal on the default server exited 6 and ran no
 tmux command.
 
+### Step 7 amendment: the in-container refusal is deliberately not carried over
+
+The Bash `dev` dispatcher opened with a guard that ran before argument
+parsing: if `/.dockerenv` or `/run/.containerenv` existed, every verb —
+including read-only ones — printed two lines and exited 10. Step 7 replaced
+`bin/dev` with `exec projectmux "$@"`, so that behavior is gone. ProjectMux
+will not reimplement it. This is a decision, not an oversight.
+
+Note the scope. Managing a workspace *whose project runs in a devcontainer*
+is a supported first-class case and is unaffected: `projectmux` runs on the
+host, starts the container through the Dev Containers CLI, and execs the
+container-bound windows into it (§5, §9). The guard concerned only the
+inverse — invoking `projectmux` from a shell that is already inside a
+container.
+
+Half of the Bash reasoning has expired and half has not. Measured against a
+live devcontainer on 2026-08-07:
+
+- The container's `~/.dotfiles` is no longer a stale seed-copy; it is a bind
+  mount of the host tree. That reason is dead.
+- The host tmux server is still unreachable. The container has its own `/tmp`
+  namespace, `/tmp/tmux-1000/` does not exist inside it, and the image did not
+  ship a `tmux` binary at all. That reason still holds.
+
+What makes it a non-goal is reachability, not harmlessness. The Bash guard was
+worth its cost because the dotfiles tree was seeded into every container, so
+`dev` was genuinely on PATH there. ProjectMux is not. The dotfiles `bin/install`
+does install it — as an optional phase, with no container guard — but that full
+install is not what runs inside these containers: the measured container had no
+`~/.dotfiles-profile`, no `projectmux` on PATH, and neither
+`~/.config/projectmux` nor `~/.local/state/projectmux`. Its bootstrap is a
+lighter path that drops a few tools into `~/.local/bin`. A guard added today
+would be unreachable code with a test suite attached.
+
+The cost of being wrong is recorded honestly, because it is the argument for
+revisiting this. Absent a guard, a `projectmux` binary that *did* reach a
+container image would not fail loudly — it would start a second tmux server
+inside the container, create a session there, and fork a state database into
+the container's `~/.local`, all invisible from the host and indistinguishable
+from success. That is the silent-wrong-thing category the cross-server refusal
+above exists to prevent. Reopen this decision if the binary ships inside an
+image, if a container mounts the host tmux socket, or if the dotfiles installer
+starts running in full inside containers. The refusal would then belong in the
+commands that need tmux or the container adapter — not in `config`, `version`,
+or `doctor`, which are useful in a container and need no server — and it would
+use `RefusalError` and exit 6 like every other refusal, not Bash's exit 10.
+
+Until then the in-container failure is an ordinary "command not found", which
+names the problem accurately.
+
 ## 14. Decisions recorded
 
 - Maintainability is the primary reason for extraction.
@@ -512,3 +565,6 @@ tmux command.
   and probe failure until replacement succeeds.
 - The Go application reuses the three Phase 1 tmux identity keys for adoption.
 - Linux and WSL are the only initial platforms.
+- The Bash in-container refusal is not carried over: managing containerized
+  workspaces from the host is unaffected, and the guard would be unreachable
+  because the binary is not installed into container images.
