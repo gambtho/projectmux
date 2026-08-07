@@ -125,7 +125,7 @@ Releases publish static `linux/amd64` and `linux/arm64` binaries with a
 `SHA256SUMS` file. Download both, verify, then install:
 
 ```sh
-VERSION=v0.2.0
+VERSION=v0.3.0
 ARCH=amd64   # or arm64
 BASE=https://github.com/gambtho/projectmux/releases/download/$VERSION
 
