@@ -491,7 +491,7 @@ func TestEnsureRespectsTheWorkspaceLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pre-acquiring the lock: %v", err)
 	}
-	defer held.Release()
+	defer func() { _ = held.Release() }()
 
 	_, err = r.ctrl.Ensure(context.Background(), ensureDesired(),
 		[]controller.WindowIntent{{Name: "shell"}},

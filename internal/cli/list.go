@@ -85,7 +85,7 @@ func buildList(ctx context.Context) (listEnvelope, error) {
 	if err != nil {
 		return listEnvelope{}, err
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	records, err := st.Workspaces()
 	if err != nil {

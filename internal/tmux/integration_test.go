@@ -182,7 +182,7 @@ func TestIntegrationCreateSessionWithPanes(t *testing.T) {
 			found = true
 			break
 		}
-		exec.Command("sleep", "0.1").Run()
+		_ = exec.Command("sleep", "0.1").Run()
 	}
 	if !found {
 		t.Error("PANE_PROBE never appeared inside the split pane; split-window -e did not deliver the environment")

@@ -97,7 +97,7 @@ func buildAttach(ctx context.Context, name string) (attachEnvelope, string, erro
 	if err != nil {
 		return zero, "", err
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	ctrl := controller.Controller{
 		Store:      st,

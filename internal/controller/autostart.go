@@ -30,7 +30,7 @@ func (c *Controller) StartWorkspaceContainer(ctx context.Context, d Desired, loc
 	if err != nil {
 		return "", nil, err
 	}
-	defer lk.Release()
+	defer func() { _ = lk.Release() }()
 
 	var stored *state.Record
 	rec, err := c.Store.Workspace(d.Workspace.ID)

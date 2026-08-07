@@ -44,7 +44,7 @@ func TestOpenReadOnlyHealthyDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenReadOnly: %v", err)
 	}
-	defer ro.Close()
+	defer func() { _ = ro.Close() }()
 
 	if insp.IntegrityErr != nil {
 		t.Fatalf("integrity: %v", insp.IntegrityErr)
@@ -162,7 +162,7 @@ func TestOpenReadOnlyOnAnUnwritableRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenReadOnly on an unwritable root: %v", err)
 	}
-	defer ro.Close()
+	defer func() { _ = ro.Close() }()
 	if usable := insp.Usable(); usable != nil {
 		t.Fatalf("a healthy database on an unwritable root reported %v", usable)
 	}
@@ -187,7 +187,7 @@ func TestOpenReadOnlySeesUncheckpointedRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	ws := resolve.Workspace{
 		ID:          "id-2",
 		Slug:        "slab2",
@@ -207,7 +207,7 @@ func TestOpenReadOnlySeesUncheckpointedRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenReadOnly: %v", err)
 	}
-	defer ro.Close()
+	defer func() { _ = ro.Close() }()
 	if usable := insp.Usable(); usable != nil {
 		t.Fatalf("a healthy database reported %v", usable)
 	}
@@ -283,7 +283,7 @@ func TestOpenReadOnlyUnrecoveredWALIsUncertainty(t *testing.T) {
 
 	ro, insp, err := OpenReadOnly(root)
 	if err == nil {
-		ro.Close()
+		_ = ro.Close()
 		t.Fatalf("an unrecovered write-ahead log opened cleanly: %+v", insp)
 	}
 	if ro != nil {
@@ -309,7 +309,7 @@ func TestOpenReadOnlyUnrecoveredWALIsTyped(t *testing.T) {
 
 	ro, _, err := OpenReadOnly(root)
 	if err == nil {
-		ro.Close()
+		_ = ro.Close()
 		t.Fatal("an unrecovered write-ahead log opened cleanly")
 	}
 	var walErr *IncompleteWALError
@@ -389,7 +389,7 @@ func TestOpenReadOnlyUnexaminableSidecarsAreNotTypedAsAnIncompleteWAL(t *testing
 
 			ro, _, err := OpenReadOnly(root)
 			if err == nil {
-				ro.Close()
+				_ = ro.Close()
 				t.Fatal("an unexaminable sidecar opened cleanly")
 			}
 			if IsIncompleteWAL(err) {
@@ -458,7 +458,7 @@ func TestOpenReadOnlyCorruptDatabaseReportsIntegrity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenReadOnly: %v", err)
 	}
-	defer ro.Close()
+	defer func() { _ = ro.Close() }()
 	if insp.IntegrityErr == nil {
 		t.Fatal("a corrupt database reported no integrity error")
 	}
@@ -485,7 +485,7 @@ func TestOpenReadOnlyUnreadableDatabaseIsNotCorruption(t *testing.T) {
 
 	ro, insp, err := OpenReadOnly(root)
 	if err == nil {
-		ro.Close()
+		_ = ro.Close()
 		t.Fatalf("an unreadable database opened cleanly: %+v", insp)
 	}
 	if ro != nil {
@@ -506,7 +506,7 @@ func TestOpenReadOnlyNotADatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenReadOnly: %v", err)
 	}
-	defer ro.Close()
+	defer func() { _ = ro.Close() }()
 	if insp.Usable() == nil {
 		t.Fatal("a non-database file reported itself usable")
 	}
@@ -534,7 +534,7 @@ func TestOpenReadOnlyRefusesWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenReadOnly: %v", err)
 	}
-	defer ro.Close()
+	defer func() { _ = ro.Close() }()
 
 	if _, err := ro.db.Exec("DELETE FROM workspaces"); err == nil {
 		t.Fatal("a write through the read-only connection succeeded")
@@ -567,7 +567,7 @@ func TestWALStateShmThatIsNotAFileIsUnknown(t *testing.T) {
 
 	ro, _, err := OpenReadOnly(root)
 	if err == nil {
-		ro.Close()
+		_ = ro.Close()
 		t.Fatal("an unexaminable -shm opened cleanly")
 	}
 	// Uncertainty, not the crash case: IncompleteWALError is a licence to

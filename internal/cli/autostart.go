@@ -72,7 +72,7 @@ func runAutostart(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	records, err := st.Workspaces()
 	if err != nil {
 		return fmt.Errorf("reading stored workspaces: %w", err)

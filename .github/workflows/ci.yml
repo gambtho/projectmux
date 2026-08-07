@@ -54,6 +54,14 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # Invoked through `go run` at a pinned version rather than the
+      # golangci-lint action, matching how release.yml runs govulncheck: one
+      # fewer third-party action to pin, and the version that runs in CI is
+      # the version written here. Configuration, including which linters and
+      # why, lives in .golangci.yml.
+      - name: Lint
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./...
+
       - name: Test
         run: go test -race ./...
 

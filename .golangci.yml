@@ -1,0 +1,33 @@
+# golangci-lint configuration.
+#
+# The linter set is deliberately golangci-lint's defaults — errcheck, govet,
+# ineffassign, staticcheck, unused. When this gate was introduced (design §12)
+# four of the five were already clean across the tree, so the defaults are not
+# a compromise: they are the set this codebase actually holds itself to. Adding
+# style linters is a separate decision with its own backlog, not a free bump.
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      # A failed write to stdout is the one error that cannot be reported,
+      # because the channel used to report it is the one that failed. errcheck
+      # already exempts bare fmt.Print* for exactly this reason; these sites
+      # are caught only because the CLI routes output through an io.Writer
+      # seam so tests can capture it. Excluding them keeps the rule honest
+      # rather than decorating ~70 output lines with `_, _ =`.
+      #
+      # This exemption is for the writer seam, not for I/O generally: Close,
+      # Rollback, and Release are still checked everywhere, including tests.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+
+issues:
+  # golangci-lint truncates by default (max-same-issues: 3,
+  # max-issues-per-linter: 50). A gate that hides findings once they pass a
+  # threshold reports "clean" for the wrong reason — and did, on the run that
+  # first measured this backlog: it printed 48 of 116.
+  max-same-issues: 0
+  max-issues-per-linter: 0

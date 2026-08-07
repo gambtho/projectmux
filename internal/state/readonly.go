@@ -133,7 +133,7 @@ func OpenReadOnly(root string) (*ReadOnlyStore, Inspection, error) {
 		// A writer arrived mid-read. The immutable snapshot ignored
 		// whatever it committed and may be torn besides, so neither its
 		// rows nor its verdict on integrity are worth reporting.
-		store.Close()
+		_ = store.Close()
 		return nil, Inspection{}, fmt.Errorf(
 			"the state database at %s was written during the inspection; run the command again", path)
 	}
@@ -224,7 +224,7 @@ func inspect(dsn string) (*ReadOnlyStore, Inspection, error) {
 		// a permission failure, a directory that will not take the WAL
 		// index — leaves the contents unexamined and is uncertainty.
 		if !isMalformed(err) {
-			db.Close()
+			_ = db.Close()
 			return nil, Inspection{}, fmt.Errorf("reading the state database: %w", err)
 		}
 		insp.IntegrityErr = fmt.Errorf("checking database integrity: %w", err)
@@ -235,7 +235,7 @@ func inspect(dsn string) (*ReadOnlyStore, Inspection, error) {
 		return &ReadOnlyStore{db: db}, insp, nil
 	}
 	if err := db.QueryRow("PRAGMA user_version").Scan(&insp.UserVersion); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, Inspection{}, fmt.Errorf("reading the schema version: %w", err)
 	}
 	return &ReadOnlyStore{db: db}, insp, nil

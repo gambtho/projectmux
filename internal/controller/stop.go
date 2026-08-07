@@ -31,7 +31,7 @@ func (c *Controller) Stop(ctx context.Context, d Desired, stopContainer bool, lo
 	if err != nil {
 		return StopResult{}, err
 	}
-	defer lk.Release()
+	defer func() { _ = lk.Release() }()
 
 	var stored *state.Record
 	rec, err := c.Store.Workspace(d.Workspace.ID)

@@ -17,7 +17,7 @@ func TestOpenCreatesTheLatestSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	var version int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
@@ -43,7 +43,7 @@ func TestOpenIsIdempotent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Open #%d: %v", i+1, err)
 		}
-		s.Close()
+		_ = s.Close()
 	}
 }
 
@@ -55,7 +55,7 @@ func TestOpenInADirectoryWithURIMetacharacters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	var timeout int
 	if err := s.db.QueryRow("PRAGMA busy_timeout").Scan(&timeout); err != nil {
@@ -75,7 +75,7 @@ func TestOpenRefusesAFutureSchema(t *testing.T) {
 	if _, err := s.db.Exec("PRAGMA user_version = 99"); err != nil {
 		t.Fatalf("setting future version: %v", err)
 	}
-	s.Close()
+	_ = s.Close()
 
 	_, err = Open(root)
 	var future *FutureSchemaError
@@ -105,7 +105,7 @@ func TestConcurrentOpenAppliesMigrationsExactlyOnce(t *testing.T) {
 			t.Errorf("Open #%d: %v", i, err)
 		}
 		if stores[i] != nil {
-			defer stores[i].Close()
+			defer func() { _ = stores[i].Close() }()
 		}
 	}
 	var version int
@@ -122,7 +122,7 @@ func TestPragmasApplyToEveryPooledConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	ctx := context.Background()
 	conns := make([]*sql.Conn, 2)
@@ -131,7 +131,7 @@ func TestPragmasApplyToEveryPooledConnection(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Conn #%d: %v", i, err)
 		}
-		defer conns[i].Close()
+		defer func() { _ = conns[i].Close() }()
 	}
 	for i, conn := range conns {
 		var journal string
@@ -174,12 +174,12 @@ func TestBeginMigrationTxRetriesOnBusy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opening the holder: %v", err)
 	}
-	defer holder.Close()
+	defer func() { _ = holder.Close() }()
 	contender, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatalf("opening the contender: %v", err)
 	}
-	defer contender.Close()
+	defer func() { _ = contender.Close() }()
 
 	// _txlock=immediate takes the write lock at BEGIN, not at first write.
 	held, err := holder.Begin()
@@ -195,11 +195,11 @@ func TestBeginMigrationTxRetriesOnBusy(t *testing.T) {
 	_, err = contender.Begin()
 	var sqliteErr *sqlite.Error
 	if !errors.As(err, &sqliteErr) {
-		held.Rollback()
+		_ = held.Rollback()
 		t.Fatalf("contending Begin = %v, want a *sqlite.Error", err)
 	}
 	if sqliteErr.Code() != sqliteBusy {
-		held.Rollback()
+		_ = held.Rollback()
 		t.Fatalf("code = %d, want %d (SQLITE_BUSY)", sqliteErr.Code(), sqliteBusy)
 	}
 
@@ -211,7 +211,7 @@ func TestBeginMigrationTxRetriesOnBusy(t *testing.T) {
 	start := time.Now()
 	go func() {
 		time.Sleep(hold)
-		held.Rollback()
+		_ = held.Rollback()
 	}()
 
 	tx, err := beginMigrationTx(contender)
@@ -219,7 +219,7 @@ func TestBeginMigrationTxRetriesOnBusy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("beginMigrationTx gave up instead of retrying: %v", err)
 	}
-	tx.Rollback()
+	_ = tx.Rollback()
 	// Returning before the holder released means it never waited at all.
 	if elapsed < hold/2 {
 		t.Errorf("returned after %v, want at least %v: it cannot have retried", elapsed, hold/2)
