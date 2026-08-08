@@ -28,7 +28,7 @@ func fakeBinary(t *testing.T, which *string, script string) {
 }
 
 func adapterWorkspace(t *testing.T) resolve.Workspace {
-	return resolve.Workspace{ID: "w1", Slug: "proj", Worktree: t.TempDir()}
+	return resolve.Workspace{ID: "w1", RepositoryID: "r1", Slug: "proj", RepoRoot: t.TempDir()}
 }
 
 func autoConfig() config.Config {
@@ -43,9 +43,9 @@ func enabledConfig() config.Config {
 	return c
 }
 
-func writeDevcontainerJSON(t *testing.T, worktree string) {
+func writeDevcontainerJSON(t *testing.T, repoRoot string) {
 	t.Helper()
-	dir := filepath.Join(worktree, ".devcontainer")
+	dir := filepath.Join(repoRoot, ".devcontainer")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestAppliesMatrix(t *testing.T) {
 	if ok, err := a.Applies(context.Background(), ws, autoConfig()); err != nil || ok {
 		t.Errorf("auto without config: Applies = (%t, %v), want (false, nil)", ok, err)
 	}
-	writeDevcontainerJSON(t, ws.Worktree)
+	writeDevcontainerJSON(t, ws.RepoRoot)
 	if ok, err := a.Applies(context.Background(), ws, autoConfig()); err != nil || !ok {
 		t.Errorf("auto with config: Applies = (%t, %v), want (true, nil)", ok, err)
 	}
@@ -111,7 +111,7 @@ func TestProbeClassifications(t *testing.T) {
 func TestDiscoverShapes(t *testing.T) {
 	a := &Adapter{}
 	ws := adapterWorkspace(t)
-	writeDevcontainerJSON(t, ws.Worktree)
+	writeDevcontainerJSON(t, ws.RepoRoot)
 
 	fakeBinary(t, &dockerBinary, "#!/bin/sh\nprintf 'abc123\\trunning\\n'\n")
 	obs, err := a.DiscoverContainer(context.Background(), ws, autoConfig())
@@ -210,5 +210,69 @@ func TestStopContainerClassifications(t *testing.T) {
 		"#!/bin/sh\necho 'Cannot connect to the Docker daemon' 1>&2\nexit 1\n")
 	if err := a.StopContainer(context.Background(), "c1"); err == nil {
 		t.Fatal("a daemon failure was swallowed")
+	}
+}
+
+// recordArgv installs a script that appends its argv to log and writes
+// stdout, so a test can compare the argv two calls produced.
+func recordArgv(t *testing.T, which *string, log, stdout string) {
+	t.Helper()
+	fakeBinary(t, which, "#!/bin/sh\n"+
+		"printf '%s\\n' \"$*\" >>'"+log+"'\n"+
+		"printf '%s' '"+stdout+"'\n")
+}
+
+func argvLines(t *testing.T, log string) []string {
+	t.Helper()
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("reading the argv log: %v", err)
+	}
+	return strings.Split(strings.TrimSpace(string(data)), "\n")
+}
+
+// TestContainersAreKeyedOnTheRepositoryRoot states the reported defect as
+// a test: two sessions on one repository address one container, so every
+// docker and devcontainer invocation they produce must be byte-identical
+// and must name the repository root rather than any per-session path.
+func TestContainersAreKeyedOnTheRepositoryRoot(t *testing.T) {
+	a := &Adapter{}
+	root := t.TempDir()
+	writeDevcontainerJSON(t, root)
+	sessions := []resolve.Workspace{
+		{ID: "w1", RepositoryID: "r1", Slug: "proj", RepoRoot: root, SessionName: "proj"},
+		{ID: "w2", RepositoryID: "r1", Slug: "proj", RepoRoot: root,
+			Session: "review", SessionName: "proj--review"},
+	}
+
+	upLog := filepath.Join(t.TempDir(), "up.argv")
+	recordArgv(t, &devcontainerBinary, upLog,
+		`{"outcome":"success","containerId":"c9","remoteUser":"vscode","remoteWorkspaceFolder":"/workspaces/proj"}`)
+	for _, ws := range sessions {
+		if _, err := a.StartContainer(context.Background(), ws, enabledConfig()); err != nil {
+			t.Fatalf("StartContainer(%s): %v", ws.ID, err)
+		}
+	}
+	up := argvLines(t, upLog)
+	if len(up) != 2 || up[0] != up[1] {
+		t.Fatalf("devcontainer up argv = %q; both sessions must start one container", up)
+	}
+	if !strings.Contains(up[0], "--workspace-folder "+root) {
+		t.Errorf("argv %q does not target the repository root %s", up[0], root)
+	}
+
+	psLog := filepath.Join(t.TempDir(), "ps.argv")
+	recordArgv(t, &dockerBinary, psLog, "")
+	for _, ws := range sessions {
+		if _, err := a.DiscoverContainer(context.Background(), ws, autoConfig()); err != nil {
+			t.Fatalf("DiscoverContainer(%s): %v", ws.ID, err)
+		}
+	}
+	ps := argvLines(t, psLog)
+	if len(ps) != 2 || ps[0] != ps[1] {
+		t.Fatalf("docker ps argv = %q; both sessions must discover by one filter", ps)
+	}
+	if !strings.Contains(ps[0], "label=devcontainer.local_folder="+root) {
+		t.Errorf("filter %q does not key on the repository root %s", ps[0], root)
 	}
 }

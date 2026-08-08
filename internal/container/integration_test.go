@@ -111,7 +111,7 @@ func TestIntegrationDevcontainerUp(t *testing.T) {
 		[]byte(`{"image": "alpine:3.20"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ws := resolve.Workspace{ID: "it", Slug: "it", Worktree: worktree}
+	ws := resolve.Workspace{ID: "it", RepositoryID: "it-repo", Slug: "it", RepoRoot: worktree}
 	cfg := config.Config{DevContainer: config.DevContainer{
 		Enabled: "true", StartTimeout: config.Duration(4 * time.Minute),
 	}}
