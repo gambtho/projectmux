@@ -35,6 +35,15 @@ func assertSchemaV2(t *testing.T, stdout string) {
 	if strings.Contains(stdout, "is_primary") {
 		t.Errorf("envelope still carries is_primary:\n%s", stdout)
 	}
+	// The key is matched quote-and-colon delimited, not as a bare substring:
+	// "proposed_session", "actual_session", "live_session", and
+	// "session_name" all contain "session" but none of them end their key
+	// in a closing quote immediately followed by a colon the way "session"
+	// itself does, so this cannot pass on the strength of a neighboring
+	// field.
+	if !strings.Contains(stdout, `"session":`) {
+		t.Errorf("envelope has no session field:\n%s", stdout)
+	}
 }
 
 // Every carrier is asserted separately rather than through one shared
@@ -144,9 +153,10 @@ func TestRebuildEnvelopeIsSchemaV2(t *testing.T) {
 		t.Fatalf("exit %d, stderr: %s", code, stderr)
 	}
 	assertSchemaV2(t, stdout)
-	// The registered array must be non-empty, or the is_primary check
-	// above would pass over an envelope that renders no registration at
-	// all and proves nothing about rebuildRegistered's fields.
+	// The fixture seeds one live session, so the registered array is
+	// guaranteed non-empty here; the repo_root check below therefore lands
+	// on an actual rebuildRegistered entry rather than passing vacuously
+	// over an empty array.
 	if !strings.Contains(stdout, `"repo_root"`) {
 		t.Errorf("rebuild registration has no repo_root:\n%s", stdout)
 	}
