@@ -319,16 +319,16 @@ func (a *Applier) observeLive(ctx context.Context, ws resolve.Workspace, sess co
 }
 
 // registeredFor reports the resolver's identity for ws, not the stored
-// row's, by design. Slug and Worktree are provably equal to the row's —
-// the identity gate above requires it — so only IsPrimary can diverge,
-// and only if the worktree's primary-ness changed since registration. In
-// that case this reports the resolver's current view, not the row's.
+// row's, by design. Slug and the repository root are provably equal to
+// the row's — the identity gate above requires it — so the two views can
+// no longer diverge at all; the function stays as the single place the
+// report is built, rather than being inlined at both call sites.
 func registeredFor(ws resolve.Workspace, session string) *Registered {
 	return &Registered{
 		ID:        ws.ID,
 		Slug:      ws.Slug,
-		Worktree:  ws.Worktree,
-		IsPrimary: ws.IsPrimary,
+		Worktree:  ws.RepoRoot,
+		IsPrimary: true,
 		Session:   session,
 	}
 }
@@ -346,5 +346,5 @@ func identityConflict(s controller.LiveSession, ws resolve.Workspace) *Conflict 
 		"session carries workspace %s, slug %q, worktree %q, but %s resolves to "+
 			"workspace %s, slug %q, worktree %q; refusing to register it",
 		s.WorkspaceID, s.Slug, s.Worktree,
-		s.Worktree, ws.ID, ws.Slug, ws.Worktree)
+		s.Worktree, ws.ID, ws.Slug, ws.RepoRoot)
 }

@@ -28,7 +28,7 @@ func (r *Runner) orphanedSessions(ctx context.Context) Check {
 	}
 	registered := make(map[string]string, len(records))
 	for _, rec := range records {
-		registered[rec.ID] = rec.Worktree
+		registered[rec.ID] = rec.RepoRoot
 	}
 
 	for _, session := range live {

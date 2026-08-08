@@ -133,9 +133,9 @@ func buildEnvelope(name string) (envelope, error) {
 		Workspace: workspaceInfo{
 			ID:          ws.ID,
 			Slug:        ws.Slug,
-			Worktree:    ws.Worktree,
+			Worktree:    ws.RepoRoot,
 			SessionName: ws.SessionName,
-			IsPrimary:   ws.IsPrimary,
+			IsPrimary:   true,
 		},
 		RepositoryRoots: roots,
 		Digest:          effective.Digest,

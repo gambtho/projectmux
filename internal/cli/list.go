@@ -114,8 +114,8 @@ func buildList(ctx context.Context) (listEnvelope, error) {
 		row := listRow{
 			ID:              rec.ID,
 			Slug:            rec.Slug,
-			Worktree:        rec.Worktree,
-			IsPrimary:       rec.IsPrimary,
+			Worktree:        rec.RepoRoot,
+			IsPrimary:       true,
 			ProposedSession: rec.ProposedSession,
 			ActualSession:   rec.ActualSession,
 			Container:       storedContainer(rec.Container),
@@ -131,7 +131,7 @@ func buildList(ctx context.Context) (listEnvelope, error) {
 			name := s.Name
 			row.SessionState = "live"
 			row.LiveSession = &name
-			row.IdentityConflict = s.Slug != rec.Slug || s.Worktree != rec.Worktree
+			row.IdentityConflict = s.Slug != rec.Slug || s.Worktree != rec.RepoRoot
 			consumed[rec.ID] = true
 		default:
 			// Multiple sessions claim this workspace: uncertainty,

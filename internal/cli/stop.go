@@ -118,9 +118,9 @@ func runStop(ctx context.Context, args []string, stdout io.Writer) error {
 		Workspace: workspaceInfo{
 			ID:          ws.ID,
 			Slug:        ws.Slug,
-			Worktree:    ws.Worktree,
+			Worktree:    ws.RepoRoot,
 			SessionName: ws.SessionName,
-			IsPrimary:   ws.IsPrimary,
+			IsPrimary:   true,
 		},
 		Session: stopSessionInfo{Stopped: res.SessionStopped, Name: res.SessionName},
 	}

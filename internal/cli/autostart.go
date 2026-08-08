@@ -94,9 +94,6 @@ func runAutostart(ctx context.Context, args []string, stdout io.Writer) error {
 	env := autostartEnvelope{SchemaVersion: OutputSchemaVersion, Workspaces: []autostartEntry{}}
 	failed := 0
 	for _, rec := range records {
-		if !rec.IsPrimary {
-			continue
-		}
 		entry := autostartEntry{ID: rec.ID, Slug: rec.Slug}
 
 		// The stored worktree must exist before anything else: config
@@ -104,12 +101,12 @@ func runAutostart(ctx context.Context, args []string, stdout io.Writer) error {
 		// check would misread absence as "does not apply" — a vanished
 		// worktree must be a visible boot-log failure, not a silent
 		// skip (spec §3, Codex review finding).
-		if _, statErr := os.Stat(rec.Worktree); statErr != nil {
+		if _, statErr := os.Stat(rec.RepoRoot); statErr != nil {
 			entry.Outcome = "failed"
 			// Only confirmed absence may claim the worktree is gone;
 			// permission or I/O failures keep their own story.
 			if errors.Is(statErr, os.ErrNotExist) {
-				entry.Reason = "worktree no longer exists: " + rec.Worktree
+				entry.Reason = "worktree no longer exists: " + rec.RepoRoot
 			} else {
 				entry.Reason = "statting the worktree: " + statErr.Error()
 			}
@@ -135,11 +132,11 @@ func runAutostart(ctx context.Context, args []string, stdout io.Writer) error {
 
 		d := controller.Desired{
 			Workspace: resolve.Workspace{
-				ID:          rec.ID,
-				Slug:        rec.Slug,
-				Worktree:    rec.Worktree,
-				SessionName: rec.ProposedSession,
-				IsPrimary:   rec.IsPrimary,
+				ID:           rec.ID,
+				RepositoryID: rec.RepositoryID,
+				Slug:         rec.Slug,
+				RepoRoot:     rec.RepoRoot,
+				SessionName:  rec.ProposedSession,
 			},
 			Config: effective.Config,
 			Digest: effective.Digest,

@@ -175,9 +175,9 @@ func statusEnvelopeFrom(ws resolve.Workspace, effective config.Effective, snap c
 		Workspace: workspaceInfo{
 			ID:          ws.ID,
 			Slug:        ws.Slug,
-			Worktree:    ws.Worktree,
+			Worktree:    ws.RepoRoot,
 			SessionName: ws.SessionName,
-			IsPrimary:   ws.IsPrimary,
+			IsPrimary:   true,
 		},
 		Session: sessionInfo{State: string(snap.Session.State)},
 		Config:  configInfo{DesiredDigest: effective.Digest},
