@@ -131,8 +131,7 @@ func doctorEnvelopeFrom(report doctor.Report) doctorEnvelope {
 }
 
 // writeDoctorHuman renders one line per check with indented item lines.
-// This layout is not a compatibility contract; automation should use
-// --json.
+// This layout may change in any release; automation should use --json.
 func writeDoctorHuman(w io.Writer, env doctorEnvelope) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	for _, check := range env.Checks {

@@ -6,9 +6,11 @@
 // that plan; attach joins a session it never creates, and config, list,
 // status, doctor, and version observe without mutating anything.
 //
-// This build is an alpha. The configuration schema and the exit codes may
-// still change below 1.0; the JSON envelopes carry a schema_version, and
-// human-readable output is deliberately not a compatibility contract.
+// This build is an alpha. Nothing it emits is a compatibility contract below
+// 1.0 — not the configuration schema, the command surface, the JSON
+// envelopes, or the exit codes. The envelopes carry a schema_version so a
+// break is expressible, and human-readable output remains the least stable of
+// them; automation should parse --json.
 package main
 
 import (
