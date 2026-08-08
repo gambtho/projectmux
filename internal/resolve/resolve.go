@@ -1,5 +1,5 @@
 // Package resolve turns a workspace name or a working directory into the
-// canonical worktree and the identity derived from it.
+// canonical repository root and the identity derived from it.
 //
 // It owns every git invocation in the application. No other package shells out
 // to git, and this package neither reads configuration files nor mutates any
@@ -17,28 +17,27 @@ import (
 	"strings"
 )
 
-// nestedWorktreeDirs are the conventional locations for linked worktrees kept
-// inside their parent repository.
-var nestedWorktreeDirs = []string{".worktrees", ".claude/worktrees"}
-
-// Workspace is the identity derived from a canonical worktree path.
+// Workspace is one session on one repository. A repository is the unit a
+// container is keyed on, so every tree of a project — main or linked worktree —
+// resolves to the same repository and shares that container.
 type Workspace struct {
-	// ID is the hex SHA-256 of Worktree. It is stable for that path and is the
-	// key the state store records operational state under.
+	// ID is the hex SHA-256 of RepoRoot, a NUL byte, and Session. It is stable
+	// for that pair and is the key the state store records session state under.
 	ID string
-	// Slug names the repository. A linked worktree inherits its parent
-	// repository's slug so that every tree of one project shares configuration.
+	// RepositoryID is the hex SHA-256 of RepoRoot. Sessions on one repository
+	// share it, which is what makes one container per repository expressible.
+	RepositoryID string
+	// Slug names the repository.
 	Slug string
-	// Worktree is absolute and symlink-free.
-	Worktree string
+	// RepoRoot is absolute, symlink-free, and always a main working tree.
+	RepoRoot string
+	// Session is the named session on the repository, empty for the default.
+	Session string
 	// SessionName is the proposed human-facing tmux session name.
 	SessionName string
-	// IsPrimary reports whether this is the repository's main working tree. A
-	// directory that is not a git repository at all counts as primary.
-	IsPrimary bool
 }
 
-// AmbiguousError reports a name matching more than one worktree.
+// AmbiguousError reports a name matching more than one repository.
 type AmbiguousError struct {
 	Name       string
 	Candidates []string
@@ -46,12 +45,12 @@ type AmbiguousError struct {
 
 func (e *AmbiguousError) Error() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "ambiguous workspace name %q; it matches:", e.Name)
+	fmt.Fprintf(&b, "ambiguous workspace name %q; it matches more than one repository:", e.Name)
 	for _, c := range e.Candidates {
 		b.WriteString("\n  " + c)
 	}
-	b.WriteString("\ndisambiguate by changing into the intended tree and " +
-		"running projectmux with no workspace argument, or by renaming one tree")
+	b.WriteString("\ndisambiguate by changing into the intended repository and " +
+		"running projectmux with no workspace argument, or by renaming one repository")
 	return b.String()
 }
 
@@ -73,66 +72,58 @@ func (e *UnknownWorkspaceError) Error() string {
 	fmt.Fprintf(&b, "unknown workspace %q; searched under:", e.Name)
 	for _, r := range e.Roots {
 		fmt.Fprintf(&b, "\n  %s", r)
-		for _, nest := range nestedWorktreeDirs {
-			fmt.Fprintf(&b, "\n  %s", filepath.Join(r, "*", nest))
-		}
 	}
 	return b.String()
 }
 
 // Resolve finds the workspace for name, or for cwd when name is empty.
 func Resolve(name string, roots []string, cwd string) (Workspace, error) {
-	var worktree string
-	if name == "" {
-		worktree = fromDirectory(cwd)
-	} else {
+	dir := cwd
+	if name != "" {
 		found, err := byName(name, roots)
 		if err != nil {
 			return Workspace{}, err
 		}
-		worktree = found
+		dir = found
 	}
 
-	canonical, err := canonicalize(worktree)
+	canonical, err := canonicalize(dir)
 	if err != nil {
 		return Workspace{}, err
 	}
+	repoRoot := mainWorktree(canonical)
 
-	primary := isPrimary(canonical)
-	slug := slugFor(canonical)
-	session := slug
-	if !primary {
-		session = slug + "--" + filepath.Base(canonical)
+	// The default session is the only one this slice can produce; the
+	// <repo>/<session> argument form arrives with target parsing. The
+	// derivation takes the session as an input now because adding it later
+	// would rewrite every stored ID a second time.
+	session := ""
+	slug := filepath.Base(repoRoot)
+	sessionName := slug
+	if session != "" {
+		sessionName = slug + "--" + session
 	}
-	sum := sha256.Sum256([]byte(canonical))
+	repositorySum := sha256.Sum256([]byte(repoRoot))
+	workspaceSum := sha256.Sum256([]byte(repoRoot + "\x00" + session))
 
 	return Workspace{
-		ID:          hex.EncodeToString(sum[:]),
-		Slug:        slug,
-		Worktree:    canonical,
-		SessionName: session,
-		IsPrimary:   primary,
+		ID:           hex.EncodeToString(workspaceSum[:]),
+		RepositoryID: hex.EncodeToString(repositorySum[:]),
+		Slug:         slug,
+		RepoRoot:     repoRoot,
+		Session:      session,
+		SessionName:  sessionName,
 	}, nil
 }
 
-// fromDirectory prefers the enclosing worktree root so that running from a
-// subdirectory resolves the same workspace. A directory outside git resolves to
-// itself.
-func fromDirectory(cwd string) string {
-	if top, err := gitOutput(cwd, "rev-parse", "--show-toplevel"); err == nil && top != "" {
-		return top
-	}
-	return cwd
-}
-
-// byName searches each configured root for a directly-named repository and for
-// linked worktrees kept in the conventional nested directories.
+// byName searches each configured root for a directly-named repository. A
+// linked worktree is no longer findable by name: it is a directory inside a
+// repository, and its sessions belong to that repository.
 func byName(name string, roots []string) (string, error) {
-	// name is one literal directory component, not a pattern or a path. Without
-	// this guard, a separator escapes the configured roots, and a glob
-	// metacharacter either matches unrelated directories ("*") or aborts the
-	// search with a pattern-syntax error ("foo["). The only wildcard the search
-	// owns is the repository level of the nested-worktree patterns below.
+	// name is one literal directory component, not a pattern or a path.
+	// Without this guard a separator escapes the configured roots, and a glob
+	// metacharacter would be looked up as a directory that cannot exist,
+	// reporting "unknown" for a name the user may have meant literally.
 	if name != filepath.Base(name) || strings.ContainsAny(name, `*?[\`) {
 		return "", &UnknownWorkspaceError{Name: name, Roots: roots}
 	}
@@ -140,34 +131,19 @@ func byName(name string, roots []string) (string, error) {
 	seen := map[string]bool{}
 
 	for _, r := range roots {
-		var patterns []string
-		patterns = append(patterns, filepath.Join(r, name))
-		for _, nest := range nestedWorktreeDirs {
-			patterns = append(patterns, filepath.Join(r, "*", nest, name))
+		dir := filepath.Join(r, name)
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() {
+			continue
 		}
-		for _, pattern := range patterns {
-			matches, err := filepath.Glob(pattern)
-			if err != nil {
-				// The only possible error is a malformed pattern, which would
-				// come from a root the user typed. Report it rather than
-				// silently searching nothing.
-				return "", fmt.Errorf("searching %s: %w", pattern, err)
-			}
-			for _, m := range matches {
-				info, err := os.Stat(m)
-				if err != nil || !info.IsDir() {
-					continue
-				}
-				// Deduplicate by canonical path: overlapping or repeated roots
-				// are a configuration wart, not a genuine collision.
-				canonical, err := canonicalize(m)
-				if err != nil || seen[canonical] {
-					continue
-				}
-				seen[canonical] = true
-				candidates = append(candidates, canonical)
-			}
+		// Deduplicate by canonical path: overlapping or repeated roots are a
+		// configuration wart, not a genuine collision.
+		canonical, err := canonicalize(dir)
+		if err != nil || seen[canonical] {
+			continue
 		}
+		seen[canonical] = true
+		candidates = append(candidates, canonical)
 	}
 
 	switch len(candidates) {
@@ -199,48 +175,28 @@ func canonicalize(path string) (string, error) {
 	return resolved, nil
 }
 
-// isPrimary reports whether path is a repository's main working tree. git may
-// report either directory relative to where it ran, so both are canonicalized
-// before comparison. A directory outside git counts as primary.
-func isPrimary(path string) bool {
-	gitDir, err := gitOutput(path, "rev-parse", "--git-dir")
-	if err != nil {
-		return true
-	}
-	commonDir, err := gitOutput(path, "rev-parse", "--git-common-dir")
-	if err != nil {
-		return true
-	}
-	canonicalDir := func(p string) string {
-		if !filepath.IsAbs(p) {
-			p = filepath.Join(path, p)
-		}
-		if canonical, err := filepath.EvalSymlinks(p); err == nil {
-			return canonical
-		}
-		return p
-	}
-	return canonicalDir(gitDir) == canonicalDir(commonDir)
-}
-
-// slugFor names the repository. The first entry of `git worktree list` is the
-// main working tree, so every linked worktree inherits the parent repository's
-// name and therefore its configuration.
-func slugFor(path string) string {
+// mainWorktree returns the repository's main working tree for path. The first
+// entry of `git worktree list --porcelain` is the main tree, so a linked
+// worktree, and any subdirectory of one, answer with the repository the user
+// means rather than with a tree of their own. A directory outside git, or one
+// whose main tree git names but the filesystem no longer has, is its own root.
+func mainWorktree(path string) string {
 	out, err := gitOutput(path, "worktree", "list", "--porcelain")
-	if err == nil {
-		for _, line := range strings.Split(out, "\n") {
-			main, ok := strings.CutPrefix(line, "worktree ")
-			if !ok {
-				continue
-			}
-			if info, err := os.Stat(main); err == nil && info.IsDir() {
-				return filepath.Base(main)
-			}
+	if err != nil {
+		return path
+	}
+	for _, line := range strings.Split(out, "\n") {
+		main, ok := strings.CutPrefix(line, "worktree ")
+		if !ok {
+			continue
+		}
+		canonical, err := canonicalize(main)
+		if err != nil {
 			break
 		}
+		return canonical
 	}
-	return filepath.Base(path)
+	return path
 }
 
 func gitOutput(dir string, args ...string) (string, error) {
