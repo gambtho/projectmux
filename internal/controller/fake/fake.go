@@ -81,31 +81,45 @@ func (o *ContainerObserver) ProbeContainer(_ context.Context, binding state.Cont
 }
 
 func (o *ContainerObserver) DiscoverContainer(_ context.Context, ws resolve.Workspace, _ config.Config) (*controller.ContainerObservation, error) {
-	o.Discovered = append(o.Discovered, ws.ID)
+	// Containers are per repository, so the repository ID is the honest
+	// key to record here: the container phase never carries a session.
+	o.Discovered = append(o.Discovered, ws.RepositoryID)
 	if o.DiscoverErr != nil {
 		return nil, o.DiscoverErr
 	}
 	return o.DiscoverResult, nil
 }
 
-// Store is an in-memory controller.Store.
+// Store is an in-memory controller.Store. Repositories and container
+// bindings live in maps of their own rather than on the record, mirroring
+// the repositories and repository-keyed container_bindings tables: every
+// session on a repository must read back the one binding its siblings
+// wrote, which is what lets a shared container be started once.
 type Store struct {
-	mu      sync.Mutex
-	records map[string]*state.Record
+	mu           sync.Mutex
+	records      map[string]*state.Record
+	repositories map[string]*state.Repository
+	containers   map[string]*state.ContainerBinding
 }
 
 func NewStore() *Store {
-	return &Store{records: map[string]*state.Record{}}
+	return &Store{
+		records:      map[string]*state.Record{},
+		repositories: map[string]*state.Repository{},
+		containers:   map[string]*state.ContainerBinding{},
+	}
 }
 
 func (s *Store) RegisterWorkspace(ws resolve.Workspace, desiredDigest string, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.upsertRepositoryLocked(ws, now)
 	digest := desiredDigest
 	if rec, ok := s.records[ws.ID]; ok {
+		rec.RepositoryID = ws.RepositoryID
 		rec.Slug = ws.Slug
-		rec.Worktree = ws.Worktree
-		rec.IsPrimary = ws.IsPrimary
+		rec.RepoRoot = ws.RepoRoot
+		rec.Session = ws.Session
 		rec.ProposedSession = ws.SessionName
 		rec.DesiredDigest = &digest
 		rec.UpdatedAt = now
@@ -113,15 +127,38 @@ func (s *Store) RegisterWorkspace(ws resolve.Workspace, desiredDigest string, no
 	}
 	s.records[ws.ID] = &state.Record{
 		ID:              ws.ID,
+		RepositoryID:    ws.RepositoryID,
 		Slug:            ws.Slug,
-		Worktree:        ws.Worktree,
-		IsPrimary:       ws.IsPrimary,
+		RepoRoot:        ws.RepoRoot,
+		Session:         ws.Session,
 		ProposedSession: ws.SessionName,
 		DesiredDigest:   &digest,
 		RegisteredAt:    now,
 		UpdatedAt:       now,
 	}
 	return nil
+}
+
+// upsertRepositoryLocked mirrors the real store's two-statement
+// registration: the repository row is written first and the session row
+// references it. Registering a second session on a repository refreshes
+// the repository's mutable columns and deliberately leaves its binding
+// alone — a sibling opening a session must not disturb a running
+// container.
+func (s *Store) upsertRepositoryLocked(ws resolve.Workspace, now time.Time) {
+	if repo, ok := s.repositories[ws.RepositoryID]; ok {
+		repo.Slug = ws.Slug
+		repo.RepoRoot = ws.RepoRoot
+		repo.UpdatedAt = now
+		return
+	}
+	s.repositories[ws.RepositoryID] = &state.Repository{
+		ID:           ws.RepositoryID,
+		Slug:         ws.Slug,
+		RepoRoot:     ws.RepoRoot,
+		RegisteredAt: now,
+		UpdatedAt:    now,
+	}
 }
 
 func (s *Store) AllocateSessionName(workspaceID string, now time.Time) (string, error) {
@@ -153,23 +190,22 @@ func (s *Store) AllocateSessionName(workspaceID string, now time.Time) (string, 
 	}
 }
 
-func (s *Store) RecordContainerObservation(workspaceID string, obs state.ContainerObservation, now time.Time) error {
+func (s *Store) RecordContainerObservation(repositoryID string, obs state.ContainerObservation, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.recordContainerLocked(workspaceID, obs, now)
+	return s.recordContainerLocked(repositoryID, obs, now)
 }
 
-func (s *Store) recordContainerLocked(workspaceID string, obs state.ContainerObservation, now time.Time) error {
-	rec, ok := s.records[workspaceID]
-	if !ok {
-		return fmt.Errorf("workspace %s: %w", workspaceID, state.ErrNotFound)
+func (s *Store) recordContainerLocked(repositoryID string, obs state.ContainerObservation, now time.Time) error {
+	if _, ok := s.repositories[repositoryID]; !ok {
+		return fmt.Errorf("repository %s: %w", repositoryID, state.ErrNotFound)
 	}
 	switch obs.Health {
 	case state.HealthPresent:
 		if obs.ContainerID == "" {
 			return fmt.Errorf("a present container observation must carry a container ID")
 		}
-		rec.Container = &state.ContainerBinding{
+		s.containers[repositoryID] = &state.ContainerBinding{
 			Kind:          obs.Kind,
 			ContainerID:   obs.ContainerID,
 			ContainerUser: obs.ContainerUser,
@@ -178,9 +214,9 @@ func (s *Store) recordContainerLocked(workspaceID string, obs state.ContainerObs
 			ObservedAt:    now,
 		}
 	case state.HealthMissing, state.HealthUnknown:
-		if rec.Container != nil {
-			rec.Container.Health = obs.Health
-			rec.Container.ObservedAt = now
+		if b, ok := s.containers[repositoryID]; ok {
+			b.Health = obs.Health
+			b.ObservedAt = now
 		}
 	default:
 		return fmt.Errorf("invalid container health %q", obs.Health)
@@ -221,7 +257,9 @@ func (s *Store) CommitReconciliation(workspaceID string, r state.ReconciliationR
 	// same all-or-nothing behavior the SQLite transaction gives the real
 	// store.
 	if r.Container != nil {
-		if err := s.recordContainerLocked(workspaceID, *r.Container, now); err != nil {
+		// The observation is recorded against the repository the session
+		// belongs to, not the session, so a sibling reads the same binding.
+		if err := s.recordContainerLocked(rec.RepositoryID, *r.Container, now); err != nil {
 			return err
 		}
 	}
@@ -240,28 +278,37 @@ func (s *Store) Workspace(id string) (state.Record, error) {
 	if !ok {
 		return state.Record{}, fmt.Errorf("workspace %s: %w", id, state.ErrNotFound)
 	}
-	return copyRecord(rec), nil
+	return s.copyRecordLocked(rec), nil
 }
 
 // Workspaces returns every registered workspace ordered by slug, then
-// worktree, mirroring the real store's ORDER BY (internal/state/store.go).
+// repository root, then session, mirroring the real store's ORDER BY
+// (internal/state/store.go). The session key is not cosmetic: a repository
+// holds several sessions at one root, so without it their order is the map
+// iteration order and a test that lists them is flaky.
 func (s *Store) Workspaces() ([]state.Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]state.Record, 0, len(s.records))
 	for _, rec := range s.records {
-		out = append(out, copyRecord(rec))
+		out = append(out, s.copyRecordLocked(rec))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Slug != out[j].Slug {
 			return out[i].Slug < out[j].Slug
 		}
-		return out[i].Worktree < out[j].Worktree
+		if out[i].RepoRoot != out[j].RepoRoot {
+			return out[i].RepoRoot < out[j].RepoRoot
+		}
+		return out[i].Session < out[j].Session
 	})
 	return out, nil
 }
 
-func copyRecord(rec *state.Record) state.Record {
+// copyRecordLocked deep-copies a record and attaches the repository's
+// shared container binding. A session therefore sees whatever container
+// its repository is bound to, including one a sibling session started.
+func (s *Store) copyRecordLocked(rec *state.Record) state.Record {
 	out := *rec
 	if rec.ActualSession != nil {
 		v := *rec.ActualSession
@@ -275,8 +322,9 @@ func copyRecord(rec *state.Record) state.Record {
 		v := *rec.AppliedDigest
 		out.AppliedDigest = &v
 	}
-	if rec.Container != nil {
-		c := *rec.Container
+	out.Container = nil
+	if b, ok := s.containers[rec.RepositoryID]; ok {
+		c := *b
 		out.Container = &c
 	}
 	if rec.LastOperation != nil {
@@ -286,6 +334,74 @@ func copyRecord(rec *state.Record) state.Record {
 			e := *rec.LastOperation.ExitStatus
 			out.LastOperation.ExitStatus = &e
 		}
+	}
+	return out
+}
+
+// Repository returns one repository with its binding attached, or
+// ErrNotFound. It mirrors the real store's single-row read, which the
+// container phase uses to refresh a binding under the repository lock.
+func (s *Store) Repository(id string) (state.Repository, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	repo, ok := s.repositories[id]
+	if !ok {
+		return state.Repository{}, fmt.Errorf("repository %s: %w", id, state.ErrNotFound)
+	}
+	return s.copyRepositoryLocked(repo), nil
+}
+
+// Repositories returns every registered repository ordered by slug, then
+// repository root, mirroring the real store's ORDER BY
+// (internal/state/store.go). Container is the repository's binding, copied
+// out so a caller cannot mutate stored state through the result.
+func (s *Store) Repositories() ([]state.Repository, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]state.Repository, 0, len(s.repositories))
+	for _, repo := range s.repositories {
+		out = append(out, s.copyRepositoryLocked(repo))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Slug != out[j].Slug {
+			return out[i].Slug < out[j].Slug
+		}
+		return out[i].RepoRoot < out[j].RepoRoot
+	})
+	return out, nil
+}
+
+// DropRepository removes a repository and everything keyed to it,
+// mirroring the cascade the real schema performs (migration 0002): the
+// repository row, every workspace belonging to it, and its container
+// binding. Each session's last operation goes with the record it hangs
+// off, the way last_operations cascades from workspaces.
+//
+// Dropping an id that is not there succeeds, matching the real store: a
+// second rebuild over an already-migrated installation must be a no-op
+// rather than an error.
+func (s *Store) DropRepository(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for wsID, rec := range s.records {
+		if rec.RepositoryID == id {
+			delete(s.records, wsID)
+		}
+	}
+	delete(s.containers, id)
+	delete(s.repositories, id)
+	return nil
+}
+
+// copyRepositoryLocked copies a repository and attaches its binding, which
+// is the LEFT JOIN the real store performs. The copy is what keeps a
+// caller from mutating stored state through the result.
+func (s *Store) copyRepositoryLocked(repo *state.Repository) state.Repository {
+	out := *repo
+	out.Container = nil
+	if b, ok := s.containers[repo.ID]; ok {
+		c := *b
+		out.Container = &c
 	}
 	return out
 }
@@ -356,7 +472,7 @@ type ContainerActuator struct {
 }
 
 func (a *ContainerActuator) StartContainer(_ context.Context, ws resolve.Workspace, _ config.Config) (controller.ContainerObservation, error) {
-	a.Started = append(a.Started, ws.ID)
+	a.Started = append(a.Started, ws.RepositoryID)
 	if a.StartErr != nil {
 		return controller.ContainerObservation{}, a.StartErr
 	}

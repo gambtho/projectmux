@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -458,5 +459,45 @@ func TestIntegrationKillByIDSparesNameReuse(t *testing.T) {
 	}
 	if names := strings.Fields(string(out)); len(names) != 1 || names[0] != "keeper" {
 		t.Errorf("surviving sessions = %v, want only keeper", names)
+	}
+}
+
+// TestRetagSessionRewritesTheIdentityKeys asserts both calls and, more
+// importantly, their order. The script logs one line per invocation, so
+// the log doubles as a call count: a chained single command or a reversed
+// pair both fail here.
+func TestRetagSessionRewritesTheIdentityKeys(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "argv.log")
+	fakeTmux(t, fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %s\nexit 0\n", logPath))
+
+	if err := (&Client{}).RetagSession(context.Background(), "slabledger--1529",
+		"new-id", "/repo"); err != nil {
+		t.Fatalf("RetagSession: %v", err)
+	}
+
+	body, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading the argv log: %v", err)
+	}
+	calls := strings.Split(strings.TrimSpace(string(body)), "\n")
+	if len(calls) != 2 {
+		t.Fatalf("calls = %q, want two set-option invocations", calls)
+	}
+	// The worktree is written first. If the second call fails the session
+	// keeps its old workspace ID, so the next rebuild still matches it by
+	// @dev_worktree and retries; the other order leaves a session no
+	// lookup can find.
+	//
+	// Socket is empty here, so no -L argument precedes the subcommand.
+	// Every argument is space-free, so the script's `echo "$@"` is a
+	// faithful rendering of argv.
+	want := []string{
+		"set-option -t slabledger--1529 " + controller.KeyWorktree + " /repo",
+		"set-option -t slabledger--1529 " + controller.KeyWorkspaceID + " new-id",
+	}
+	for i, w := range want {
+		if calls[i] != w {
+			t.Errorf("call %d = %q, want %q", i, calls[i], w)
+		}
 	}
 }

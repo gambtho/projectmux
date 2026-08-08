@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -42,8 +43,11 @@ func TestAcquireTimesOutWithTypedError(t *testing.T) {
 	if !errors.As(err, &heldErr) {
 		t.Fatalf("err = %v, want *ErrLockHeld", err)
 	}
-	if heldErr.WorkspaceID != "w1" {
-		t.Errorf("WorkspaceID = %q, want w1", heldErr.WorkspaceID)
+	if heldErr.Key != "w1" {
+		t.Errorf("Key = %q, want w1", heldErr.Key)
+	}
+	if !strings.Contains(heldErr.Error(), "repository or workspace w1") {
+		t.Errorf("Error() = %q; it must name what kind of key is locked", heldErr.Error())
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Errorf("timed-out Acquire took %v", elapsed)

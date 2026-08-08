@@ -366,21 +366,21 @@ func TestDatabaseStatuses(t *testing.T) {
 }
 
 // seedStore registers one workspace and returns the store.
-func seedStore(t *testing.T, slug, worktree string) *fake.Store {
+func seedStore(t *testing.T, slug, repoRoot string) *fake.Store {
 	t.Helper()
 	store := fake.NewStore()
-	register(t, store, slug, worktree)
+	register(t, store, slug, repoRoot)
 	return store
 }
 
-func register(t *testing.T, store *fake.Store, slug, worktree string) {
+func register(t *testing.T, store *fake.Store, slug, repoRoot string) {
 	t.Helper()
 	ws := resolve.Workspace{
-		ID:          "id-" + slug,
-		Slug:        slug,
-		Worktree:    worktree,
-		SessionName: slug,
-		IsPrimary:   true,
+		ID:           "id-" + slug,
+		RepositoryID: "r-" + slug,
+		Slug:         slug,
+		RepoRoot:     repoRoot,
+		SessionName:  slug,
 	}
 	if err := store.RegisterWorkspace(ws, "sha256:abc", time.Now()); err != nil {
 		t.Fatalf("RegisterWorkspace: %v", err)
@@ -410,7 +410,7 @@ func TestOrphanedSessionsReportsUnregisteredAndMissingWorktree(t *testing.T) {
 		t.Errorf("slab = %q, want ok", got)
 	}
 	if got := findItem(t, check, "gone"); got.Status != StatusWarn ||
-		!strings.Contains(got.Detail, "worktree no longer exists") {
+		!strings.Contains(got.Detail, "repository root no longer exists") {
 		t.Errorf("gone = %+v, want warn about the worktree", got)
 	}
 	if got := findItem(t, check, "stray"); got.Status != StatusWarn ||
@@ -502,7 +502,7 @@ func TestOrphanedSessionsUnobservableTmuxIsUnknown(t *testing.T) {
 func bindStore(t *testing.T, slug string) *fake.Store {
 	t.Helper()
 	store := seedStore(t, slug, t.TempDir())
-	if err := store.RecordContainerObservation("id-"+slug, state.ContainerObservation{
+	if err := store.RecordContainerObservation("r-"+slug, state.ContainerObservation{
 		Kind:        "devcontainer",
 		ContainerID: "c-" + slug,
 		Health:      state.HealthPresent,

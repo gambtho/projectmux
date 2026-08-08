@@ -23,12 +23,11 @@ func live(name, id, slug, worktree string) controller.LiveSession {
 // stored builds a registered row. actual is the recorded actual_session,
 // empty meaning nil — the state a workspace is in when no session has been
 // adopted for it.
-func stored(id, slug, worktree, actual string) state.Record {
+func stored(id, slug, repoRoot, actual string) state.Record {
 	rec := state.Record{
 		ID:              id,
 		Slug:            slug,
-		Worktree:        worktree,
-		IsPrimary:       true,
+		RepoRoot:        repoRoot,
 		ProposedSession: slug,
 	}
 	if actual != "" {

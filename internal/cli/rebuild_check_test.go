@@ -26,7 +26,7 @@ func healthyStateRoot(t *testing.T) (string, string) {
 		t.Fatalf("open: %v", err)
 	}
 	if err := st.RegisterWorkspace(resolve.Workspace{
-		ID: "id-1", Slug: "slab", Worktree: "/w/slab", SessionName: "slab", IsPrimary: true,
+		ID: "id-1", RepositoryID: "repo-1", Slug: "slab", RepoRoot: "/w/slab", SessionName: "slab",
 	}, "sha256:abc", time.Now()); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestRebuildDatabaseCheckProceedsWithAnUnrecoveredWAL(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	if err := st.RegisterWorkspace(resolve.Workspace{
-		ID: "id-2", Slug: "other", Worktree: "/w/other", SessionName: "other", IsPrimary: true,
+		ID: "id-2", RepositoryID: "repo-2", Slug: "other", RepoRoot: "/w/other", SessionName: "other",
 	}, "sha256:def", time.Now()); err != nil {
 		t.Fatalf("register: %v", err)
 	}

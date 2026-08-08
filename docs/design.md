@@ -47,7 +47,7 @@ The difficult parts are application concerns rather than shell conveniences:
 
 - concurrent commands that mutate external resources;
 - reconciliation after partial failure;
-- collision-safe identity across linked worktrees;
+- one collision-safe identity per repository, shared by its linked worktrees;
 - persistent operational metadata;
 - structured subprocess execution and error retention; and
 - a future long-lived process observing Docker and tmux.
@@ -132,8 +132,10 @@ The packages have narrow responsibilities:
   to exit codes, and handle signals. It contains no orchestration logic.
 - **Config:** load defaults plus workspace layers, merge windows by name,
   validate, normalize, and compute a stable digest.
-- **Resolver:** resolve a name or current directory to a canonical worktree,
-  slug, stable workspace ID, primary-tree flag, and proposed session name.
+- **Resolver:** resolve a name or current directory to a canonical repository
+  root, slug, stable workspace ID, repository ID, and proposed session name. A
+  linked worktree resolves to the repository containing it, so every tree of a
+  project answers with the same identity.
 - **State store:** apply SQLite migrations and transact operational metadata.
   No other package issues SQL.
 - **Controller:** observe, plan, ensure, stop, and report a workspace. It depends
@@ -195,7 +197,7 @@ Version 1 uses this schema:
 
 Exactly one merged window may be focused. Window names are unique and limited
 to a documented portable character set. Relative paths cannot escape the
-worktree. Unknown fields are rejected so misspelled policy does not silently
+repository root. Unknown fields are rejected so misspelled policy does not silently
 turn into default behavior.
 
 Secrets and machine-specific values belong in `<slug>.local.yaml`. A corrupt or
@@ -203,22 +205,25 @@ invalid layer fails before any workspace mutation.
 
 ## 7. Identity and state
 
-The workspace ID is derived from the canonical worktree path and is stable for
-that path. The human-facing session name is derived from the slug and linked
-worktree basename. The database enforces a `UNIQUE` constraint on every
+The workspace ID is derived from the canonical repository root and is stable
+for that repository, so working in a linked worktree yields the identity of the
+repository it belongs to rather than one of its own. The human-facing session
+name is derived from the slug. The database enforces a `UNIQUE` constraint on every
 non-null actual session name. Collision resolution and assignment happen in one
 transaction; application-level check-then-insert is forbidden because it would
 retain the cross-workspace TOCTOU race SQLite is meant to remove.
 
 tmux sessions retain identity using the Phase 1 session-scoped keys
 `@dev_workspace_id`, `@dev_slug`, and `@dev_worktree`. The Go application reuses
-exactly these keys. They prevent cross-workspace attachment, allow database
+exactly these key names; `@dev_worktree` now carries the repository root, since
+that is the tree a workspace is keyed on. They prevent cross-workspace attachment, allow database
 rebuilding, and let the Go application adopt sessions created by the Bash
 implementation during atomic cutover.
 
 SQLite stores current operational metadata only:
 
-- workspace ID, slug, canonical worktree, and primary-tree flag;
+- repository ID, slug, and canonical repository root;
+- workspace ID and the session it names;
 - proposed and actual session names;
 - desired and applied configuration digests;
 - current container kind, ID, user, working directory, and observed health
@@ -250,7 +255,7 @@ uncertainty into loss. This preserves the old binding needed for repair without
 an event-log lookup or historical column. No container row means no binding has
 ever been recorded; the health enum is non-null whenever a binding exists.
 
-The database is rebuildable. Repository roots rediscover source worktrees,
+The database is rebuildable. Repository roots rediscover source repositories,
 tmux user options rediscover live sessions, and a later open can reacquire a
 container binding. Rebuilding may lose diagnostic timestamps and last errors,
 which is acceptable because they are operational metadata rather than desired
@@ -271,8 +276,9 @@ The first release retains the useful command vocabulary under the public
 - `projectmux stop [<workspace>]` ends the session and optionally the container.
   It is the only destructive command.
 - `projectmux config [<workspace>]` prints normalized merged configuration.
-- `projectmux autostart` starts containers for eligible registered primary
-  worktrees. It does not create tmux sessions merely to satisfy boot behavior.
+- `projectmux autostart` starts containers for eligible registered
+  repositories. It does not create tmux sessions merely to satisfy boot
+  behavior.
 - `projectmux doctor` diagnoses dependencies, configuration, database
   integrity, orphaned sessions, and stale bindings. State rebuilding is
   explicit rather than an automatic response to corruption.
@@ -295,9 +301,14 @@ Every command begins by loading desired configuration and observing external
 reality. The controller compares desired configuration, stored operational
 metadata, and adapter observations to produce a plan.
 
-Workspace-mutating commands take a per-workspace filesystem lock before the
-final observation and hold it through external mutations and the resulting
-state commit. They do not hold a SQLite transaction while a subprocess runs.
+Workspace-mutating commands take a filesystem lock before the final
+observation and hold it through external mutations and the resulting state
+commit. The workspace lock is always taken; a command with a container phase
+takes the repository lock ahead of it, in that fixed order, because a
+repository's container is shared by every tree of the project, so concurrent
+commands in two worktrees must serialize on it. A command with no container
+phase — `stop` without `--container`, say — takes the workspace lock alone.
+They do not hold a SQLite transaction while a subprocess runs.
 Observation-only commands do not take the operation lock.
 
 External resource changes and SQLite cannot be one transaction. The design
@@ -312,6 +323,26 @@ therefore provides convergence rather than pretending to provide atomicity:
 If the process crashes between steps 3 and 5, the next command observes the
 resource and adopts or repairs it. tmux identity options are the recovery marker
 for sessions.
+
+The same convergence applies to the schema itself. A migration is pure SQL and
+must succeed with the filesystem entirely absent, so the migration that made
+the repository the unit of a workspace moved every stored row verbatim: each
+recorded path became a repository root, over-counting linked worktrees rather
+than guessing. `projectmux rebuild` is the correction pass, because it may ask
+git. It collapses a row recorded at a linked worktree into its parent
+repository — registering the parent before dropping the stale row, so a crash
+between the two leaves an extra collapsible row rather than a lost registration
+— drops rows whose path no longer exists, and refuses, as a reported conflict,
+to drop a row whose path is present but unresolvable. Live sessions are matched
+by the tree recorded in `@dev_worktree` and retagged onto their repository, so
+a lone session running from before the change is adopted rather than
+duplicated. Because every tree of one project now resolves to the same
+workspace, two or more live sessions of one repository would be retagged onto a
+single identity; the pass refuses that group whole, retags none of it, and
+reports a conflict naming every claimant, since the retag would destroy the only
+keys that tell those sessions apart.
+`projectmux status` reports a repository whose recorded root is not a main
+worktree as needing this run.
 
 Container health is tri-state. A successful liveness probe yields `present`; a
 successful probe that confirms absence yields `missing`; and a failed probe,
@@ -328,8 +359,8 @@ disposable state after user confirmation.
 
 ProjectMux ships a systemd user unit template whose only job is to invoke
 `projectmux autostart`. Dotfiles may enable that unit according to personal
-installation policy. Autostart remains opt-in per workspace and applies only
-to primary worktrees.
+installation policy. Autostart remains opt-in per workspace, and acts once per
+repository rather than once per tree.
 
 Version 1 has no hook-driven event emitter and no resident process. Session or
 container loss is discovered on the next command. Removing those hooks is a

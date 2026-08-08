@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/gambtho/projectmux/internal/controller"
 	"github.com/gambtho/projectmux/internal/controller/fake"
+	"github.com/gambtho/projectmux/internal/rebuild"
 	"github.com/gambtho/projectmux/internal/resolve"
 )
 
@@ -34,7 +36,32 @@ func rebuildEnv(t *testing.T, s *fake.Store, live []controller.LiveSession) reso
 	installOpenStore(t, s)
 	installLiveSessions(t, live, nil)
 	installScriptedSessions(t) // exhausts on any call
+	installRefusingRetagger(t)
 	return ws
+}
+
+// refusingRetagger stands in for the real tmux client so that a test
+// reaching the retag hits the harness rather than the developer's own
+// tmux server. It reports through the test and through the command: the
+// t.Errorf names the seam nobody installed, and the returned error makes
+// rebuild surface a conflict instead of appearing to succeed.
+type refusingRetagger struct{ t *testing.T }
+
+func (r refusingRetagger) RetagSession(_ context.Context, target, workspaceID, repoRoot string) error {
+	r.t.Helper()
+	r.t.Errorf("unexpected retag of session %q onto %s (%s): a test exercising "+
+		"the retag must install its own retagger", target, workspaceID, repoRoot)
+	return errors.New("no retagger installed")
+}
+
+// installRefusingRetagger is rebuildEnv's default. Every rebuild test
+// constructs the retagger, so leaving the real one wired is a live trap
+// for the first test whose session keys disagree.
+func installRefusingRetagger(t *testing.T) {
+	t.Helper()
+	orig := newSessionRetagger
+	t.Cleanup(func() { newSessionRetagger = orig })
+	newSessionRetagger = func() rebuild.Retagger { return refusingRetagger{t} }
 }
 
 // installRebuildDatabaseCheck substitutes the pre-flight classification
@@ -101,7 +128,7 @@ func mismatchedSession(t *testing.T) (*fake.Store, resolve.Workspace) {
 		Name:        "new-name",
 		WorkspaceID: ws.ID,
 		Slug:        ws.Slug,
-		Worktree:    ws.Worktree,
+		Worktree:    ws.RepoRoot,
 	}}, nil)
 	return s, ws
 }

@@ -25,7 +25,7 @@ const (
 	ExitOK               = 0
 	ExitError            = 1 // unexpected or I/O failure
 	ExitUsage            = 2
-	ExitAmbiguous        = 3 // a workspace name matched more than one worktree
+	ExitAmbiguous        = 3 // a workspace name matched more than one repository
 	ExitUnknownWorkspace = 4
 	ExitInvalidConfig    = 5
 	ExitRefused          = 6 // the plan refused: conflict or uncertainty, do not blindly retry
@@ -45,10 +45,10 @@ commands:
         observe, ensure, record, and attach the workspace session
   attach [--json] [--compact] [<workspace>]
         attach to the live workspace session; never creates one
-  stop [--container] [--json] [--compact] [<workspace>]
+  stop [--container] [--force] [--json] [--compact] [<workspace>]
         end the workspace session, and with --container its container
   autostart [--json] [--compact]
-        start containers for registered primary worktrees with autostart: true
+        start containers for registered repositories with autostart: true
   config [--validate] [--json] [--compact] [<workspace>]
         print the normalized, merged configuration for a workspace, or with
         --validate report what is wrong in the configuration files and where

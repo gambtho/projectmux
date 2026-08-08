@@ -25,11 +25,11 @@ func openTestStore(t *testing.T) *Store {
 
 func testWorkspace(id string) resolve.Workspace {
 	return resolve.Workspace{
-		ID:          id,
-		Slug:        "slabledger",
-		Worktree:    "/home/u/workspace/slabledger-" + id,
-		SessionName: "slabledger",
-		IsPrimary:   true,
+		ID:           id,
+		RepositoryID: "repo-" + id,
+		Slug:         "slabledger",
+		RepoRoot:     "/home/u/workspace/slabledger-" + id,
+		SessionName:  "slabledger",
 	}
 }
 
@@ -38,6 +38,24 @@ func mustRegister(t *testing.T, s *Store, ws resolve.Workspace) {
 	if err := s.RegisterWorkspace(ws, "sha256:aaaa", testTime); err != nil {
 		t.Fatalf("RegisterWorkspace: %v", err)
 	}
+}
+
+// repositoryOf returns the stored repository with id. A container binding is
+// the repository's now, so a test that seeded one through a workspace reads it
+// back from here.
+func repositoryOf(t *testing.T, s *Store, id string) Repository {
+	t.Helper()
+	repos, err := s.Repositories()
+	if err != nil {
+		t.Fatalf("Repositories: %v", err)
+	}
+	for _, r := range repos {
+		if r.ID == id {
+			return r
+		}
+	}
+	t.Fatalf("repository %s is not stored", id)
+	return Repository{}
 }
 
 func TestRegisterWorkspaceRoundTrips(t *testing.T) {
@@ -49,8 +67,8 @@ func TestRegisterWorkspaceRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Workspace: %v", err)
 	}
-	if rec.ID != ws.ID || rec.Slug != ws.Slug || rec.Worktree != ws.Worktree ||
-		rec.ProposedSession != ws.SessionName || !rec.IsPrimary {
+	if rec.ID != ws.ID || rec.RepositoryID != ws.RepositoryID || rec.Slug != ws.Slug ||
+		rec.RepoRoot != ws.RepoRoot || rec.ProposedSession != ws.SessionName {
 		t.Errorf("record = %+v, want the registered identity", rec)
 	}
 	if rec.DesiredDigest == nil || *rec.DesiredDigest != "sha256:aaaa" {
@@ -212,14 +230,10 @@ func TestContainerObservationRoundTrips(t *testing.T) {
 	s := openTestStore(t)
 	mustRegister(t, s, testWorkspace("w1"))
 
-	if err := s.RecordContainerObservation("w1", presentObservation("c-1"), testTime); err != nil {
+	if err := s.RecordContainerObservation("repo-w1", presentObservation("c-1"), testTime); err != nil {
 		t.Fatalf("RecordContainerObservation: %v", err)
 	}
-	rec, err := s.Workspace("w1")
-	if err != nil {
-		t.Fatalf("Workspace: %v", err)
-	}
-	b := rec.Container
+	b := repositoryOf(t, s, "repo-w1").Container
 	if b == nil || b.ContainerID != "c-1" || b.Health != HealthPresent ||
 		b.Kind != "devcontainer" || b.ContainerUser != "vscode" ||
 		!b.ObservedAt.Equal(testTime) {
@@ -235,20 +249,16 @@ func TestMissingAndUnknownRetainTheBinding(t *testing.T) {
 		t.Run(string(health), func(t *testing.T) {
 			s := openTestStore(t)
 			mustRegister(t, s, testWorkspace("w1"))
-			if err := s.RecordContainerObservation("w1", presentObservation("c-1"), testTime); err != nil {
+			if err := s.RecordContainerObservation("repo-w1", presentObservation("c-1"), testTime); err != nil {
 				t.Fatalf("seed: %v", err)
 			}
 
 			later := testTime.Add(time.Hour)
-			err := s.RecordContainerObservation("w1", ContainerObservation{Health: health}, later)
+			err := s.RecordContainerObservation("repo-w1", ContainerObservation{Health: health}, later)
 			if err != nil {
 				t.Fatalf("record %s: %v", health, err)
 			}
-			rec, err := s.Workspace("w1")
-			if err != nil {
-				t.Fatalf("Workspace: %v", err)
-			}
-			b := rec.Container
+			b := repositoryOf(t, s, "repo-w1").Container
 			if b == nil || b.ContainerID != "c-1" || b.Kind != "devcontainer" {
 				t.Fatalf("identity was not retained: %+v", b)
 			}
@@ -262,49 +272,41 @@ func TestMissingAndUnknownRetainTheBinding(t *testing.T) {
 func TestReplacementOverwritesTheBinding(t *testing.T) {
 	s := openTestStore(t)
 	mustRegister(t, s, testWorkspace("w1"))
-	if err := s.RecordContainerObservation("w1", presentObservation("c-1"), testTime); err != nil {
+	if err := s.RecordContainerObservation("repo-w1", presentObservation("c-1"), testTime); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if err := s.RecordContainerObservation("w1", ContainerObservation{Health: HealthMissing}, testTime); err != nil {
+	if err := s.RecordContainerObservation("repo-w1", ContainerObservation{Health: HealthMissing}, testTime); err != nil {
 		t.Fatalf("missing: %v", err)
 	}
 
-	if err := s.RecordContainerObservation("w1", presentObservation("c-2"), testTime.Add(time.Hour)); err != nil {
+	if err := s.RecordContainerObservation("repo-w1", presentObservation("c-2"), testTime.Add(time.Hour)); err != nil {
 		t.Fatalf("replacement: %v", err)
 	}
-	rec, err := s.Workspace("w1")
-	if err != nil {
-		t.Fatalf("Workspace: %v", err)
-	}
-	if rec.Container == nil || rec.Container.ContainerID != "c-2" ||
-		rec.Container.Health != HealthPresent {
-		t.Errorf("binding = %+v, want the replacement c-2", rec.Container)
+	b := repositoryOf(t, s, "repo-w1").Container
+	if b == nil || b.ContainerID != "c-2" || b.Health != HealthPresent {
+		t.Errorf("binding = %+v, want the replacement c-2", b)
 	}
 }
 
-func TestObservationsForNeverBoundAndUnknownWorkspaces(t *testing.T) {
+func TestObservationsForNeverBoundAndUnknownRepositories(t *testing.T) {
 	s := openTestStore(t)
 	mustRegister(t, s, testWorkspace("w1"))
 
 	// missing/unknown with no existing binding record nothing: there is no
 	// identity to retain and none to invent.
-	if err := s.RecordContainerObservation("w1", ContainerObservation{Health: HealthMissing}, testTime); err != nil {
+	if err := s.RecordContainerObservation("repo-w1", ContainerObservation{Health: HealthMissing}, testTime); err != nil {
 		t.Fatalf("missing on never-bound: %v", err)
 	}
-	rec, err := s.Workspace("w1")
-	if err != nil {
-		t.Fatalf("Workspace: %v", err)
-	}
-	if rec.Container != nil {
-		t.Errorf("never-bound workspace grew a binding: %+v", rec.Container)
+	if b := repositoryOf(t, s, "repo-w1").Container; b != nil {
+		t.Errorf("never-bound repository grew a binding: %+v", b)
 	}
 
-	err = s.RecordContainerObservation("absent", presentObservation("c-1"), testTime)
+	err := s.RecordContainerObservation("absent", presentObservation("c-1"), testTime)
 	if !errors.Is(err, ErrNotFound) {
-		t.Errorf("unknown workspace error = %v, want ErrNotFound", err)
+		t.Errorf("unknown repository error = %v, want ErrNotFound", err)
 	}
 
-	err = s.RecordContainerObservation("w1", ContainerObservation{Health: HealthPresent}, testTime)
+	err = s.RecordContainerObservation("repo-w1", ContainerObservation{Health: HealthPresent}, testTime)
 	if err == nil {
 		t.Error("present without a container ID should be rejected")
 	}
@@ -373,8 +375,8 @@ func TestCommitReconciliationAppliesEverythingAtomically(t *testing.T) {
 	if rec.AppliedDigest == nil || *rec.AppliedDigest != digest {
 		t.Errorf("applied digest = %v, want %q", rec.AppliedDigest, digest)
 	}
-	if rec.Container == nil || rec.Container.ContainerID != "c-1" {
-		t.Errorf("container = %+v", rec.Container)
+	if b := repositoryOf(t, s, "repo-w1").Container; b == nil || b.ContainerID != "c-1" {
+		t.Errorf("container = %+v", b)
 	}
 	if rec.LastOperation == nil || rec.LastOperation.Outcome != OutcomeOK {
 		t.Errorf("operation = %+v", rec.LastOperation)
@@ -506,5 +508,73 @@ func TestAdoptSessionNameRejectsUnknownWorkspaceAndEmptyName(t *testing.T) {
 	}
 	if errors.Is(err, ErrNotFound) {
 		t.Errorf("err = %v, want the empty-name error, not ErrNotFound", err)
+	}
+}
+
+// TestTwoSessionsOnOneRepositoryCoexist is the design-§5.2 finding as a test:
+// the 0001 schema made workspaces.worktree UNIQUE, so this pair could not be
+// represented at all and a column rename would not have helped.
+func TestTwoSessionsOnOneRepositoryCoexist(t *testing.T) {
+	s := openTestStore(t)
+	a := testWorkspace("w1")
+	b := testWorkspace("w2")
+	b.RepositoryID = a.RepositoryID
+	b.RepoRoot = a.RepoRoot
+	b.Session = "feature-a"
+	b.SessionName = "slabledger--feature-a"
+	mustRegister(t, s, a)
+	mustRegister(t, s, b)
+
+	repos, err := s.Repositories()
+	if err != nil {
+		t.Fatalf("Repositories: %v", err)
+	}
+	if len(repos) != 1 || repos[0].RepoRoot != a.RepoRoot {
+		t.Fatalf("repositories = %+v, want the one both sessions share", repos)
+	}
+	all, err := s.Workspaces()
+	if err != nil {
+		t.Fatalf("Workspaces: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("%d workspaces, want 2", len(all))
+	}
+	if all[0].Session != "" || all[1].Session != "feature-a" {
+		t.Errorf("sessions = %q, %q; want the default first", all[0].Session, all[1].Session)
+	}
+	for _, rec := range all {
+		if rec.RepositoryID != a.RepositoryID || rec.RepoRoot != a.RepoRoot {
+			t.Errorf("record %s = %+v, want the shared repository", rec.ID, rec)
+		}
+	}
+}
+
+// TestRegisteringReplacesAStaleRepositoryForTheSamePath covers the state 0002
+// leaves behind: repository IDs were carried over from the old workspace rows
+// rather than recomputed, so the first registration after an upgrade brings a
+// new ID for a repo_root that is UNIQUE. Registration re-keys the row instead
+// of failing on the constraint.
+func TestRegisteringReplacesAStaleRepositoryForTheSamePath(t *testing.T) {
+	s := openTestStore(t)
+	stale := testWorkspace("w1")
+	mustRegister(t, s, stale)
+
+	fresh := stale
+	fresh.ID = "w1-rekeyed"
+	fresh.RepositoryID = "repo-w1-rekeyed"
+	mustRegister(t, s, fresh)
+
+	repos, err := s.Repositories()
+	if err != nil {
+		t.Fatalf("Repositories: %v", err)
+	}
+	if len(repos) != 1 || repos[0].ID != fresh.RepositoryID {
+		t.Fatalf("repositories = %+v, want only the re-keyed row", repos)
+	}
+	if _, err := s.Workspace("w1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("stale workspace error = %v, want ErrNotFound: it should have cascaded", err)
+	}
+	if _, err := s.Workspace("w1-rekeyed"); err != nil {
+		t.Errorf("re-keyed workspace: %v", err)
 	}
 }

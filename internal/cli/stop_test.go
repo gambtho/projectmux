@@ -105,7 +105,7 @@ func TestStopUnknownRefusesExitSix(t *testing.T) {
 func TestStopContainerStopsBinding(t *testing.T) {
 	ws := openWorkspaceIdentity(t)
 	s, _ := stopFixtureFor(t, ws)
-	if err := s.RecordContainerObservation(ws.ID, state.ContainerObservation{
+	if err := s.RecordContainerObservation(ws.RepositoryID, state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "cid-1", Health: state.HealthPresent,
 	}, cliTestTime); err != nil {
 		t.Fatalf("bind: %v", err)
@@ -133,7 +133,7 @@ func TestStopContainerStopsBinding(t *testing.T) {
 func TestStopContainerPartialFailureReportsOnStdout(t *testing.T) {
 	ws := openWorkspaceIdentity(t)
 	s, _ := stopFixtureFor(t, ws)
-	if err := s.RecordContainerObservation(ws.ID, state.ContainerObservation{
+	if err := s.RecordContainerObservation(ws.RepositoryID, state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "cid-1", Health: state.HealthPresent,
 	}, cliTestTime); err != nil {
 		t.Fatalf("bind: %v", err)
@@ -176,5 +176,84 @@ func TestStopUnregisteredIsQuietSuccess(t *testing.T) {
 	env := decodeStop(t, stdout)
 	if env.Session.Stopped {
 		t.Errorf("session = %+v", env.Session)
+	}
+}
+
+// registerCLISibling adds a second session on the workspace's repository
+// directly through the store: the resolver has no argument form for one
+// yet, but rebuild produces them from pre-existing worktree sessions.
+func registerCLISibling(t *testing.T, s *fake.Store, ws resolve.Workspace) controller.LiveSession {
+	t.Helper()
+	sib := resolve.Workspace{
+		ID:           ws.ID + "-2",
+		RepositoryID: ws.RepositoryID,
+		Slug:         ws.Slug,
+		RepoRoot:     ws.RepoRoot,
+		Session:      "feature-a",
+		SessionName:  ws.SessionName + "--feature-a",
+	}
+	if err := s.RegisterWorkspace(sib, "sha256:seed", cliTestTime); err != nil {
+		t.Fatalf("register sibling: %v", err)
+	}
+	if _, err := s.AllocateSessionName(sib.ID, cliTestTime); err != nil {
+		t.Fatalf("allocate sibling: %v", err)
+	}
+	return controller.LiveSession{
+		ID: "$9", Name: sib.SessionName, WorkspaceID: sib.ID,
+		Slug: sib.Slug, Worktree: sib.RepoRoot,
+	}
+}
+
+func TestStopContainerRefusesWithLiveSiblingExitsSix(t *testing.T) {
+	ws := openWorkspaceIdentity(t)
+	s, _ := stopFixtureFor(t, ws)
+	if err := s.RecordContainerObservation(ws.RepositoryID, state.ContainerObservation{
+		Kind: "devcontainer", ContainerID: "cid-1", Health: state.HealthPresent,
+	}, cliTestTime); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	sib := registerCLISibling(t, s, ws)
+	actC := installContainerActuator(t)
+	installScriptedSessions(t, cliLive(sib))
+
+	code, stdout, stderr := run(t, "stop", "--container", "--json")
+	if code != ExitRefused {
+		t.Fatalf("exit %d, want %d (stderr %s)", code, ExitRefused, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty on refusal (nothing was done)", stdout)
+	}
+	if !strings.Contains(stderr, sib.Name) {
+		t.Errorf("stderr = %q, want the live sibling named", stderr)
+	}
+	if len(actC.Stopped) != 0 {
+		t.Errorf("Stopped = %v; the shared container was killed anyway", actC.Stopped)
+	}
+}
+
+func TestStopContainerForceStopsSharedContainer(t *testing.T) {
+	ws := openWorkspaceIdentity(t)
+	s, actuator := stopFixtureFor(t, ws)
+	if err := s.RecordContainerObservation(ws.RepositoryID, state.ContainerObservation{
+		Kind: "devcontainer", ContainerID: "cid-1", Health: state.HealthPresent,
+	}, cliTestTime); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	registerCLISibling(t, s, ws)
+	actC := installContainerActuator(t)
+	// Force never observes the siblings, so the only scripted step is the
+	// workspace's own session.
+	installScriptedSessions(t, cliLive(ownLive(ws, ws.SessionName)))
+
+	code, stdout, stderr := run(t, "stop", "--container", "--force", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	env := decodeStop(t, stdout)
+	if env.Container == nil || !env.Container.Stopped || env.Container.ContainerID != "cid-1" {
+		t.Errorf("container = %+v", env.Container)
+	}
+	if len(actC.Stopped) != 1 || len(actuator.Killed) != 1 {
+		t.Errorf("Stopped = %v, Killed = %v", actC.Stopped, actuator.Killed)
 	}
 }

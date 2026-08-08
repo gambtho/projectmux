@@ -83,9 +83,9 @@ func runOpen(ctx context.Context, args []string, stdout io.Writer) error {
 			Workspace: workspaceInfo{
 				ID:          ws.ID,
 				Slug:        ws.Slug,
-				Worktree:    ws.Worktree,
+				RepoRoot:    ws.RepoRoot,
+				Session:     ws.Session,
 				SessionName: ws.SessionName,
-				IsPrimary:   ws.IsPrimary,
 			},
 			Action:                string(res.Action),
 			Session:               res.Session,

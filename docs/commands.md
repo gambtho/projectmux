@@ -19,8 +19,15 @@ illustrative path so the examples stay readable.
 **Naming a workspace.** Commands that accept `<workspace>` resolve it two
 ways. With no argument, the workspace is the one containing the current
 directory. With an argument, it is looked up by name under the
-`repository_roots` configured in `defaults.yaml`, including linked worktrees in
-the conventional `.worktrees/` and `.claude/worktrees/` directories.
+`repository_roots` configured in `defaults.yaml`.
+
+Either way the answer is a *repository*, never one of its trees: a linked
+worktree — including the conventional `.worktrees/` and `.claude/worktrees/`
+directories, and any tree `git worktree add` placed elsewhere on the disk —
+is a separate working tree attached to the same repository, so working in one
+resolves to the repository it belongs to, and it cannot be named on its own.
+Every tree of a project therefore shares one workspace, one session, and one
+container.
 
 `projectmux <workspace>` with no command is shorthand for
 `projectmux open <workspace>`. A mistyped *bare* command therefore resolves as
@@ -30,7 +37,11 @@ still exit 2.
 
 **`--json` and `--compact`.** Every command that produces a report accepts
 `--json`, which emits a versioned envelope carrying `schema_version`, and
-`--compact`, which puts that envelope on one line and implies `--json`.
+`--compact`, which puts that envelope on one line and implies `--json`. The
+current version is **2**: it renamed the workspace's path field from
+`worktree` to `repo_root`, dropped `is_primary`, and added `session`. A
+consumer of version 1 breaks loudly on the missing field, which is the point
+— a repository root read as a worktree path would be silently wrong.
 
 **What is not frozen.** Nothing here is a compatibility contract below 1.0 —
 the JSON envelopes, the exit codes, and the command surface may all change.
@@ -57,8 +68,8 @@ identity keys.
 | 0 | success |
 | 1 | unexpected or I/O failure |
 | 2 | usage error |
-| 3 | the workspace name matched more than one worktree |
-| 4 | the workspace name matched no worktree |
+| 3 | the workspace name matched more than one repository |
+| 4 | the workspace name matched no repository |
 | 5 | invalid configuration |
 | 6 | the plan refused: a conflict or uncertainty; do not blindly retry |
 
@@ -86,10 +97,9 @@ Prints the normalized, merged configuration for a workspace, or with
 ```text
 $ projectmux config
 workspace     slabledger
-worktree      /home/you/src/slabledger
+repository    /home/you/src/slabledger
 id            d7142c2621eba1b47024261c980871d9e70d982e0e9fab5e0924100dcc300493
 session       slabledger
-primary       true
 digest        sha256:40dd44f74953a6333ea57bbb1fae15be218847229858600cfdc6a763348f7318
 autostart     false
 devcontainer  enabled=auto start_timeout=5m0s
@@ -101,8 +111,8 @@ logs    command tail -f /dev/null  -         .    -
 ```
 
 Alongside the configuration it reports the derived identity: a stable ID for
-the worktree path, the repository slug, the proposed session name, whether the
-tree is the repository's primary one, and a `sha256:` digest of the normalized
+the repository root, the repository slug, the session name (empty for the
+repository's default session), and a `sha256:` digest of the normalized
 configuration. The digest ignores cosmetic YAML edits and map ordering, which
 is how `status` distinguishes real drift from reformatting.
 
@@ -112,10 +122,10 @@ root does not read as workspace configuration drift.
 
 ### `--validate`
 
-Checks configuration files **without resolving a worktree**. This is the point
-of the mode: ordinary `config <workspace>` resolves through git, so a workspace
-whose worktree has moved reports as unknown and never receives a configuration
-verdict. Here the argument names a workspace *file* directly.
+Checks configuration files **without resolving a repository**. This is the
+point of the mode: ordinary `config <workspace>` resolves through git, so a
+workspace whose repository has moved reports as unknown and never receives a
+configuration verdict. Here the argument names a workspace *file* directly.
 
 With no argument every configured workspace is checked:
 
@@ -128,7 +138,7 @@ slabledger     ok
 broken:
   workspaces/broken.yaml:4: window "dev" sets location: container but devcontainer.enabled is false (also defaults.yaml:5)
   workspaces/broken.yaml:5: window "logs" must set exactly one of agent, command, or shell: true (it sets none)
-  workspaces/broken.yaml:6: window "logs" cwd must not escape the worktree, got "../escape"
+  workspaces/broken.yaml:6: window "logs" cwd must not escape the repository root, got "../escape"
 
 3 problems in 1 of 3 subjects
 ```
@@ -195,9 +205,8 @@ nothing.
 ```text
 $ projectmux status
 workspace         slabledger
-worktree          /home/you/src/slabledger
+repository        /home/you/src/slabledger
 id                d7142c2621eba1b47024261c980871d9e70d982e0e9fab5e0924100dcc300493
-primary           true
 recorded session  slabledger
 registered        2026-08-06T05:53:54.037942782Z
 updated           2026-08-06T05:53:54.181608075Z
@@ -226,6 +235,13 @@ refusal           tmux could not be observed; refusing to act on an unknown sess
 
 Status exits 0 whenever the observation succeeded. Findings are report content,
 not command failure.
+
+One finding is about the database rather than the workspace. A `needs rebuild`
+line — `needs_rebuild` and `needs_rebuild_reason` in the envelope — means a
+repository is still recorded at one of this repository's linked worktrees, the
+state the repository-scoped schema migration leaves behind. It is not an error,
+and status still reports everything else; `projectmux rebuild` collapses the
+row.
 
 ## projectmux doctor
 
@@ -326,7 +342,7 @@ honest report of an impossible operation. Detach first, or use
 ## projectmux stop
 
 ```text
-projectmux stop [--container] [--json] [--compact] [<workspace>]
+projectmux stop [--container] [--force] [--json] [--compact] [<workspace>]
 ```
 
 Ends the workspace session, and with `--container` its container too.
@@ -340,6 +356,19 @@ Stop is idempotent: stopping an already-stopped workspace succeeds. It kills
 the session by its observed session ID rather than by name, so a session
 renamed or replaced between observation and action is not killed by mistake.
 
+A container belongs to a repository and is shared by every session on it, so
+`stop --container` refuses with exit 6 when another session on the same
+repository is live, and names them:
+
+```text
+$ projectmux stop --container
+projectmux: the container is shared with live session(s) slabledger--feature-a; refusing to stop it (use --force)
+```
+
+`--force` stops it anyway. The sibling check and the container stop happen
+under one continuous hold of the repository lock, so a sibling cannot open
+into the gap between them.
+
 A partial failure — the session ended but the container did not — reports what
 succeeded and what did not on stdout, with a one-line summary on stderr and a
 non-zero exit.
@@ -350,20 +379,27 @@ non-zero exit.
 projectmux autostart [--json] [--compact]
 ```
 
-Starts containers for registered primary worktrees with `autostart: true`. It
-is a batch command intended for boot, and it reports one line per workspace:
+Starts containers for registered repositories with `autostart: true`. It is a
+batch command intended for boot, and it reports one line per repository:
 
 ```text
 $ projectmux autostart
 slabledger	skipped	(autostart is not enabled)
 ```
 
-Only *primary* worktrees are considered — linked worktrees share their
-parent's container and would otherwise start it several times. Autostart
-starts containers; it does not create tmux sessions.
+The unit of the report is the *repository*, not the session: every session on
+a repository shares one container, so autostart starts one container per
+repository however many sessions it has. Autostart starts containers; it does
+not create tmux sessions.
 
-The batch report is the output, so it goes to stdout even when some workspaces
-fail, with the summary on stderr.
+The batch report is the output, so it goes to stdout even when some
+repositories fail, with the summary on stderr.
+
+A row whose recorded root turns out to be a linked worktree is `skipped` with a
+reason pointing at `rebuild`. Those rows exist only between the schema upgrade
+and the first `rebuild` — see [`rebuild`](#projectmux-rebuild) — and starting a
+container for each of them would give one repository several, which is what
+sharing a container per repository exists to prevent.
 
 ### Running autostart from systemd
 
@@ -389,9 +425,9 @@ projectmux rebuild [--dry-run] [--json] [--compact]
 
 Recovers workspace registrations the state database has lost. Every live
 projectmux session carries three identity keys — the workspace ID, the slug,
-and the worktree — so a session that outlived its database still describes the
-workspace it belongs to. Rebuild reads those keys, re-derives the rest of the
-registration from the worktree itself, and writes the row back.
+and the repository root — so a session that outlived its database still
+describes the workspace it belongs to. Rebuild reads those keys, re-derives the
+rest of the registration from the repository itself, and writes the row back.
 
 ```text
 $ projectmux rebuild
@@ -399,15 +435,39 @@ registered  slabledger  slabledger
 ```
 
 **What it does not do.** Rebuild recovers registrations *from live sessions*
-only. It does not rediscover worktrees from `repository_roots` — a workspace
+only. It does not rediscover repositories from `repository_roots` — a workspace
 with no live session stays unregistered until the next `open` — and it does not
 restore container bindings, which the next `open` reacquires. The name is
 broader than the command.
 
+Collapsing a row goes further than not restoring a binding: it *discards* the
+binding that row held. The container binding hangs off the repository row, so
+dropping a linked-worktree row deletes its binding outright, and any container
+it named keeps running with nothing in the database referring to it. Where the
+worktree and its parent both had a binding, the parent's is the one that
+survives. The report names each discarded binding and the container ID, so
+`docker rm` on an orphan — or a fresh `open --container` — is the operator's
+call to make.
+
+**It completes the repository-scoped upgrade.** The schema migration that
+introduced repositories moves every stored row verbatim, treating each
+recorded path as a repository root, because telling a main worktree from a
+linked one needs git and a migration must never fail because a directory
+moved. Rebuild is what corrects that: rows recorded at a linked worktree
+collapse into their parent repository, and rows whose path is gone are
+dropped. Live sessions from before the upgrade are matched by the tree they
+record and retagged onto their repository, so a lone running session is adopted
+rather than duplicated. Where a repository has more than one live session from
+before the upgrade, all of them resolve to the same workspace, so retagging
+would leave several sessions claiming one identity; none of that group is
+retagged and each is reported as a conflict. Kill or rename all but one and run
+it again. `status` reports a repository whose recorded root is
+not a main worktree as needing this run.
+
 **It only fills in what is missing.** Rebuild never overwrites a recorded
 value. A workspace already recorded with a different session name, two live
 sessions claiming the same workspace, a session whose keys disagree with the
-worktree they name — each is reported as a conflict and skipped, and the run
+repository they name — each is reported as a conflict and skipped, and the run
 exits 6. Nothing that was already known is lost by running it, which is why it
 applies by default rather than requiring confirmation.
 
@@ -416,10 +476,15 @@ exits 0.
 
 `--dry-run` performs every read-only step — classification, resolution,
 identity verification, configuration loading — and stops before the writes. It
-is a preview rather than a partial pass: a dry run that reports a conflict is
-the conflict the real run would report, and it exits on that conflict with the
-same code, because the exit code describes the state of the world rather than
-whether anything was written.
+is a preview rather than a partial pass, and it exits 6 whenever the preview
+finds a conflict. That is not the same set of conflicts the real run finds; see
+the paragraph below for why a real run may resolve some of them.
+
+A dry run classifies the state as it stands *before* the migration pass, so a
+conflict it reports may be one the real run clears by retagging first: a
+session carrying pre-change identity keys reads as a conflict in the preview
+and is simply retagged in the real run. The preview is a lower bound on what a
+real run resolves, not an exact rehearsal of it.
 
 | Situation | Exit |
 | --- | --- |

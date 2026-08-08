@@ -148,7 +148,7 @@ func Classify(live []controller.LiveSession, records []state.Record) Plan {
 			conflict(s, duplicateIDReason(s, claimants[s.WorkspaceID]))
 		case owner != nil && owner.ID != s.WorkspaceID:
 			conflict(s, nameTakenReason(s, owner))
-		case row != nil && (row.Slug != s.Slug || row.Worktree != s.Worktree):
+		case row != nil && (row.Slug != s.Slug || row.RepoRoot != s.Worktree):
 			conflict(s, identityMismatchReason(s, row))
 		case row != nil && row.ActualSession != nil && *row.ActualSession == s.Name:
 			// Settled. Deliberately silent.
@@ -202,7 +202,7 @@ func identityMismatchReason(s controller.LiveSession, row *state.Record) string 
 		"session %q carries slug %q and worktree %q, but workspace %s is recorded "+
 			"as slug %q and worktree %q; that contradiction is evidence of "+
 			"corruption or collision rather than a match, so nothing is written.",
-		s.Name, s.Slug, s.Worktree, row.ID, row.Slug, row.Worktree)
+		s.Name, s.Slug, s.Worktree, row.ID, row.Slug, row.RepoRoot)
 }
 
 // sessionMismatchReason states the fill-only rule outright, since this is

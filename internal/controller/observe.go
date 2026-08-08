@@ -98,11 +98,40 @@ func (c *Controller) Observe(ctx context.Context, d Desired) (Snapshot, error) {
 		snap.Session = SessionSnapshot{State: SessionAbsent, ByName: obs.ByName}
 	}
 
-	snap.Container = c.observeContainer(ctx, d, snap.Stored)
+	// A container belongs to a repository, so the observation needs the
+	// binding and nothing else about the session that asked for it.
+	//
+	// A registered session already carries the repository's binding on its
+	// record. An unregistered one carries no record at all, and reading the
+	// repository directly is what keeps `status` on a session that has never
+	// been opened from reporting a container its siblings are using as
+	// absent. Ensure never reaches that branch — it registers first — so this
+	// is the inspection path.
+	//
+	// The three-way switch is the same one the workspace lookup above uses,
+	// and for the same reason: only ErrNotFound means "no binding". Any
+	// other failure leaves it unknown whether one exists, and falling
+	// through to discovery on that would let a store outage rebind a
+	// repository that is already bound.
+	var binding *state.ContainerBinding
+	if snap.Stored != nil {
+		binding = snap.Stored.Container
+	} else {
+		repo, err := c.Store.Repository(d.Workspace.RepositoryID)
+		switch {
+		case errors.Is(err, state.ErrNotFound):
+			// No repository row: no binding, which is the zero value.
+		case err != nil:
+			return Snapshot{}, fmt.Errorf("reading the repository's container binding: %w", err)
+		default:
+			binding = repo.Container
+		}
+	}
+	snap.Container = c.observeContainer(ctx, d, binding)
 	return snap, nil
 }
 
-func (c *Controller) observeContainer(ctx context.Context, d Desired, stored *state.Record) ContainerSnapshot {
+func (c *Controller) observeContainer(ctx context.Context, d Desired, binding *state.ContainerBinding) ContainerSnapshot {
 	// Observe only on "auto" or "true"; anything else — including "false"
 	// and the unnormalized zero value "" — is treated as disabled.
 	enabled := d.Config.DevContainer.Enabled
@@ -124,8 +153,8 @@ func (c *Controller) observeContainer(ctx context.Context, d Desired, stored *st
 			return ContainerSnapshot{}
 		}
 	}
-	if stored != nil && stored.Container != nil {
-		obs, err := c.Containers.ProbeContainer(ctx, *stored.Container)
+	if binding != nil {
+		obs, err := c.Containers.ProbeContainer(ctx, *binding)
 		if err != nil {
 			// Design §9: a failed probe yields unknown, never loss.
 			return ContainerSnapshot{

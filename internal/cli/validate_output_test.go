@@ -37,7 +37,7 @@ func TestValidateWholeReportReads(t *testing.T) {
 		"workspaces/dev.yaml:4",
 		"workspaces/dev.yaml:5",
 		"exactly one of",
-		"escape the worktree",
+		"escape the repository root",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("report omits %q:\n%s", want, stdout)

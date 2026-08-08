@@ -1,11 +1,12 @@
 package resolve
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -65,16 +66,6 @@ func mustResolve(t *testing.T, name string, roots []string, cwd string) Workspac
 	return ws
 }
 
-func TestWorkspaceIDIsTheSHA256OfTheCanonicalPath(t *testing.T) {
-	base := root(t)
-	makeRepo(t, filepath.Join(base, "euro_trip"))
-	ws := mustResolve(t, "euro_trip", []string{base}, base)
-
-	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(ws.ID) {
-		t.Errorf("ID = %q, want 64 hex characters", ws.ID)
-	}
-}
-
 func TestWorkspaceIDIsStableAcrossTrailingSlashAndSymlink(t *testing.T) {
 	base := root(t)
 	repo := makeRepo(t, filepath.Join(base, "euro_trip"))
@@ -95,40 +86,22 @@ func TestWorkspaceIDIsStableAcrossTrailingSlashAndSymlink(t *testing.T) {
 	}
 }
 
-func TestPrimaryTreeAndNonGitDirectoryAreBothPrimary(t *testing.T) {
+func TestWorkspaceIDCombinesTheRepositoryRootAndTheSession(t *testing.T) {
 	base := root(t)
 	repo := makeRepo(t, filepath.Join(base, "euro_trip"))
-	plain := filepath.Join(base, "plain")
-	if err := os.MkdirAll(plain, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
+	ws := mustResolve(t, "euro_trip", []string{base}, base)
 
-	if !mustResolve(t, "", nil, repo).IsPrimary {
-		t.Error("a primary working tree should be primary")
+	wantRepository := sha256.Sum256([]byte(repo))
+	wantWorkspace := sha256.Sum256([]byte(repo + "\x00" + ws.Session))
+	if ws.RepositoryID != hex.EncodeToString(wantRepository[:]) {
+		t.Errorf("RepositoryID = %q, want the hash of %q", ws.RepositoryID, repo)
 	}
-	if !mustResolve(t, "", nil, plain).IsPrimary {
-		t.Error("a non-git directory should count as primary")
+	if ws.ID != hex.EncodeToString(wantWorkspace[:]) {
+		t.Errorf("ID = %q, want the hash of the root and the session", ws.ID)
 	}
 }
 
-func TestLinkedWorktreeIsNotPrimaryIncludingFromASubdirectory(t *testing.T) {
-	base := root(t)
-	repo := makeRepo(t, filepath.Join(base, "euro_trip"))
-	linked := addWorktree(t, repo, filepath.Join(base, "euro_trip-pr5"), "pr5")
-	sub := filepath.Join(linked, "sub")
-	if err := os.MkdirAll(sub, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	if mustResolve(t, "", nil, linked).IsPrimary {
-		t.Error("a linked worktree should not be primary")
-	}
-	if mustResolve(t, "", nil, sub).IsPrimary {
-		t.Error("a linked worktree should not be primary from a subdirectory")
-	}
-}
-
-func TestPrimaryTreeUsesTheBareSlugAsItsSessionName(t *testing.T) {
+func TestTheDefaultSessionIsNamedForTheRepository(t *testing.T) {
 	base := root(t)
 	repo := makeRepo(t, filepath.Join(base, "euro_trip"))
 	ws := mustResolve(t, "euro_trip", []string{base}, base)
@@ -136,50 +109,74 @@ func TestPrimaryTreeUsesTheBareSlugAsItsSessionName(t *testing.T) {
 	if ws.Slug != "euro_trip" {
 		t.Errorf("slug = %q", ws.Slug)
 	}
+	if ws.Session != "" {
+		t.Errorf("session = %q, want the default session", ws.Session)
+	}
 	if ws.SessionName != "euro_trip" {
 		t.Errorf("session name = %q", ws.SessionName)
 	}
-	if ws.Worktree != repo {
-		t.Errorf("worktree = %q, want %q", ws.Worktree, repo)
-	}
-	if !ws.IsPrimary {
-		t.Error("should be primary")
+	if ws.RepoRoot != repo {
+		t.Errorf("repo root = %q, want %q", ws.RepoRoot, repo)
 	}
 }
 
-func TestSiblingWorktreeInheritsTheParentSlug(t *testing.T) {
+func TestASiblingWorktreeNamedDirectlyResolvesToItsRepository(t *testing.T) {
 	base := root(t)
 	repo := makeRepo(t, filepath.Join(base, "euro_trip"))
 	addWorktree(t, repo, filepath.Join(base, "euro_trip-pr5"), "pr5")
 	ws := mustResolve(t, "euro_trip-pr5", []string{base}, base)
 
-	if ws.Slug != "euro_trip" {
-		t.Errorf("slug = %q, want the parent repository's name", ws.Slug)
+	if ws.Slug != "euro_trip" || ws.RepoRoot != repo {
+		t.Errorf("slug/root = %q/%q, want the parent repository %q", ws.Slug, ws.RepoRoot, repo)
 	}
-	if ws.SessionName != "euro_trip--euro_trip-pr5" {
-		t.Errorf("session name = %q", ws.SessionName)
-	}
-	if ws.IsPrimary {
-		t.Error("should not be primary")
+	if ws.SessionName != "euro_trip" {
+		t.Errorf("session name = %q, want the repository's default session", ws.SessionName)
 	}
 }
 
-func TestNestedWorktreeDirectoriesAreSearched(t *testing.T) {
+// Two worktrees of one repository are one workspace. This is the defect in
+// the design's §1 stated directly: the container is keyed on the resolved
+// path, so a linked worktree that resolved to itself demanded a second
+// container on the same project.
+func TestEveryWorktreeOfARepositoryResolvesToOneWorkspace(t *testing.T) {
+	base := root(t)
+	repo := makeRepo(t, filepath.Join(base, "euro_trip"))
+	linked := addWorktree(t, repo, filepath.Join(repo, ".worktrees", "1529"), "pr1529")
+	sub := filepath.Join(linked, "deep")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	want := mustResolve(t, "", nil, repo)
+	for _, cwd := range []string{linked, sub} {
+		got := mustResolve(t, "", nil, cwd)
+		if got.RepoRoot != repo {
+			t.Errorf("from %s: RepoRoot = %q, want %q", cwd, got.RepoRoot, repo)
+		}
+		if got.ID != want.ID || got.RepositoryID != want.RepositoryID {
+			t.Errorf("from %s: identity = %q/%q, want %q/%q",
+				cwd, got.ID, got.RepositoryID, want.ID, want.RepositoryID)
+		}
+		if got.SessionName != "euro_trip" {
+			t.Errorf("from %s: session name = %q", cwd, got.SessionName)
+		}
+	}
+}
+
+func TestNestedWorktreeDirectoriesAreNoLongerSearched(t *testing.T) {
+	// A worktree is an ordinary directory inside a repository now. Finding one
+	// by name would hand back a second identity for the same project, which is
+	// the shape the design removes.
 	for _, nest := range []string{".worktrees", ".claude/worktrees"} {
 		t.Run(nest, func(t *testing.T) {
 			base := root(t)
 			repo := makeRepo(t, filepath.Join(base, "slabledger"))
-			want := addWorktree(t, repo, filepath.Join(repo, nest, "review"), "review")
-			ws := mustResolve(t, "review", []string{base}, base)
+			addWorktree(t, repo, filepath.Join(repo, nest, "review"), "review")
 
-			if ws.Slug != "slabledger" {
-				t.Errorf("slug = %q", ws.Slug)
-			}
-			if ws.SessionName != "slabledger--review" {
-				t.Errorf("session name = %q", ws.SessionName)
-			}
-			if ws.Worktree != want {
-				t.Errorf("worktree = %q, want %q", ws.Worktree, want)
+			_, err := Resolve("review", []string{base}, base)
+			var unknown *UnknownWorkspaceError
+			if !errors.As(err, &unknown) {
+				t.Fatalf("error = %v, want *UnknownWorkspaceError", err)
 			}
 		})
 	}
@@ -187,41 +184,24 @@ func TestNestedWorktreeDirectoriesAreSearched(t *testing.T) {
 
 func TestAmbiguousNameIsAnErrorListingEveryCandidate(t *testing.T) {
 	// Picking the first match is how a user ends up running an agent against
-	// the wrong branch, so ambiguity is never resolved by guessing.
-	base := root(t)
-	slab := makeRepo(t, filepath.Join(base, "slabledger"))
-	euro := makeRepo(t, filepath.Join(base, "euro_trip"))
-	addWorktree(t, slab, filepath.Join(slab, ".worktrees", "review"), "review")
-	addWorktree(t, euro, filepath.Join(euro, ".claude", "worktrees", "review"), "review")
+	// the wrong repository, so ambiguity is never resolved by guessing.
+	a, b := root(t), root(t)
+	first := makeRepo(t, filepath.Join(a, "slabledger"))
+	second := makeRepo(t, filepath.Join(b, "slabledger"))
 
-	_, err := Resolve("review", []string{base}, base)
+	_, err := Resolve("slabledger", []string{a, b}, a)
 	var ambiguous *AmbiguousError
 	if !errors.As(err, &ambiguous) {
 		t.Fatalf("error = %v, want *AmbiguousError", err)
 	}
 	msg := err.Error()
-	for _, want := range []string{
-		filepath.Join("slabledger", ".worktrees", "review"),
-		filepath.Join("euro_trip", ".claude", "worktrees", "review"),
-	} {
+	for _, want := range []string{first, second, "repository"} {
 		if !strings.Contains(msg, want) {
-			t.Errorf("error %q does not list %q", msg, want)
+			t.Errorf("error %q does not mention %q", msg, want)
 		}
 	}
 	if len(ambiguous.Candidates) != 2 {
 		t.Errorf("candidates = %v", ambiguous.Candidates)
-	}
-}
-
-func TestAmbiguityAcrossRootsIsReported(t *testing.T) {
-	a, b := root(t), root(t)
-	makeRepo(t, filepath.Join(a, "shared"))
-	makeRepo(t, filepath.Join(b, "shared"))
-
-	_, err := Resolve("shared", []string{a, b}, a)
-	var ambiguous *AmbiguousError
-	if !errors.As(err, &ambiguous) {
-		t.Fatalf("error = %v, want *AmbiguousError", err)
 	}
 }
 
@@ -233,8 +213,8 @@ func TestTheSameTreeReachedThroughOverlappingRootsIsNotAmbiguous(t *testing.T) {
 	roots := []string{base, base, filepath.Join(base, "sub", "..")}
 
 	ws := mustResolve(t, "euro_trip", roots, base)
-	if ws.Worktree != repo {
-		t.Errorf("worktree = %q, want %q", ws.Worktree, repo)
+	if ws.RepoRoot != repo {
+		t.Errorf("repo root = %q, want %q", ws.RepoRoot, repo)
 	}
 }
 
@@ -247,7 +227,7 @@ func TestUnknownNameNamesTheSearchedRoots(t *testing.T) {
 		t.Fatalf("error = %v, want *UnknownWorkspaceError", err)
 	}
 	msg := err.Error()
-	for _, want := range []string{"nosuchproject", base, ".worktrees", ".claude/worktrees"} {
+	for _, want := range []string{"nosuchproject", base} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error %q does not mention %q", msg, want)
 		}
@@ -291,24 +271,6 @@ func TestResolvingByNameWithoutConfiguredRootsSaysSo(t *testing.T) {
 	}
 }
 
-func TestCwdResolutionFromASubdirectoryFindsTheWorktreeRoot(t *testing.T) {
-	base := root(t)
-	repo := makeRepo(t, filepath.Join(base, "euro_trip"))
-	linked := addWorktree(t, repo, filepath.Join(base, "euro_trip-pr5"), "pr5")
-	deep := filepath.Join(linked, "deep", "nested")
-	if err := os.MkdirAll(deep, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	ws := mustResolve(t, "", nil, deep)
-	if ws.Worktree != linked {
-		t.Errorf("worktree = %q, want %q", ws.Worktree, linked)
-	}
-	if ws.SessionName != "euro_trip--euro_trip-pr5" {
-		t.Errorf("session name = %q", ws.SessionName)
-	}
-}
-
 func TestCwdResolutionOutsideGitFallsBackToTheDirectory(t *testing.T) {
 	base := root(t)
 	dir := filepath.Join(base, "notgit")
@@ -317,14 +279,11 @@ func TestCwdResolutionOutsideGitFallsBackToTheDirectory(t *testing.T) {
 	}
 
 	ws := mustResolve(t, "", nil, dir)
-	if ws.Worktree != dir {
-		t.Errorf("worktree = %q, want %q", ws.Worktree, dir)
+	if ws.RepoRoot != dir {
+		t.Errorf("repo root = %q, want %q", ws.RepoRoot, dir)
 	}
 	if ws.Slug != "notgit" {
 		t.Errorf("slug = %q", ws.Slug)
-	}
-	if !ws.IsPrimary {
-		t.Error("a non-git directory should count as primary")
 	}
 }
 

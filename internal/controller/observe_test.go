@@ -18,11 +18,11 @@ var testTime = time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 func testDesired(enabled string) controller.Desired {
 	return controller.Desired{
 		Workspace: resolve.Workspace{
-			ID:          "w1",
-			Slug:        "slabledger",
-			Worktree:    "/w/slabledger",
-			SessionName: "slabledger",
-			IsPrimary:   true,
+			ID:           "w1",
+			RepositoryID: "r1",
+			Slug:         "slabledger",
+			RepoRoot:     "/w/slabledger",
+			SessionName:  "slabledger",
 		},
 		Config: config.Config{
 			Version:      1,
@@ -81,9 +81,13 @@ func TestObserveQueriesTheAssignedNameToo(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 	// Occupy "slabledger" with another workspace so w1 gets a suffixed name.
+	// It is a different repository, so it needs its own RepositoryID as well
+	// as its own root: the two are keyed together, and sharing the ID would
+	// point both roots at one repository row.
 	other := ws
 	other.ID = "w0"
-	other.Worktree = "/w/other"
+	other.RepoRoot = "/w/other"
+	other.RepositoryID = "repo-other"
 	if err := d.store.RegisterWorkspace(other, "sha256:x", testTime); err != nil {
 		t.Fatalf("register other: %v", err)
 	}
@@ -127,7 +131,7 @@ func TestObserveProbesAnExistingBinding(t *testing.T) {
 	if err := d.store.RegisterWorkspace(ws, "sha256:desired", testTime); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := d.store.RecordContainerObservation("w1", state.ContainerObservation{
+	if err := d.store.RecordContainerObservation("r1", state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "c-1", Health: state.HealthPresent,
 	}, testTime); err != nil {
 		t.Fatalf("seed binding: %v", err)
@@ -158,7 +162,7 @@ func TestObserveDiscoversWhenNeverBound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Observe: %v", err)
 	}
-	if len(d.containers.Discovered) != 1 || d.containers.Discovered[0] != "w1" {
+	if len(d.containers.Discovered) != 1 || d.containers.Discovered[0] != "r1" {
 		t.Errorf("discoveries = %v", d.containers.Discovered)
 	}
 	if snap.Container.Observed == nil || snap.Container.Observed.Health != state.HealthMissing {
@@ -223,7 +227,7 @@ func TestContainerProbeFailureIsUnknownNotLoss(t *testing.T) {
 	if err := d.store.RegisterWorkspace(ws, "sha256:desired", testTime); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := d.store.RecordContainerObservation("w1", state.ContainerObservation{
+	if err := d.store.RecordContainerObservation("r1", state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "c-1", Health: state.HealthPresent,
 	}, testTime); err != nil {
 		t.Fatalf("seed binding: %v", err)
@@ -248,7 +252,7 @@ func TestObserveAutoNotApplicableSkipsContainer(t *testing.T) {
 	if err := d.store.RegisterWorkspace(testDesired("auto").Workspace, "sha256:x", testTime); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := d.store.RecordContainerObservation("w1", state.ContainerObservation{
+	if err := d.store.RecordContainerObservation("r1", state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "c1", Health: state.HealthPresent,
 	}, testTime); err != nil {
 		t.Fatalf("bind: %v", err)

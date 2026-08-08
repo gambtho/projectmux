@@ -22,11 +22,11 @@ func seedDatabase(t *testing.T) string {
 		t.Fatalf("Open: %v", err)
 	}
 	ws := resolve.Workspace{
-		ID:          "id-1",
-		Slug:        "slab",
-		Worktree:    "/w/slab",
-		SessionName: "slab",
-		IsPrimary:   true,
+		ID:           "id-1",
+		RepositoryID: "repo-1",
+		Slug:         "slab",
+		RepoRoot:     "/w/slab",
+		SessionName:  "slab",
 	}
 	if err := st.RegisterWorkspace(ws, "sha256:abc", time.Now()); err != nil {
 		t.Fatalf("RegisterWorkspace: %v", err)
@@ -189,11 +189,11 @@ func TestOpenReadOnlySeesUncheckpointedRows(t *testing.T) {
 	}
 	defer func() { _ = st.Close() }()
 	ws := resolve.Workspace{
-		ID:          "id-2",
-		Slug:        "slab2",
-		Worktree:    "/w/slab2",
-		SessionName: "slab2",
-		IsPrimary:   true,
+		ID:           "id-2",
+		RepositoryID: "repo-2",
+		Slug:         "slab2",
+		RepoRoot:     "/w/slab2",
+		SessionName:  "slab2",
 	}
 	if err := st.RegisterWorkspace(ws, "sha256:def", time.Now()); err != nil {
 		t.Fatalf("RegisterWorkspace: %v", err)
@@ -239,11 +239,11 @@ func seedUnrecoveredWAL(t *testing.T) string {
 		t.Fatalf("Open: %v", err)
 	}
 	ws := resolve.Workspace{
-		ID:          "id-2",
-		Slug:        "slab2",
-		Worktree:    "/w/slab2",
-		SessionName: "slab2",
-		IsPrimary:   true,
+		ID:           "id-2",
+		RepositoryID: "repo-2",
+		Slug:         "slab2",
+		RepoRoot:     "/w/slab2",
+		SessionName:  "slab2",
 	}
 	if err := st.RegisterWorkspace(ws, "sha256:def", time.Now()); err != nil {
 		t.Fatalf("RegisterWorkspace: %v", err)

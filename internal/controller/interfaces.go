@@ -22,15 +22,22 @@ type ContainerObservation struct {
 
 // Store is the slice of the state store the controller uses. *state.Store
 // satisfies it; fakes mirror its semantics for tests.
+//
+// RecordContainerObservation takes a repository ID because a container
+// belongs to a repository and is shared by every session on it, while the
+// operation and reconciliation calls stay keyed on the workspace: an
+// operation is performed by a session (spec §5.2).
 type Store interface {
 	RegisterWorkspace(ws resolve.Workspace, desiredDigest string, now time.Time) error
 	AllocateSessionName(workspaceID string, now time.Time) (string, error)
 	AdoptSessionName(workspaceID, name string, now time.Time) error
-	RecordContainerObservation(workspaceID string, obs state.ContainerObservation, now time.Time) error
+	RecordContainerObservation(repositoryID string, obs state.ContainerObservation, now time.Time) error
 	RecordOperation(workspaceID string, op state.Operation, now time.Time) error
 	CommitReconciliation(workspaceID string, r state.ReconciliationResult, now time.Time) error
 	Workspace(id string) (state.Record, error)
 	Workspaces() ([]state.Record, error)
+	Repository(id string) (state.Repository, error)
+	Repositories() ([]state.Repository, error)
 }
 
 var _ Store = (*state.Store)(nil)

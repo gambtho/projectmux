@@ -53,7 +53,7 @@ func (a *Adapter) Applies(_ context.Context, ws resolve.Workspace, cfg config.Co
 	default:
 		return false, nil
 	}
-	for _, p := range configPaths(ws.Worktree, cfg) {
+	for _, p := range configPaths(ws.RepoRoot, cfg) {
 		_, err := os.Stat(p)
 		switch {
 		case err == nil:
@@ -66,13 +66,17 @@ func (a *Adapter) Applies(_ context.Context, ws resolve.Workspace, cfg config.Co
 	return false, nil
 }
 
-func configPaths(worktree string, cfg config.Config) []string {
+// configPaths lists the devcontainer configurations that make a
+// repository containerized. They are resolved against the repository
+// root, never a linked worktree: a worktree's untracked compose overrides
+// are exactly what the old worktree-keyed lookup went missing.
+func configPaths(repoRoot string, cfg config.Config) []string {
 	if cfg.DevContainer.Config != nil && *cfg.DevContainer.Config != "" {
-		return []string{filepath.Join(worktree, *cfg.DevContainer.Config)}
+		return []string{filepath.Join(repoRoot, *cfg.DevContainer.Config)}
 	}
 	return []string{
-		filepath.Join(worktree, ".devcontainer", "devcontainer.json"),
-		filepath.Join(worktree, ".devcontainer.json"),
+		filepath.Join(repoRoot, ".devcontainer", "devcontainer.json"),
+		filepath.Join(repoRoot, ".devcontainer.json"),
 	}
 }
 
@@ -92,7 +96,10 @@ func (a *Adapter) DiscoverContainer(ctx context.Context, ws resolve.Workspace, c
 
 	res, err := run.Run(ctx, run.Command{
 		Argv: []string{dockerBinary, "ps", "-a",
-			"--filter", "label=devcontainer.local_folder=" + ws.Worktree,
+			// The devcontainer CLI labels containers with the folder it
+			// was given, which is now the repository root — so every
+			// session on the repository discovers the same container.
+			"--filter", "label=devcontainer.local_folder=" + ws.RepoRoot,
 			"--format", "{{.ID}}\t{{.State}}"},
 		Timeout: a.timeout(),
 	})
@@ -147,9 +154,9 @@ func (a *Adapter) StartContainer(ctx context.Context, ws resolve.Workspace, cfg 
 	if timeout <= 0 {
 		timeout = time.Duration(cfg.DevContainer.StartTimeout)
 	}
-	argv := []string{devcontainerBinary, "up", "--workspace-folder", ws.Worktree}
+	argv := []string{devcontainerBinary, "up", "--workspace-folder", ws.RepoRoot}
 	if cfg.DevContainer.Config != nil && *cfg.DevContainer.Config != "" {
-		argv = append(argv, "--config", filepath.Join(ws.Worktree, *cfg.DevContainer.Config))
+		argv = append(argv, "--config", filepath.Join(ws.RepoRoot, *cfg.DevContainer.Config))
 	}
 
 	res, err := run.Run(ctx, run.Command{Argv: argv, Timeout: timeout})

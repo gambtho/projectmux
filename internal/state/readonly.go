@@ -263,8 +263,8 @@ func (s *ReadOnlyStore) Close() error { return s.db.Close() }
 // Workspace returns the joined record for one workspace, or ErrNotFound.
 func (s *ReadOnlyStore) Workspace(id string) (Record, error) { return queryWorkspace(s.db, id) }
 
-// Workspaces returns every registered workspace ordered by slug, then
-// worktree.
+// Workspaces returns every registered session ordered by slug, repository
+// root, then session.
 func (s *ReadOnlyStore) Workspaces() ([]Record, error) { return queryWorkspaces(s.db) }
 
 // IsMissingDatabase reports whether an OpenReadOnly error means the

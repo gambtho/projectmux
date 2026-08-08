@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/gambtho/projectmux/internal/config"
@@ -25,15 +26,17 @@ failures, resolved either from <workspace> or from the current directory.
 
 // statusEnvelope is the versioned JSON structure for projectmux status.
 type statusEnvelope struct {
-	SchemaVersion int            `json:"schema_version"`
-	Workspace     workspaceInfo  `json:"workspace"`
-	Registered    bool           `json:"registered"`
-	Stored        *storedInfo    `json:"stored,omitempty"`
-	Session       sessionInfo    `json:"session"`
-	Container     *containerInfo `json:"container,omitempty"`
-	Config        configInfo     `json:"config"`
-	LastOperation *operationInfo `json:"last_operation,omitempty"`
-	Plan          planInfo       `json:"plan"`
+	SchemaVersion      int            `json:"schema_version"`
+	Workspace          workspaceInfo  `json:"workspace"`
+	NeedsRebuild       bool           `json:"needs_rebuild"`
+	NeedsRebuildReason string         `json:"needs_rebuild_reason,omitempty"`
+	Registered         bool           `json:"registered"`
+	Stored             *storedInfo    `json:"stored,omitempty"`
+	Session            sessionInfo    `json:"session"`
+	Container          *containerInfo `json:"container,omitempty"`
+	Config             configInfo     `json:"config"`
+	LastOperation      *operationInfo `json:"last_operation,omitempty"`
+	Plan               planInfo       `json:"plan"`
 }
 
 type storedInfo struct {
@@ -152,6 +155,11 @@ func buildStatus(ctx context.Context, name string) (statusEnvelope, error) {
 	}
 	defer func() { _ = st.Close() }()
 
+	stale, err := staleRepositoryRoots(st, ws)
+	if err != nil {
+		return statusEnvelope{}, err
+	}
+
 	ctrl := controller.Controller{
 		Store:      st,
 		Sessions:   newSessionObserver(),
@@ -166,7 +174,95 @@ func buildStatus(ctx context.Context, name string) (statusEnvelope, error) {
 	if err != nil {
 		return statusEnvelope{}, err
 	}
-	return statusEnvelopeFrom(ws, effective, snap, controller.BuildPlan(snap)), nil
+	env := statusEnvelopeFrom(ws, effective, snap, controller.BuildPlan(snap))
+	if reasons := rebuildReasons(stale, snap, ws); len(reasons) > 0 {
+		env.NeedsRebuild = true
+		env.NeedsRebuildReason = strings.Join(reasons, "; ") +
+			"; run `projectmux rebuild` to correct it"
+	}
+	return env, nil
+}
+
+// rebuildReasons names everything about this workspace that only rebuild
+// can fix. It covers both halves of the upgrade pass, because they fail
+// independently: a run whose collapse succeeds and whose retag fails
+// (exit 6) leaves no stale row at all, and reporting on rows alone would
+// call that installation clean while `open` still refuses the session it
+// could not retag.
+func rebuildReasons(stale []string, snap controller.Snapshot, ws resolve.Workspace) []string {
+	var reasons []string
+	if len(stale) > 0 {
+		reasons = append(reasons, fmt.Sprintf(
+			"%s is still recorded as a repository root but is a linked worktree of %s",
+			strings.Join(stale, ", "), ws.RepoRoot))
+	}
+	for _, name := range staleSessions(snap, ws) {
+		reasons = append(reasons, fmt.Sprintf(
+			"the live session %q is running on this repository under identity "+
+				"keys a pre-change projectmux wrote, so `projectmux open` "+
+				"refuses it as a foreign occupant", name))
+	}
+	return reasons
+}
+
+// staleSessions names sessions occupying this workspace's session name
+// whose identity keys disagree with it but whose @dev_worktree still
+// resolves to this repository — the state rebuild's retag corrects.
+//
+// The @dev_worktree test is what separates a stale session from a real
+// foreign occupant, and it has to go through the resolver rather than
+// compare against ws.RepoRoot: a pre-change session records the linked
+// worktree it was opened in, which is never equal to the repository root
+// and is exactly the value the retag rewrites. A session pointing at some
+// other repository is a genuine name collision that rebuild will not fix,
+// so it is left out.
+func staleSessions(snap controller.Snapshot, ws resolve.Workspace) []string {
+	var names []string
+	for _, s := range snap.Session.ByName {
+		if controller.SessionBelongsTo(s, ws) || s.Worktree == "" {
+			continue
+		}
+		resolved, err := resolve.Resolve("", nil, s.Worktree)
+		if err != nil || resolved.RepoRoot != ws.RepoRoot {
+			continue
+		}
+		names = append(names, s.Name)
+	}
+	return names
+}
+
+// staleRepositoryRoots names repository rows recorded at a path that is
+// not this repository's root but resolves to it — what migration 0002
+// leaves behind for every linked worktree that used to be its own
+// workspace. Only `rebuild` can correct it, because the classification
+// needs git (design §9).
+//
+// Rows are filtered to this repository's slug first, so status makes at
+// most a couple of git calls: a linked worktree inherits its parent's
+// slug (resolve.slugFor), and 0002 moved the stored slug verbatim, so a
+// stale row for this repository always carries this repository's slug.
+//
+// A row whose path no longer resolves at all is skipped rather than
+// reported. It is rebuild's business — it will be dropped — but it cannot
+// be attributed to this repository, and two repositories of the same
+// directory name in two roots share a slug.
+func staleRepositoryRoots(st stateStore, ws resolve.Workspace) ([]string, error) {
+	repos, err := st.Repositories()
+	if err != nil {
+		return nil, fmt.Errorf("reading stored repositories: %w", err)
+	}
+	var stale []string
+	for _, repo := range repos {
+		if repo.Slug != ws.Slug || repo.RepoRoot == ws.RepoRoot {
+			continue
+		}
+		resolved, err := resolve.Resolve("", nil, repo.RepoRoot)
+		if err != nil || resolved.RepoRoot != ws.RepoRoot {
+			continue
+		}
+		stale = append(stale, repo.RepoRoot)
+	}
+	return stale, nil
 }
 
 func statusEnvelopeFrom(ws resolve.Workspace, effective config.Effective, snap controller.Snapshot, plan controller.Plan) statusEnvelope {
@@ -175,9 +271,9 @@ func statusEnvelopeFrom(ws resolve.Workspace, effective config.Effective, snap c
 		Workspace: workspaceInfo{
 			ID:          ws.ID,
 			Slug:        ws.Slug,
-			Worktree:    ws.Worktree,
+			RepoRoot:    ws.RepoRoot,
+			Session:     ws.Session,
 			SessionName: ws.SessionName,
-			IsPrimary:   ws.IsPrimary,
 		},
 		Session: sessionInfo{State: string(snap.Session.State)},
 		Config:  configInfo{DesiredDigest: effective.Digest},
@@ -254,9 +350,11 @@ func writeStatusHuman(w io.Writer, env statusEnvelope) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 
 	fmt.Fprintf(tw, "workspace\t%s\n", env.Workspace.Slug)
-	fmt.Fprintf(tw, "worktree\t%s\n", env.Workspace.Worktree)
+	fmt.Fprintf(tw, "repository\t%s\n", env.Workspace.RepoRoot)
 	fmt.Fprintf(tw, "id\t%s\n", env.Workspace.ID)
-	fmt.Fprintf(tw, "primary\t%t\n", env.Workspace.IsPrimary)
+	if env.NeedsRebuild {
+		fmt.Fprintf(tw, "needs rebuild\t%s\n", env.NeedsRebuildReason)
+	}
 
 	if env.Registered {
 		recorded := env.Stored.ProposedSession + " (proposed, unassigned)"

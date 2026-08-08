@@ -109,11 +109,11 @@ func discoverOK(obs *controller.ContainerObservation) func(resolve.Workspace, co
 
 func ensureWorkspace() resolve.Workspace {
 	return resolve.Workspace{
-		ID:          "w1",
-		Slug:        "slab",
-		Worktree:    "/w/slab",
-		SessionName: "slab",
-		IsPrimary:   true,
+		ID:           "w1",
+		RepositoryID: "r1",
+		Slug:         "slab",
+		RepoRoot:     "/w/slab",
+		SessionName:  "slab",
 	}
 }
 
@@ -266,7 +266,7 @@ func TestEnsureAdoptsAndRecordsTheLiveName(t *testing.T) {
 func TestEnsureAdoptConflictRefuses(t *testing.T) {
 	r := newEnsureRig(t, liveStep(ownSession("slab")))
 	other := resolve.Workspace{
-		ID: "w2", Slug: "other", Worktree: "/w/other", SessionName: "other",
+		ID: "w2", Slug: "other", RepoRoot: "/w/other", SessionName: "other",
 	}
 	if err := r.store.RegisterWorkspace(other, "sha256:x", ensureTime); err != nil {
 		t.Fatalf("register: %v", err)
@@ -621,7 +621,7 @@ func TestEnsureProbeFirstRetriesBoundAndUnbound(t *testing.T) {
 		if _, err := r.store.AllocateSessionName("w1", ensureTime); err != nil {
 			t.Fatal(err)
 		}
-		if err := r.store.RecordContainerObservation("w1", state.ContainerObservation{
+		if err := r.store.RecordContainerObservation("r1", state.ContainerObservation{
 			Kind: "devcontainer", ContainerID: "cid-1", ContainerUser: "vscode",
 			Workdir: "/workspaces/slab", Health: state.HealthPresent,
 		}, ensureTime); err != nil {
@@ -689,7 +689,7 @@ func TestEnsureProbeFirstRetrySucceeds(t *testing.T) {
 	t.Run("bound retry probe returns present with full binding", func(t *testing.T) {
 		r := newEnsureRig(t, liveStep(ownSession("slab"))).withContainerActuator()
 		registerLive(t, r)
-		if err := r.store.RecordContainerObservation("w1", state.ContainerObservation{
+		if err := r.store.RecordContainerObservation("r1", state.ContainerObservation{
 			Kind: "devcontainer", ContainerID: "cid-1", ContainerUser: "vscode",
 			Workdir: "/workspaces/slab", Health: state.HealthPresent,
 		}, ensureTime); err != nil {

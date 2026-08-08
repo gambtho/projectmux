@@ -88,7 +88,7 @@ func TestIntegrationOrphanedSessionsAgainstRealTmux(t *testing.T) {
 		t.Errorf("healthy item = %+v", item)
 	}
 	if item := findItem(t, check, "gone"); item.Status != StatusWarn ||
-		!strings.Contains(item.Detail, "worktree no longer exists") {
+		!strings.Contains(item.Detail, "repository root no longer exists") {
 		t.Errorf("gone item = %+v", item)
 	}
 	if item := findItem(t, check, "rogue"); item.Status != StatusWarn ||

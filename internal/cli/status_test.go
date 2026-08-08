@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -68,7 +70,7 @@ func TestStatusLiveMatchingSession(t *testing.T) {
 		DiscoverErr:   errors.New("docker down"),
 	})
 	live := controller.LiveSession{
-		Name: actual, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.Worktree,
+		Name: actual, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.RepoRoot,
 	}
 	installSessionObserver(t, controller.SessionObservation{
 		ByIdentity: &live,
@@ -149,12 +151,12 @@ func TestStatusStoredBindingNeverRendersAsLive(t *testing.T) {
 	if err := s.RegisterWorkspace(ws, "sha256:seed", cliTestTime); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := s.RecordContainerObservation(ws.ID, state.ContainerObservation{
+	if err := s.RecordContainerObservation(ws.RepositoryID, state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "c1", Health: state.HealthPresent,
 	}, cliTestTime); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	if err := s.RecordContainerObservation(ws.ID, state.ContainerObservation{
+	if err := s.RecordContainerObservation(ws.RepositoryID, state.ContainerObservation{
 		Health: state.HealthMissing,
 	}, cliTestTime); err != nil {
 		t.Fatalf("mark missing: %v", err)
@@ -240,7 +242,7 @@ func TestStatusLiveProbeContradictsStalePresent(t *testing.T) {
 	if err := s.RegisterWorkspace(ws, "sha256:seed", cliTestTime); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordContainerObservation(ws.ID, state.ContainerObservation{
+	if err := s.RecordContainerObservation(ws.RepositoryID, state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "c1", Health: state.HealthPresent,
 	}, cliTestTime); err != nil {
 		t.Fatal(err)
@@ -262,5 +264,129 @@ func TestStatusLiveProbeContradictsStalePresent(t *testing.T) {
 	}
 	if !env.Container.Observation.Attempted || env.Container.Observation.Health != "missing" {
 		t.Errorf("observation = %+v, want an attempted live missing", env.Container.Observation)
+	}
+}
+
+// A repository still recorded at a linked worktree is what migration 0002
+// leaves behind, and only rebuild can correct it. Status is where an
+// operator looks first, so status is where it has to say so.
+func TestStatusReportsAStaleRepositoryRootAsNeedingRebuild(t *testing.T) {
+	ws := statusWorkspace(t)
+	worktree := linkedWorktree(t, "1529")
+	s := fake.NewStore()
+	if err := s.RegisterWorkspace(resolve.Workspace{
+		ID:           "stale-workspace-id",
+		RepositoryID: "stale-repository-id",
+		Slug:         ws.Slug,
+		RepoRoot:     worktree,
+		SessionName:  ws.Slug + "--1529",
+	}, "sha256:seed", cliTestTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	installFakeStore(t, s)
+	installSessionObserver(t, controller.SessionObservation{}, nil)
+
+	code, stdout, stderr := run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	env := decodeStatus(t, stdout)
+	if !env.NeedsRebuild {
+		t.Fatalf("needs_rebuild = false; %s is recorded as a repository root", worktree)
+	}
+	if !strings.Contains(env.NeedsRebuildReason, worktree) {
+		t.Errorf("reason %q does not name the stale root", env.NeedsRebuildReason)
+	}
+}
+
+// The state a rebuild leaves when its collapse succeeds and its retag
+// fails (exit 6): no row is stale any more, but a live session still
+// carries the identity keys a pre-change projectmux wrote, and `open`
+// refuses it as a foreign occupant. Reporting on rows alone would call
+// this installation clean.
+func TestStatusReportsAStaleLiveSessionAsNeedingRebuild(t *testing.T) {
+	ws := statusWorkspace(t)
+	s := fake.NewStore()
+	// The collapse already ran: the only repository row is the real one.
+	if err := s.RegisterWorkspace(ws, "sha256:seed", cliTestTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	installFakeStore(t, s)
+	installSessionObserver(t, controller.SessionObservation{
+		ByName: []controller.LiveSession{{
+			Name:        ws.SessionName,
+			WorkspaceID: "pre-change-workspace-id",
+			Slug:        ws.Slug,
+			Worktree:    ws.RepoRoot,
+		}},
+	}, nil)
+
+	code, stdout, stderr := run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	env := decodeStatus(t, stdout)
+	if !env.NeedsRebuild {
+		t.Fatalf("needs_rebuild = false; the live session still carries stale keys")
+	}
+	if !strings.Contains(env.NeedsRebuildReason, ws.SessionName) {
+		t.Errorf("reason %q does not name the stale session", env.NeedsRebuildReason)
+	}
+}
+
+// A session of the same name belonging to a different repository is a
+// genuine collision, not a migration leftover: rebuild will not retag it,
+// so status must not send the operator there.
+func TestStatusDoesNotBlameRebuildForAForeignSession(t *testing.T) {
+	ws := statusWorkspace(t)
+	// A real repository, not just a directory: resolving it has to
+	// succeed and disagree, so the exclusion is the root comparison
+	// rather than a resolver error.
+	other := t.TempDir()
+	if out, err := exec.Command("git", "-C", other, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	other, err := filepath.EvalSymlinks(other)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	s := fake.NewStore()
+	if err := s.RegisterWorkspace(ws, "sha256:seed", cliTestTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	installFakeStore(t, s)
+	installSessionObserver(t, controller.SessionObservation{
+		ByName: []controller.LiveSession{{
+			Name:        ws.SessionName,
+			WorkspaceID: "some-other-workspace",
+			Slug:        ws.Slug,
+			Worktree:    other,
+		}},
+	}, nil)
+
+	code, stdout, stderr := run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	if env := decodeStatus(t, stdout); env.NeedsRebuild {
+		t.Errorf("needs_rebuild = true for a foreign session: %s", env.NeedsRebuildReason)
+	}
+}
+
+func TestStatusIsQuietWhenNoRepositoryRootIsStale(t *testing.T) {
+	ws := statusWorkspace(t)
+	s := fake.NewStore()
+	if err := s.RegisterWorkspace(ws, "sha256:seed", cliTestTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	installFakeStore(t, s)
+	installSessionObserver(t, controller.SessionObservation{}, nil)
+
+	code, stdout, stderr := run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	if env := decodeStatus(t, stdout); env.NeedsRebuild {
+		t.Errorf("needs_rebuild = true on a migrated installation: %s", env.NeedsRebuildReason)
 	}
 }

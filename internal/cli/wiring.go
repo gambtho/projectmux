@@ -16,14 +16,18 @@ import (
 	"github.com/gambtho/projectmux/internal/container"
 	"github.com/gambtho/projectmux/internal/controller"
 	"github.com/gambtho/projectmux/internal/doctor"
+	"github.com/gambtho/projectmux/internal/rebuild"
 	runner "github.com/gambtho/projectmux/internal/run"
 	"github.com/gambtho/projectmux/internal/state"
 	"github.com/gambtho/projectmux/internal/tmux"
 )
 
-// stateStore is what the observation commands need from the state store.
+// stateStore is what the commands need from the state store. Rebuild's
+// migration pass deletes, which nothing else does, so its slice is named
+// separately rather than folded into controller.Store.
 type stateStore interface {
 	controller.Store
+	rebuild.MigrationStore
 	Close() error
 }
 
@@ -82,6 +86,12 @@ func storedContainer(b *state.ContainerBinding) *storedContainerInfo {
 
 // newSessionActuator is the mutation seam mirroring newSessionObserver.
 var newSessionActuator = func() controller.SessionActuator {
+	return &tmux.Client{Socket: tmux.EnvSocket()}
+}
+
+// newSessionRetagger is the mutation seam for rewriting a live session's
+// identity keys, used only by rebuild's upgrade pass.
+var newSessionRetagger = func() rebuild.Retagger {
 	return &tmux.Client{Socket: tmux.EnvSocket()}
 }
 

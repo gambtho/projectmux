@@ -109,7 +109,7 @@ func openWorkspace(t *testing.T) resolve.Workspace {
 
 func ownLive(ws resolve.Workspace, name string) controller.LiveSession {
 	return controller.LiveSession{
-		Name: name, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.Worktree,
+		Name: name, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.RepoRoot,
 	}
 }
 

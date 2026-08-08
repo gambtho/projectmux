@@ -16,11 +16,11 @@ var testTime = time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 
 func testWorkspace(id, session string) resolve.Workspace {
 	return resolve.Workspace{
-		ID:          id,
-		Slug:        "slabledger",
-		Worktree:    "/w/" + id,
-		SessionName: session,
-		IsPrimary:   true,
+		ID:           id,
+		RepositoryID: "r-" + id,
+		Slug:         "slabledger",
+		RepoRoot:     "/w/" + id,
+		SessionName:  session,
 	}
 }
 
@@ -48,10 +48,10 @@ func TestFakeStoreMirrorsAllocationAndRetention(t *testing.T) {
 	obs := state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "c-1", Health: state.HealthPresent,
 	}
-	if err := s.RecordContainerObservation("w1", obs, testTime); err != nil {
+	if err := s.RecordContainerObservation("r-w1", obs, testTime); err != nil {
 		t.Fatalf("observation: %v", err)
 	}
-	if err := s.RecordContainerObservation("w1",
+	if err := s.RecordContainerObservation("r-w1",
 		state.ContainerObservation{Health: state.HealthMissing}, testTime); err != nil {
 		t.Fatalf("missing: %v", err)
 	}
@@ -69,16 +69,16 @@ func TestFakeStoreMirrorsAllocationAndRetention(t *testing.T) {
 	}
 }
 
-// TestFakeStoreWorkspacesOrdersBySlugThenWorktree mirrors the real store's
-// ORDER BY w.slug, w.worktree (internal/state/store.go): the fake iterates a
+// TestFakeStoreWorkspacesOrdersBySlugThenRepoRoot mirrors the real store's
+// ORDER BY w.slug, w.repo_root (internal/state/store.go): the fake iterates a
 // map, so without an explicit sort the order would be nondeterministic.
-func TestFakeStoreWorkspacesOrdersBySlugThenWorktree(t *testing.T) {
+func TestFakeStoreWorkspacesOrdersBySlugThenRepoRoot(t *testing.T) {
 	s := NewStore()
-	register := func(id, slug, worktree string) {
+	register := func(id, slug, repoRoot string) {
 		t.Helper()
 		ws := resolve.Workspace{
-			ID: id, Slug: slug, Worktree: worktree,
-			SessionName: id, IsPrimary: true,
+			ID: id, RepositoryID: id, Slug: slug, RepoRoot: repoRoot,
+			SessionName: id,
 		}
 		if err := s.RegisterWorkspace(ws, "sha256:a", testTime); err != nil {
 			t.Fatalf("register %s: %v", id, err)
@@ -103,7 +103,7 @@ func TestFakeStoreWorkspacesOrdersBySlugThenWorktree(t *testing.T) {
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Errorf("workspaces = %v, want %v ordered by (slug, worktree)", got, want)
+			t.Errorf("workspaces = %v, want %v ordered by (slug, repo root)", got, want)
 			break
 		}
 	}
@@ -254,11 +254,13 @@ func TestFakeContainerActuator(t *testing.T) {
 		},
 	}
 	obs, err := a.StartContainer(context.Background(),
-		resolve.Workspace{ID: "w1"}, config.Config{})
+		resolve.Workspace{ID: "w1", RepositoryID: "r-w1"}, config.Config{})
 	if err != nil || obs.ContainerID != "c1" {
 		t.Errorf("StartContainer = (%+v, %v)", obs, err)
 	}
-	if len(a.Started) != 1 || a.Started[0] != "w1" {
+	// The actuator records the repository, because that is what a
+	// container belongs to.
+	if len(a.Started) != 1 || a.Started[0] != "r-w1" {
 		t.Errorf("Started = %v", a.Started)
 	}
 	cmd := a.ExecCommand(state.ContainerBinding{ContainerID: "c1", Workdir: "/workspaces/w"},

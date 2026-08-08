@@ -247,22 +247,22 @@ func windowField(name, field string) string {
 }
 
 // checkContained reports why a path is unusable, or "" when it is fine. It
-// rejects a path that is absolute or that climbs out of the worktree.
+// rejects a path that is absolute or that climbs out of the repository root.
 //
 // The check is lexical only. The target need not exist when configuration is
-// read, so a symlink pointing outside the worktree is not detectable here; this
-// rejects the paths a user can see are wrong, not every path that could
+// read, so a symlink pointing outside the repository is not detectable here;
+// this rejects the paths a user can see are wrong, not every path that could
 // resolve outside.
 func checkContained(field, value string) string {
 	if strings.TrimSpace(value) == "" {
 		return fmt.Sprintf("%s must not be empty", field)
 	}
 	if filepath.IsAbs(value) {
-		return fmt.Sprintf("%s must be relative to the worktree, got %q", field, value)
+		return fmt.Sprintf("%s must be relative to the repository root, got %q", field, value)
 	}
 	clean := filepath.Clean(value)
 	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return fmt.Sprintf("%s must not escape the worktree, got %q", field, value)
+		return fmt.Sprintf("%s must not escape the repository root, got %q", field, value)
 	}
 	return ""
 }
