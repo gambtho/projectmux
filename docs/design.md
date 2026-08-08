@@ -333,7 +333,12 @@ between the two leaves an extra collapsible row rather than a lost registration
 — drops rows whose path no longer exists, and refuses, as a reported conflict,
 to drop a row whose path is present but unresolvable. Live sessions are matched
 by the tree recorded in `@dev_worktree` and retagged onto their repository, so
-a session running from before the change is adopted rather than duplicated.
+a lone session running from before the change is adopted rather than
+duplicated. Because every tree of one project now resolves to the same
+workspace, two or more live sessions of one repository would be retagged onto a
+single identity; the pass refuses that group whole, retags none of it, and
+reports a conflict naming every claimant, since the retag would destroy the only
+keys that tell those sessions apart.
 `projectmux status` reports a repository whose recorded root is not a main
 worktree as needing this run.
 

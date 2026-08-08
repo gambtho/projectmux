@@ -2,6 +2,7 @@ package rebuild
 
 import (
 	"context"
+	"slices"
 
 	"github.com/gambtho/projectmux/internal/controller"
 	"github.com/gambtho/projectmux/internal/resolve"
@@ -177,9 +178,25 @@ func (a *Applier) collapseInto(ctx context.Context, repo state.Repository, ws re
 // read as evidence of a different workspace.
 //
 // @dev_worktree keeps its name. Renaming it would strand every running
-// session from the rebuild that is supposed to recover it (design §5.1);
+// session from the rebuild that is supposed to recover it (design §7);
 // only its value changes, to the repository root.
+//
+// The retag target is not unique per session: resolve.Resolve derives the
+// workspace ID from the repository, so every tree of one project resolves
+// to the same ID. Retagging each session independently would therefore
+// collide every session of a repository onto one ID — a state Classify's
+// duplicate-ID case rejects on every later run, and one this pass could
+// not undo, because the retag overwrites the only keys that told the
+// sessions apart. The sessions are grouped by their resolved ID first and
+// a group with more than one member is refused whole, which is the rule
+// the rest of this package already follows: never mutate on uncertainty.
 func (a *Applier) retagSessions(ctx context.Context, res *MigrationResult) {
+	// Resolved targets are computed up front, in a pass that writes
+	// nothing, so the collision is known before the first retag rather
+	// than discovered halfway through one. A nil entry is a session this
+	// pass has nothing to say about.
+	targets := make([]*resolve.Workspace, len(res.Live))
+	claimants := make(map[string][]string, len(res.Live))
 	for i, sess := range res.Live {
 		if sess.WorkspaceID == "" {
 			continue
@@ -189,6 +206,34 @@ func (a *Applier) retagSessions(ctx context.Context, res *MigrationResult) {
 			// A session whose tree is gone is not this pass's problem:
 			// applyCandidate already reports it, with the reason an
 			// operator needs.
+			continue
+		}
+		targets[i] = &ws
+		claimants[ws.ID] = append(claimants[ws.ID], sess.Name)
+	}
+	// Sorted so the refusal reads the same however tmux ordered its
+	// output, matching duplicateIDReason.
+	for id := range claimants {
+		slices.Sort(claimants[id])
+	}
+
+	for i, sess := range res.Live {
+		ws := targets[i]
+		if ws == nil {
+			continue
+		}
+		if len(claimants[ws.ID]) > 1 {
+			// Reported once per claimant rather than once per group, the
+			// shape Classify uses for the same finding: the operator's
+			// next step is to look at each named session and decide which
+			// one survives. A session already carrying the right keys is
+			// named too, because it is one of the claimants the operator
+			// has to choose between.
+			res.Conflicts = append(res.Conflicts, conflictAt(sess.Name,
+				"sessions %s all resolve to workspace %s, so migrating them would "+
+					"leave several sessions claiming one workspace; none of them was "+
+					"retagged. Kill or rename all but one, then run rebuild again.",
+				quotedList(claimants[ws.ID]), ws.ID))
 			continue
 		}
 		if sess.WorkspaceID == ws.ID && sess.Worktree == ws.RepoRoot {

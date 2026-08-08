@@ -3,6 +3,8 @@ package rebuild
 import (
 	"context"
 	"errors"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -345,6 +347,96 @@ func TestMigrateRetagsALiveSessionOntoItsRepository(t *testing.T) {
 	}
 	if len(res.Migrated) != 1 || res.Migrated[0].Action != "retagged" {
 		t.Fatalf("migrated = %+v", res.Migrated)
+	}
+}
+
+// Two live sessions of one repository resolve to the same workspace ID,
+// because resolve.Resolve derives it from the repository alone. Retagging
+// them both would leave two sessions claiming one ID — the state
+// Classify's duplicate-ID case rejects forever and tmux decoding reports
+// as a hard observation error — while the pass reported success. Neither
+// may be retagged, and both must be named in a conflict.
+func TestMigrateRefusesToRetagCollidingSessions(t *testing.T) {
+	parent := repoWorkspace("/repo")
+	retagger := &recordingRetagger{}
+	a := &Applier{
+		Store:    &registerRecorder{},
+		Repos:    &migrateStore{},
+		Config:   fixedDigest{},
+		Locker:   nopLocker{},
+		Clock:    fixedClock{},
+		Retagger: retagger,
+		Resolver: migrateResolver{
+			roots: map[string]resolve.Workspace{
+				"/repo":                 parent,
+				"/repo/.worktrees/1529": parent,
+			},
+			exists: map[string]bool{"/repo": true, "/repo/.worktrees/1529": true},
+		},
+	}
+
+	res := a.Migrate(context.Background(), []controller.LiveSession{
+		{Name: "slabledger", WorkspaceID: "old-id", Slug: "slabledger", Worktree: "/repo"},
+		{Name: "slabledger--1529", WorkspaceID: "old-id-2", Slug: "slabledger", Worktree: "/repo/.worktrees/1529"},
+	})
+
+	if len(retagger.calls) != 0 {
+		t.Errorf("retag calls = %v, want none: neither session may be moved", retagger.calls)
+	}
+	// The live sessions handed to classification must still carry the keys
+	// that tell them apart. Overwriting them is what makes the collision
+	// unrecoverable, because the distinguishing IDs are then gone.
+	if res.Live[0].WorkspaceID != "old-id" || res.Live[1].WorkspaceID != "old-id-2" {
+		t.Errorf("live = %+v, want the original workspace IDs preserved", res.Live)
+	}
+	if len(res.Migrated) != 0 {
+		t.Errorf("migrated = %+v, want nothing claimed", res.Migrated)
+	}
+	if len(res.Conflicts) != 2 {
+		t.Fatalf("conflicts = %+v, want one per claimant", res.Conflicts)
+	}
+	for _, c := range res.Conflicts {
+		for _, name := range []string{"slabledger", "slabledger--1529"} {
+			if !strings.Contains(c.Reason, strconv.Quote(name)) {
+				t.Errorf("conflict %q reason = %q, want it to name %s", c.Subject, c.Reason, name)
+			}
+		}
+	}
+}
+
+// The same collision under --dry-run. The preview is what an operator
+// reads before committing to the run, so it must show the refusal rather
+// than predict two retags that would corrupt the installation.
+func TestMigrateDryRunPredictsACollisionRatherThanRetags(t *testing.T) {
+	parent := repoWorkspace("/repo")
+	retagger := &recordingRetagger{}
+	a := &Applier{
+		Store:    &registerRecorder{},
+		Repos:    &migrateStore{},
+		Config:   fixedDigest{},
+		Locker:   nopLocker{},
+		Clock:    fixedClock{},
+		Retagger: retagger,
+		DryRun:   true,
+		Resolver: migrateResolver{
+			roots: map[string]resolve.Workspace{
+				"/repo":                 parent,
+				"/repo/.worktrees/1529": parent,
+			},
+			exists: map[string]bool{"/repo": true, "/repo/.worktrees/1529": true},
+		},
+	}
+
+	res := a.Migrate(context.Background(), []controller.LiveSession{
+		{Name: "slabledger", WorkspaceID: "old-id", Slug: "slabledger", Worktree: "/repo"},
+		{Name: "slabledger--1529", WorkspaceID: "old-id-2", Slug: "slabledger", Worktree: "/repo/.worktrees/1529"},
+	})
+
+	if len(res.Migrated) != 0 {
+		t.Errorf("migrated = %+v, want no retag predicted", res.Migrated)
+	}
+	if len(res.Conflicts) != 2 {
+		t.Fatalf("conflicts = %+v, want the collision previewed", res.Conflicts)
 	}
 }
 

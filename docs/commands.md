@@ -445,8 +445,12 @@ linked one needs git and a migration must never fail because a directory
 moved. Rebuild is what corrects that: rows recorded at a linked worktree
 collapse into their parent repository, and rows whose path is gone are
 dropped. Live sessions from before the upgrade are matched by the tree they
-record and retagged onto their repository, so a running session is adopted
-rather than duplicated. `status` reports a repository whose recorded root is
+record and retagged onto their repository, so a lone running session is adopted
+rather than duplicated. Where a repository has more than one live session from
+before the upgrade, all of them resolve to the same workspace, so retagging
+would leave several sessions claiming one identity; none of that group is
+retagged and each is reported as a conflict. Kill or rename all but one and run
+it again. `status` reports a repository whose recorded root is
 not a main worktree as needing this run.
 
 **It only fills in what is missing.** Rebuild never overwrites a recorded
@@ -461,9 +465,9 @@ exits 0.
 
 `--dry-run` performs every read-only step — classification, resolution,
 identity verification, configuration loading — and stops before the writes. It
-is a preview rather than a partial pass, and it exits on a conflict with the
-same code the real run would, because the exit code describes the state of the
-world rather than whether anything was written.
+is a preview rather than a partial pass, and it exits 6 whenever the preview
+finds a conflict. That is not the same set of conflicts the real run finds; see
+the paragraph below for why a real run may resolve some of them.
 
 A dry run classifies the state as it stands *before* the migration pass, so a
 conflict it reports may be one the real run clears by retagging first: a
