@@ -4855,7 +4855,7 @@ projectmux stop [--container] [--force] [--json] [--compact] [<workspace>]
 ```
 ````
 
-```markdown
+````markdown
 A container belongs to a repository and is shared by every session on it, so
 `stop --container` refuses with exit 6 when another session on the same
 repository is live, and names them:
@@ -4868,7 +4868,7 @@ projectmux: the container is shared with live session(s) slabledger--feature-a; 
 `--force` stops it anyway. The sibling check and the container stop happen
 under one continuous hold of the repository lock, so a sibling cannot open
 into the gap between them.
-```
+````
 
 - [ ] **Step 13: Format, run the owned packages, and commit**
 
@@ -4892,6 +4892,7 @@ the repository lock, acquired before the workspace lock per the global
 ordering. A check released before the stop is the race it exists to
 prevent, and TestStopHoldsTheRepositoryLockThroughTheContainerStop pins
 the hold by probing the lock from inside StopContainer."
+```
 
 ---
 
@@ -6899,6 +6900,7 @@ value moves to the repository root.
 
 status reports a repository still recorded at a linked worktree as
 needing this run, since nothing else can tell the operator."
+```
 
 ---
 
