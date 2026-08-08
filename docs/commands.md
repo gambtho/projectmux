@@ -390,6 +390,12 @@ not create tmux sessions.
 The batch report is the output, so it goes to stdout even when some
 repositories fail, with the summary on stderr.
 
+A row whose recorded root turns out to be a linked worktree is `skipped` with a
+reason pointing at `rebuild`. Those rows exist only between the schema upgrade
+and the first `rebuild` — see [`rebuild`](#projectmux-rebuild) — and starting a
+container for each of them would give one repository several, which is what
+sharing a container per repository exists to prevent.
+
 ### Running autostart from systemd
 
 A user unit template ships at

@@ -179,6 +179,87 @@ func TestAutostartAllHealthyExitsZero(t *testing.T) {
 	}
 }
 
+// Migration 0002 promotes every stored path to a repository row, so a
+// linked worktree that used to be its own workspace becomes a repository
+// row of its own until `rebuild` collapses it. The systemd unit runs
+// unattended and can fall in that window: without the skip it would start
+// one container per worktree, which is exactly what making the repository
+// the unit of a container was supposed to prevent.
+//
+// This uses a real repository and a real linked worktree rather than the
+// path-only fixture above, because the predicate is a git question and a
+// fake resolver would only re-assert the answer the test is checking.
+func TestAutostartSkipsALinkedWorktreeRow(t *testing.T) {
+	workspace(t, map[string]string{
+		"defaults.yaml": "version: 1\n",
+		"workspaces/slabledger.yaml": "version: 1\nautostart: true\n" +
+			"devcontainer:\n  enabled: true\n",
+	})
+	t.Setenv("PROJECTMUX_STATE_ROOT", t.TempDir())
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	main, err := resolve.Resolve("", nil, cwd)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	worktree := linkedWorktree(t, "1529")
+
+	s := fake.NewStore()
+	for _, seed := range []resolve.Workspace{
+		main,
+		// What 0002 leaves behind: a second repository row whose recorded
+		// root is a linked worktree of the first.
+		{
+			ID: "stale-workspace-id", RepositoryID: "stale-repository-id",
+			Slug: main.Slug, RepoRoot: worktree, SessionName: main.Slug + "--1529",
+		},
+	} {
+		if err := s.RegisterWorkspace(seed, "sha256:seed", cliTestTime); err != nil {
+			t.Fatalf("register %s: %v", seed.RepoRoot, err)
+		}
+	}
+	installOpenStore(t, s)
+	installContainerObserver(t, &fake.ContainerObserver{
+		AppliesResult:  true,
+		DiscoverResult: &controller.ContainerObservation{Health: state.HealthMissing, Kind: "devcontainer"},
+	})
+	installScriptedSessions(t)
+	actC := installContainerActuator(t)
+
+	code, stdout, stderr := run(t, "autostart", "--json")
+	if code != ExitOK {
+		t.Fatalf("exit %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	if len(actC.Started) != 1 || actC.Started[0] != main.RepositoryID {
+		t.Errorf("Started = %v, want exactly one start for the repository %s",
+			actC.Started, main.RepositoryID)
+	}
+
+	env := decodeAutostart(t, stdout)
+	var stale, started *autostartEntry
+	for i := range env.Repositories {
+		switch env.Repositories[i].ID {
+		case "stale-repository-id":
+			stale = &env.Repositories[i]
+		case main.RepositoryID:
+			started = &env.Repositories[i]
+		}
+	}
+	if stale == nil || stale.Outcome != "skipped" {
+		t.Fatalf("worktree row = %+v, want skipped", stale)
+	}
+	// The reason has to send the operator somewhere: a silent skip on the
+	// first boot after an upgrade is indistinguishable from a broken unit.
+	if !strings.Contains(stale.Reason, "rebuild") {
+		t.Errorf("reason = %q, want it to name rebuild", stale.Reason)
+	}
+	if started == nil || started.Outcome != "started" {
+		t.Errorf("repository row = %+v, want started", started)
+	}
+}
+
 func TestAutostartRejectsArguments(t *testing.T) {
 	code, _, _ := run(t, "autostart", "extra")
 	if code != ExitUsage {

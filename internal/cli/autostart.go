@@ -11,6 +11,7 @@ import (
 
 	"github.com/gambtho/projectmux/internal/config"
 	"github.com/gambtho/projectmux/internal/controller"
+	"github.com/gambtho/projectmux/internal/resolve"
 	"github.com/gambtho/projectmux/internal/state"
 )
 
@@ -112,6 +113,37 @@ func runAutostart(ctx context.Context, args []string, stdout io.Writer) error {
 				entry.Reason = "statting the repository root: " + statErr.Error()
 			}
 			failed++
+			env.Repositories = append(env.Repositories, entry)
+			continue
+		}
+
+		// A row recorded at a linked worktree is skipped. Migration 0002
+		// promotes every stored path to a repository row, deliberately
+		// over-counting, because pure SQL cannot ask git which of them are
+		// linked worktrees; `rebuild` collapses them afterwards. This unit
+		// runs unattended on the first boot after the upgrade, which can
+		// fall in the window before that rebuild — and without this check
+		// it would run `devcontainer up` once per worktree, N containers
+		// where a repository is promised exactly one.
+		//
+		// The predicate is staleRepositoryRoots' (status.go), minus the
+		// slug filter: that filter exists to keep status to a couple of git
+		// calls, and autostart has no workspace of its own to filter
+		// against. The cost is one `git rev-parse` per registered
+		// repository, once per boot, in a command that is about to spend
+		// seconds per repository starting containers.
+		//
+		// A row that no longer resolves at all falls through rather than
+		// being skipped, as it does in status: git declining to answer is
+		// not evidence that the row is a worktree, and treating it as one
+		// would silently disable autostart for a whole repository on a
+		// transient failure. The row proceeds and reports whatever the
+		// start actually does.
+		if resolved, resolveErr := resolve.Resolve("", nil, repo.RepoRoot); resolveErr == nil &&
+			resolved.RepoRoot != repo.RepoRoot {
+			entry.Outcome = "skipped"
+			entry.Reason = "recorded root is a linked worktree of " + resolved.RepoRoot +
+				"; run projectmux rebuild to collapse it"
 			env.Repositories = append(env.Repositories, entry)
 			continue
 		}
