@@ -68,7 +68,7 @@ func TestStatusLiveMatchingSession(t *testing.T) {
 		DiscoverErr:   errors.New("docker down"),
 	})
 	live := controller.LiveSession{
-		Name: actual, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.Worktree,
+		Name: actual, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.RepoRoot,
 	}
 	installSessionObserver(t, controller.SessionObservation{
 		ByIdentity: &live,
@@ -149,12 +149,12 @@ func TestStatusStoredBindingNeverRendersAsLive(t *testing.T) {
 	if err := s.RegisterWorkspace(ws, "sha256:seed", cliTestTime); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := s.RecordContainerObservation(ws.ID, state.ContainerObservation{
+	if err := s.RecordContainerObservation(ws.RepositoryID, state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "c1", Health: state.HealthPresent,
 	}, cliTestTime); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	if err := s.RecordContainerObservation(ws.ID, state.ContainerObservation{
+	if err := s.RecordContainerObservation(ws.RepositoryID, state.ContainerObservation{
 		Health: state.HealthMissing,
 	}, cliTestTime); err != nil {
 		t.Fatalf("mark missing: %v", err)
@@ -240,7 +240,7 @@ func TestStatusLiveProbeContradictsStalePresent(t *testing.T) {
 	if err := s.RegisterWorkspace(ws, "sha256:seed", cliTestTime); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordContainerObservation(ws.ID, state.ContainerObservation{
+	if err := s.RecordContainerObservation(ws.RepositoryID, state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "c1", Health: state.HealthPresent,
 	}, cliTestTime); err != nil {
 		t.Fatal(err)

@@ -101,7 +101,7 @@ func mismatchedSession(t *testing.T) (*fake.Store, resolve.Workspace) {
 		Name:        "new-name",
 		WorkspaceID: ws.ID,
 		Slug:        ws.Slug,
-		Worktree:    ws.Worktree,
+		Worktree:    ws.RepoRoot,
 	}}, nil)
 	return s, ws
 }

@@ -14,11 +14,11 @@ import (
 
 func listWorkspace(id, slug string) resolve.Workspace {
 	return resolve.Workspace{
-		ID:          id,
-		Slug:        slug,
-		Worktree:    "/w/" + slug,
-		SessionName: slug,
-		IsPrimary:   true,
+		ID:           id,
+		RepositoryID: "r-" + id,
+		Slug:         slug,
+		RepoRoot:     "/w/" + slug,
+		SessionName:  slug,
 	}
 }
 
@@ -31,12 +31,12 @@ func seededListStore(t *testing.T) *fake.Store {
 	if _, err := s.AllocateSessionName("w1", cliTestTime); err != nil {
 		t.Fatalf("allocate: %v", err)
 	}
-	if err := s.RecordContainerObservation("w1", state.ContainerObservation{
+	if err := s.RecordContainerObservation("r-w1", state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "c1", Health: state.HealthPresent,
 	}, cliTestTime); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	if err := s.RecordContainerObservation("w1", state.ContainerObservation{
+	if err := s.RecordContainerObservation("r-w1", state.ContainerObservation{
 		Health: state.HealthMissing,
 	}, cliTestTime); err != nil {
 		t.Fatalf("mark missing: %v", err)

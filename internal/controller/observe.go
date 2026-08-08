@@ -98,11 +98,17 @@ func (c *Controller) Observe(ctx context.Context, d Desired) (Snapshot, error) {
 		snap.Session = SessionSnapshot{State: SessionAbsent, ByName: obs.ByName}
 	}
 
-	snap.Container = c.observeContainer(ctx, d, snap.Stored)
+	// A container belongs to a repository, so the observation needs the
+	// binding and nothing else about the session that asked for it.
+	var binding *state.ContainerBinding
+	if snap.Stored != nil {
+		binding = snap.Stored.Container
+	}
+	snap.Container = c.observeContainer(ctx, d, binding)
 	return snap, nil
 }
 
-func (c *Controller) observeContainer(ctx context.Context, d Desired, stored *state.Record) ContainerSnapshot {
+func (c *Controller) observeContainer(ctx context.Context, d Desired, binding *state.ContainerBinding) ContainerSnapshot {
 	// Observe only on "auto" or "true"; anything else — including "false"
 	// and the unnormalized zero value "" — is treated as disabled.
 	enabled := d.Config.DevContainer.Enabled
@@ -124,8 +130,8 @@ func (c *Controller) observeContainer(ctx context.Context, d Desired, stored *st
 			return ContainerSnapshot{}
 		}
 	}
-	if stored != nil && stored.Container != nil {
-		obs, err := c.Containers.ProbeContainer(ctx, *stored.Container)
+	if binding != nil {
+		obs, err := c.Containers.ProbeContainer(ctx, *binding)
 		if err != nil {
 			// Design §9: a failed probe yields unknown, never loss.
 			return ContainerSnapshot{

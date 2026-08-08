@@ -127,7 +127,7 @@ func TestObserveProbesAnExistingBinding(t *testing.T) {
 	if err := d.store.RegisterWorkspace(ws, "sha256:desired", testTime); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := d.store.RecordContainerObservation("w1", state.ContainerObservation{
+	if err := d.store.RecordContainerObservation("r1", state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "c-1", Health: state.HealthPresent,
 	}, testTime); err != nil {
 		t.Fatalf("seed binding: %v", err)
@@ -158,7 +158,7 @@ func TestObserveDiscoversWhenNeverBound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Observe: %v", err)
 	}
-	if len(d.containers.Discovered) != 1 || d.containers.Discovered[0] != "w1" {
+	if len(d.containers.Discovered) != 1 || d.containers.Discovered[0] != "r1" {
 		t.Errorf("discoveries = %v", d.containers.Discovered)
 	}
 	if snap.Container.Observed == nil || snap.Container.Observed.Health != state.HealthMissing {
@@ -223,7 +223,7 @@ func TestContainerProbeFailureIsUnknownNotLoss(t *testing.T) {
 	if err := d.store.RegisterWorkspace(ws, "sha256:desired", testTime); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := d.store.RecordContainerObservation("w1", state.ContainerObservation{
+	if err := d.store.RecordContainerObservation("r1", state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "c-1", Health: state.HealthPresent,
 	}, testTime); err != nil {
 		t.Fatalf("seed binding: %v", err)
@@ -248,7 +248,7 @@ func TestObserveAutoNotApplicableSkipsContainer(t *testing.T) {
 	if err := d.store.RegisterWorkspace(testDesired("auto").Workspace, "sha256:x", testTime); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := d.store.RecordContainerObservation("w1", state.ContainerObservation{
+	if err := d.store.RecordContainerObservation("r1", state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "c1", Health: state.HealthPresent,
 	}, testTime); err != nil {
 		t.Fatalf("bind: %v", err)

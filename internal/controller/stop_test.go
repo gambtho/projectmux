@@ -142,7 +142,7 @@ func TestStopKillFailureIsRecorded(t *testing.T) {
 func TestStopContainerStopsBoundContainer(t *testing.T) {
 	r := newEnsureRig(t, liveStep(ownSession("slab"))).withContainerActuator()
 	registerStopFixture(t, r)
-	if err := r.store.RecordContainerObservation("w1", state.ContainerObservation{
+	if err := r.store.RecordContainerObservation("r1", state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "cid-1", ContainerUser: "vscode",
 		Workdir: "/workspaces/slab", Health: state.HealthPresent,
 	}, ensureTime); err != nil {
@@ -185,7 +185,7 @@ func TestStopContainerWithoutBindingIsSuccess(t *testing.T) {
 func TestStopContainerFailureReportsPartial(t *testing.T) {
 	r := newEnsureRig(t, liveStep(ownSession("slab"))).withContainerActuator()
 	registerStopFixture(t, r)
-	if err := r.store.RecordContainerObservation("w1", state.ContainerObservation{
+	if err := r.store.RecordContainerObservation("r1", state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "cid-1", Health: state.HealthPresent,
 	}, ensureTime); err != nil {
 		t.Fatalf("bind: %v", err)

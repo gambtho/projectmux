@@ -105,7 +105,7 @@ func TestStopUnknownRefusesExitSix(t *testing.T) {
 func TestStopContainerStopsBinding(t *testing.T) {
 	ws := openWorkspaceIdentity(t)
 	s, _ := stopFixtureFor(t, ws)
-	if err := s.RecordContainerObservation(ws.ID, state.ContainerObservation{
+	if err := s.RecordContainerObservation(ws.RepositoryID, state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "cid-1", Health: state.HealthPresent,
 	}, cliTestTime); err != nil {
 		t.Fatalf("bind: %v", err)
@@ -133,7 +133,7 @@ func TestStopContainerStopsBinding(t *testing.T) {
 func TestStopContainerPartialFailureReportsOnStdout(t *testing.T) {
 	ws := openWorkspaceIdentity(t)
 	s, _ := stopFixtureFor(t, ws)
-	if err := s.RecordContainerObservation(ws.ID, state.ContainerObservation{
+	if err := s.RecordContainerObservation(ws.RepositoryID, state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "cid-1", Health: state.HealthPresent,
 	}, cliTestTime); err != nil {
 		t.Fatalf("bind: %v", err)

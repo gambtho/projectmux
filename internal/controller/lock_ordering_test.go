@@ -99,6 +99,14 @@ func TestConcurrentOpensOnOneRepositorySerializeTheContainerStart(t *testing.T) 
 				DiscoverResult: &controller.ContainerObservation{
 					Kind: "devcontainer", Health: state.HealthMissing,
 				},
+				// The second session through the lock reads the binding
+				// its sibling just wrote on the shared repository, so it
+				// probes rather than discovers. Both paths must report
+				// the same missing container for this test to be about
+				// the lock rather than about observation order.
+				ProbeResult: controller.ContainerObservation{
+					Kind: "devcontainer", Health: state.HealthMissing,
+				},
 			},
 			Clock:        &fake.Clock{Time: ensureTime},
 			Actuator:     &fake.SessionActuator{},

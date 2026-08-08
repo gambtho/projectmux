@@ -347,20 +347,21 @@ non-zero exit.
 projectmux autostart [--json] [--compact]
 ```
 
-Starts containers for registered primary worktrees with `autostart: true`. It
-is a batch command intended for boot, and it reports one line per workspace:
+Starts containers for registered repositories with `autostart: true`. It is a
+batch command intended for boot, and it reports one line per repository:
 
 ```text
 $ projectmux autostart
 slabledger	skipped	(autostart is not enabled)
 ```
 
-Only *primary* worktrees are considered — linked worktrees share their
-parent's container and would otherwise start it several times. Autostart
-starts containers; it does not create tmux sessions.
+The unit of the report is the *repository*, not the session: every session on
+a repository shares one container, so autostart starts one container per
+repository however many sessions it has. Autostart starts containers; it does
+not create tmux sessions.
 
-The batch report is the output, so it goes to stdout even when some workspaces
-fail, with the summary on stderr.
+The batch report is the output, so it goes to stdout even when some
+repositories fail, with the summary on stderr.
 
 ### Running autostart from systemd
 

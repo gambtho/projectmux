@@ -48,7 +48,7 @@ commands:
   stop [--container] [--json] [--compact] [<workspace>]
         end the workspace session, and with --container its container
   autostart [--json] [--compact]
-        start containers for registered primary worktrees with autostart: true
+        start containers for registered repositories with autostart: true
   config [--validate] [--json] [--compact] [<workspace>]
         print the normalized, merged configuration for a workspace, or with
         --validate report what is wrong in the configuration files and where

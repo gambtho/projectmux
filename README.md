@@ -280,7 +280,7 @@ projectmux stop          # end the session
 | [`open`](docs/commands.md#projectmux-open) | observe, ensure, record, and attach the workspace session |
 | [`attach`](docs/commands.md#projectmux-attach) | attach to a live session; never creates one |
 | [`stop`](docs/commands.md#projectmux-stop) | end the session, and with `--container` its container |
-| [`autostart`](docs/commands.md#projectmux-autostart) | start containers for registered primary worktrees at boot |
+| [`autostart`](docs/commands.md#projectmux-autostart) | start containers for registered repositories at boot |
 | [`config`](docs/commands.md#projectmux-config) | print the merged configuration, or `--validate` it |
 | [`list`](docs/commands.md#projectmux-list) | recorded workspaces and live identity-carrying sessions |
 | [`status`](docs/commands.md#projectmux-status) | observe one workspace and explain drift |

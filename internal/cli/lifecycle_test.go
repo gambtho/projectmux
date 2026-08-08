@@ -87,7 +87,7 @@ func TestLifecycleOpenReopenAttach(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sessions: %v", err)
 	}
-	if len(live) != 1 || live[0].WorkspaceID != ws.ID || live[0].Worktree != ws.Worktree {
+	if len(live) != 1 || live[0].WorkspaceID != ws.ID || live[0].Worktree != ws.RepoRoot {
 		t.Fatalf("live = %+v", live)
 	}
 
@@ -120,10 +120,10 @@ func TestLifecycleAdoptsPhaseOneSession(t *testing.T) {
 	ws, socket := lifecycleRig(t, "adopt")
 
 	for _, args := range [][]string{
-		{"new-session", "-d", "-s", "bash-era", "-c", ws.Worktree},
+		{"new-session", "-d", "-s", "bash-era", "-c", ws.RepoRoot},
 		{"set-option", "-t", "bash-era", controller.KeyWorkspaceID, ws.ID},
 		{"set-option", "-t", "bash-era", controller.KeySlug, ws.Slug},
-		{"set-option", "-t", "bash-era", controller.KeyWorktree, ws.Worktree},
+		{"set-option", "-t", "bash-era", controller.KeyWorktree, ws.RepoRoot},
 	} {
 		full := append([]string{"-L", socket}, args...)
 		if out, err := exec.Command("tmux", full...).CombinedOutput(); err != nil {
@@ -436,16 +436,24 @@ func TestLifecycleStopContainerThenAutostart(t *testing.T) {
 	}
 }
 
-// TestLifecycleRebuildAfterLosingTheDatabase performs the disaster this
-// slice exists for, against a real tmux server and the real store: the
-// state database is destroyed while the session it described is still
-// running. Rebuild re-registers the workspace from the session's
-// identity keys, recovering the two fields tmux does not carry —
-// is_primary and the proposed session name — and adopts the live name.
-// The second run is the idempotence claim, and the one most likely to
-// regress.
-func TestLifecycleRebuildAfterLosingTheDatabase(t *testing.T) {
+// TestLifecycleRebuildThenAutostart performs the disaster this slice
+// exists for, against a real tmux server and the real store: the state
+// database is destroyed while the session it described is still running.
+// Rebuild re-registers the repository and its session from the live
+// session's identity keys, and autostart then starts that repository's
+// container. This is the successor to the is_primary regression: the flag
+// used to keep autostart from starting a shared container once per
+// worktree, and one row per repository now does it structurally (spec
+// §6.3). If the repositories table came back wrong, autostart would stop
+// starting this container — or start it twice.
+func TestLifecycleRebuildThenAutostart(t *testing.T) {
 	ws, socket := lifecycleRig(t, "rebuild")
+	actC := installContainerActuator(t)
+	actC.ExecResult = "sleep 300"
+	installContainerObserver(t, &fake.ContainerObserver{
+		AppliesResult:  true,
+		DiscoverResult: &controller.ContainerObservation{Health: state.HealthMissing, Kind: "devcontainer"},
+	})
 
 	if env := openJSON(t); env.Action != "created" {
 		t.Fatalf("open = %+v", env)
@@ -472,17 +480,24 @@ func TestLifecycleRebuildAfterLosingTheDatabase(t *testing.T) {
 	if len(env.Registered) != 1 {
 		t.Fatalf("registered = %+v, want exactly one workspace", env.Registered)
 	}
-	got := env.Registered[0]
-	if got.ID != ws.ID || got.Slug != ws.Slug || got.Worktree != ws.Worktree ||
-		got.Session != ws.SessionName || !got.IsPrimary {
-		t.Fatalf("registered = %+v, want %s at %s as primary session %q",
-			got, ws.Slug, ws.Worktree, ws.SessionName)
+	// The envelope still names the field worktree; Task 7 owns renaming
+	// it. The value it carries is the repository root.
+	if got := env.Registered[0]; got.ID != ws.ID || got.Slug != ws.Slug ||
+		got.Worktree != ws.RepoRoot {
+		t.Fatalf("registered = %+v, want %s at %s", got, ws.Slug, ws.RepoRoot)
 	}
 
-	// The row is real, and it carries the two fields tmux never held.
+	// Exactly one repository row, carrying the root autostart will use.
 	st, err := state.Open(stateRoot)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
+	}
+	repos, err := st.Repositories()
+	if err != nil {
+		t.Fatalf("Repositories: %v", err)
+	}
+	if len(repos) != 1 || repos[0].ID != ws.RepositoryID || repos[0].RepoRoot != ws.RepoRoot {
+		t.Fatalf("repositories = %+v, want exactly one row for %s", repos, ws.RepoRoot)
 	}
 	rec, err := st.Workspace(ws.ID)
 	if err != nil {
@@ -491,9 +506,6 @@ func TestLifecycleRebuildAfterLosingTheDatabase(t *testing.T) {
 	if rec.ActualSession == nil || *rec.ActualSession != ws.SessionName {
 		t.Errorf("actual_session = %v, want %q adopted", rec.ActualSession, ws.SessionName)
 	}
-	if !rec.IsPrimary {
-		t.Error("is_primary was not recovered; autostart would stop starting this container")
-	}
 	if rec.ProposedSession != ws.SessionName {
 		t.Errorf("proposed_session = %q, want %q", rec.ProposedSession, ws.SessionName)
 	}
@@ -501,8 +513,7 @@ func TestLifecycleRebuildAfterLosingTheDatabase(t *testing.T) {
 		t.Fatalf("close store: %v", err)
 	}
 
-	// Idempotence: a fully recovered installation has nothing to do and
-	// says so.
+	// Idempotence: a fully recovered installation has nothing to do.
 	code, stdout, stderr = run(t, "rebuild", "--json")
 	if code != ExitOK {
 		t.Fatalf("second rebuild exit %d, stderr: %s", code, stderr)
@@ -512,12 +523,39 @@ func TestLifecycleRebuildAfterLosingTheDatabase(t *testing.T) {
 		t.Errorf("second rebuild = %+v, want an empty report", second)
 	}
 
-	// The session was adopted, never recreated or renamed.
+	// The recovered installation still autostarts, once.
+	configDir := os.Getenv("PROJECTMUX_CONFIG_ROOT")
+	cfgPath := configDir + "/workspaces/" + ws.Slug + ".yaml"
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, append(raw, []byte("autostart: true\n")...), 0o644); err != nil {
+		t.Fatalf("enabling autostart: %v", err)
+	}
+	before := len(actC.Started)
+	code, stdout, stderr = run(t, "autostart", "--json")
+	if code != ExitOK {
+		t.Fatalf("autostart exit %d, stderr: %s\nstdout: %s", code, stderr, stdout)
+	}
+	auto := decodeAutostart(t, stdout)
+	if len(auto.Repositories) != 1 {
+		t.Fatalf("autostart report = %+v, want one repository", auto.Repositories)
+	}
+	if e := auto.Repositories[0]; e.ID != ws.RepositoryID || e.Outcome != "started" {
+		t.Fatalf("autostart entry = %+v, want %s started", e, ws.RepositoryID)
+	}
+	if len(actC.Started)-before != 1 {
+		t.Errorf("autostart made %d starts, want exactly 1", len(actC.Started)-before)
+	}
+
+	// The session was adopted, never recreated or renamed, and autostart
+	// never touched tmux.
 	live, err := (&tmux.Client{Socket: socket}).Sessions(context.Background())
 	if err != nil {
 		t.Fatalf("Sessions: %v", err)
 	}
 	if len(live) != 1 || live[0].Name != ws.SessionName || live[0].WorkspaceID != ws.ID {
-		t.Errorf("live = %+v; rebuild created or renamed sessions", live)
+		t.Errorf("live = %+v; rebuild or autostart created or renamed sessions", live)
 	}
 }

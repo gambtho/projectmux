@@ -621,7 +621,7 @@ func TestEnsureProbeFirstRetriesBoundAndUnbound(t *testing.T) {
 		if _, err := r.store.AllocateSessionName("w1", ensureTime); err != nil {
 			t.Fatal(err)
 		}
-		if err := r.store.RecordContainerObservation("w1", state.ContainerObservation{
+		if err := r.store.RecordContainerObservation("r1", state.ContainerObservation{
 			Kind: "devcontainer", ContainerID: "cid-1", ContainerUser: "vscode",
 			Workdir: "/workspaces/slab", Health: state.HealthPresent,
 		}, ensureTime); err != nil {
@@ -689,7 +689,7 @@ func TestEnsureProbeFirstRetrySucceeds(t *testing.T) {
 	t.Run("bound retry probe returns present with full binding", func(t *testing.T) {
 		r := newEnsureRig(t, liveStep(ownSession("slab"))).withContainerActuator()
 		registerLive(t, r)
-		if err := r.store.RecordContainerObservation("w1", state.ContainerObservation{
+		if err := r.store.RecordContainerObservation("r1", state.ContainerObservation{
 			Kind: "devcontainer", ContainerID: "cid-1", ContainerUser: "vscode",
 			Workdir: "/workspaces/slab", Health: state.HealthPresent,
 		}, ensureTime); err != nil {

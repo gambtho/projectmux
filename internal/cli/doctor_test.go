@@ -283,7 +283,7 @@ func TestDoctorLeavesAnUnrecoveredWALAlone(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	if err := st.RegisterWorkspace(resolve.Workspace{
-		ID: "id-1", Slug: "slab", Worktree: "/w/slab", SessionName: "slab", IsPrimary: true,
+		ID: "id-1", RepositoryID: "repo-1", Slug: "slab", RepoRoot: "/w/slab", SessionName: "slab",
 	}, "sha256:abc", time.Now()); err != nil {
 		t.Fatalf("register: %v", err)
 	}

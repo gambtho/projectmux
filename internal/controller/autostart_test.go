@@ -6,40 +6,101 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gambtho/projectmux/internal/config"
 	"github.com/gambtho/projectmux/internal/controller"
 	"github.com/gambtho/projectmux/internal/controller/fake"
 	"github.com/gambtho/projectmux/internal/state"
 )
 
-func (r *ensureRig) startContainer(t *testing.T, d controller.Desired) (controller.ContainerStartOutcome, *controller.ContainerObservation, error) {
-	t.Helper()
-	return r.ctrl.StartWorkspaceContainer(context.Background(), d, r.lockDir, time.Second)
+// repoRig wires the container phase alone. It deliberately does not use
+// ensureRig: autostart no longer reads a workspace row, and a rig that
+// registered one would hide a regression into reading it again.
+type repoRig struct {
+	store     *fake.Store
+	sessions  *scriptedSessions
+	actuatorC *fake.ContainerActuator
+	ctrl      *controller.Controller
+	lockDir   string
 }
 
-func TestStartWorkspaceContainerStarts(t *testing.T) {
-	r := newEnsureRig(t).withContainerActuator()
-	registerStopFixture(t, r)
+func newRepoRig(t *testing.T) *repoRig {
+	t.Helper()
+	r := &repoRig{
+		store:    fake.NewStore(),
+		sessions: &scriptedSessions{},
+		actuatorC: &fake.ContainerActuator{
+			StartResult: controller.ContainerObservation{
+				Kind: "devcontainer", ContainerID: "cid-1",
+				ContainerUser: "vscode", Workdir: "/workspaces/slab",
+				Health: state.HealthPresent,
+			},
+		},
+		lockDir: t.TempDir(),
+	}
+	r.ctrl = &controller.Controller{
+		Store:        r.store,
+		Sessions:     r.sessions,
+		Containers:   &fake.ContainerObserver{AppliesResult: true},
+		Clock:        &fake.Clock{Time: ensureTime},
+		ContainerAct: r.actuatorC,
+	}
+	if err := r.store.RegisterWorkspace(ensureWorkspace(), "sha256:x", ensureTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	return r
+}
+
+func (r *repoRig) start(t *testing.T, d controller.RepoDesired) (controller.ContainerStartOutcome, *controller.ContainerObservation, error) {
+	t.Helper()
+	return r.ctrl.StartRepositoryContainer(context.Background(), d, r.lockDir, time.Second)
+}
+
+func repoDesired() controller.RepoDesired {
+	return controller.RepoDesired{
+		Repository: state.Repository{ID: "r1", Slug: "slab", RepoRoot: "/w/slab"},
+		Config: config.Config{
+			Version:      1,
+			DevContainer: config.DevContainer{Enabled: "true"},
+			Environment:  map[string]string{"FOO": "bar"},
+		},
+		Digest: "sha256:desired",
+	}
+}
+
+func repoBinding(t *testing.T, s *fake.Store, id string) *state.ContainerBinding {
+	t.Helper()
+	repos, err := s.Repositories()
+	if err != nil {
+		t.Fatalf("Repositories: %v", err)
+	}
+	for _, repo := range repos {
+		if repo.ID == id {
+			return repo.Container
+		}
+	}
+	t.Fatalf("no repository %s in %+v", id, repos)
+	return nil
+}
+
+func TestStartRepositoryContainerStarts(t *testing.T) {
+	r := newRepoRig(t)
 	r.ctrl.Containers = &fake.ContainerObserver{
 		AppliesResult:  true,
 		DiscoverResult: &controller.ContainerObservation{Health: state.HealthMissing, Kind: "devcontainer"},
 	}
 
-	outcome, obs, err := r.startContainer(t, containerDesired())
+	outcome, obs, err := r.start(t, repoDesired())
 	if err != nil {
-		t.Fatalf("StartWorkspaceContainer: %v", err)
+		t.Fatalf("StartRepositoryContainer: %v", err)
 	}
 	if outcome != controller.ContainerStarted || obs == nil || obs.ContainerID != "cid-1" {
 		t.Errorf("outcome = %v, obs = %+v", outcome, obs)
 	}
-	if len(r.actuatorC.Started) != 1 {
-		t.Errorf("Started = %v", r.actuatorC.Started)
+	if len(r.actuatorC.Started) != 1 || r.actuatorC.Started[0] != "r1" {
+		t.Errorf("Started = %v, want one start keyed on the repository", r.actuatorC.Started)
 	}
-	rec, _ := r.store.Workspace("w1")
-	if rec.Container == nil || rec.Container.ContainerID != "cid-1" {
-		t.Errorf("binding = %+v", rec.Container)
-	}
-	if op := lastOp(t, r.store, "w1"); op == nil || op.Name != "autostart" || op.Outcome != state.OutcomeOK {
-		t.Errorf("last operation = %+v, want autostart/ok", op)
+	if b := repoBinding(t, r.store, "r1"); b == nil || b.ContainerID != "cid-1" {
+		t.Errorf("binding = %+v, want cid-1 recorded on the repository", b)
 	}
 	// The whole pass is container-only: tmux must never be consulted.
 	if len(r.sessions.queries) != 0 {
@@ -47,10 +108,9 @@ func TestStartWorkspaceContainerStarts(t *testing.T) {
 	}
 }
 
-func TestStartWorkspaceContainerAlreadyRunning(t *testing.T) {
-	r := newEnsureRig(t).withContainerActuator()
-	registerStopFixture(t, r)
-	if err := r.store.RecordContainerObservation("w1", state.ContainerObservation{
+func TestStartRepositoryContainerAlreadyRunning(t *testing.T) {
+	r := newRepoRig(t)
+	if err := r.store.RecordContainerObservation("r1", state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "cid-1", ContainerUser: "vscode",
 		Workdir: "/workspaces/slab", Health: state.HealthPresent,
 	}, ensureTime); err != nil {
@@ -63,10 +123,14 @@ func TestStartWorkspaceContainerAlreadyRunning(t *testing.T) {
 			ContainerUser: "vscode", Workdir: "/workspaces/slab",
 		},
 	}
+	// The caller reads repositories out of the store, so the binding
+	// arrives attached to the repository rather than fetched again.
+	d := repoDesired()
+	d.Repository.Container = repoBinding(t, r.store, "r1")
 
-	outcome, obs, err := r.startContainer(t, containerDesired())
+	outcome, obs, err := r.start(t, d)
 	if err != nil {
-		t.Fatalf("StartWorkspaceContainer: %v", err)
+		t.Fatalf("StartRepositoryContainer: %v", err)
 	}
 	if outcome != controller.ContainerAlreadyRunning || obs == nil {
 		t.Errorf("outcome = %v, obs = %+v", outcome, obs)
@@ -74,21 +138,17 @@ func TestStartWorkspaceContainerAlreadyRunning(t *testing.T) {
 	if len(r.actuatorC.Started) != 0 {
 		t.Errorf("an already-running container was started again: %v", r.actuatorC.Started)
 	}
-	if op := lastOp(t, r.store, "w1"); op == nil || op.Name != "autostart" || op.Outcome != state.OutcomeOK {
-		t.Errorf("last operation = %+v, want autostart/ok", op)
-	}
 }
 
-func TestStartWorkspaceContainerNoneApplies(t *testing.T) {
-	r := newEnsureRig(t).withContainerActuator()
-	registerStopFixture(t, r)
+func TestStartRepositoryContainerNoneApplies(t *testing.T) {
+	r := newRepoRig(t)
 	r.ctrl.Containers = &fake.ContainerObserver{AppliesResult: false}
-	d := containerDesired()
+	d := repoDesired()
 	d.Config.DevContainer.Enabled = "auto"
 
-	outcome, obs, err := r.startContainer(t, d)
+	outcome, obs, err := r.start(t, d)
 	if err != nil {
-		t.Fatalf("StartWorkspaceContainer: %v", err)
+		t.Fatalf("StartRepositoryContainer: %v", err)
 	}
 	if outcome != controller.ContainerNoneApplies || obs != nil {
 		t.Errorf("outcome = %v, obs = %+v", outcome, obs)
@@ -98,46 +158,20 @@ func TestStartWorkspaceContainerNoneApplies(t *testing.T) {
 	}
 }
 
-func TestStartWorkspaceContainerFailureRecordsAutostartOp(t *testing.T) {
-	r := newEnsureRig(t).withContainerActuator()
-	registerStopFixture(t, r)
-	r.ctrl.Containers = &fake.ContainerObserver{
-		AppliesResult:  true,
-		DiscoverResult: &controller.ContainerObservation{Health: state.HealthMissing, Kind: "devcontainer"},
-	}
-	r.actuatorC.StartErr = &controller.ContainerStartError{
-		ExitCode: 7, Stderr: "boot boom", Reason: "devcontainer up exited 7",
-	}
-
-	_, _, err := r.startContainer(t, containerDesired())
-	if err == nil {
-		t.Fatal("a failing start was swallowed")
-	}
-	op := lastOp(t, r.store, "w1")
-	if op == nil || op.Name != "autostart" || op.Outcome != state.OutcomeFailed {
-		t.Fatalf("last operation = %+v, want autostart/failed", op)
-	}
-	if op.ExitStatus == nil || *op.ExitStatus != 7 {
-		t.Errorf("ExitStatus = %v, want 7", op.ExitStatus)
-	}
-}
-
-func TestStartWorkspaceContainerUnobservableFails(t *testing.T) {
-	r := newEnsureRig(t).withContainerActuator()
-	registerStopFixture(t, r)
+func TestStartRepositoryContainerUnobservableFails(t *testing.T) {
+	r := newRepoRig(t)
 	r.ctrl.Containers = &fake.ContainerObserver{
 		AppliesResult: true,
 		DiscoverErr:   errors.New("docker down"),
 	}
 
-	_, _, err := r.startContainer(t, containerDesired())
-	if err == nil {
+	if _, _, err := r.start(t, repoDesired()); err == nil {
 		t.Fatal("an unobservable container start was swallowed")
 	}
 	if len(r.actuatorC.Started) != 0 {
 		t.Error("uncertainty reached the container actuator")
 	}
-	if op := lastOp(t, r.store, "w1"); op == nil || op.Name != "autostart" || op.Outcome != state.OutcomeFailed {
-		t.Errorf("last operation = %+v, want autostart/failed", op)
+	if b := repoBinding(t, r.store, "r1"); b != nil {
+		t.Errorf("binding = %+v, want none recorded on a failed observation", b)
 	}
 }

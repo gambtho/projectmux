@@ -48,10 +48,10 @@ func TestFakeStoreMirrorsAllocationAndRetention(t *testing.T) {
 	obs := state.ContainerObservation{
 		Kind: "devcontainer", ContainerID: "c-1", Health: state.HealthPresent,
 	}
-	if err := s.RecordContainerObservation("w1", obs, testTime); err != nil {
+	if err := s.RecordContainerObservation("r-w1", obs, testTime); err != nil {
 		t.Fatalf("observation: %v", err)
 	}
-	if err := s.RecordContainerObservation("w1",
+	if err := s.RecordContainerObservation("r-w1",
 		state.ContainerObservation{Health: state.HealthMissing}, testTime); err != nil {
 		t.Fatalf("missing: %v", err)
 	}
@@ -254,11 +254,13 @@ func TestFakeContainerActuator(t *testing.T) {
 		},
 	}
 	obs, err := a.StartContainer(context.Background(),
-		resolve.Workspace{ID: "w1"}, config.Config{})
+		resolve.Workspace{ID: "w1", RepositoryID: "r-w1"}, config.Config{})
 	if err != nil || obs.ContainerID != "c1" {
 		t.Errorf("StartContainer = (%+v, %v)", obs, err)
 	}
-	if len(a.Started) != 1 || a.Started[0] != "w1" {
+	// The actuator records the repository, because that is what a
+	// container belongs to.
+	if len(a.Started) != 1 || a.Started[0] != "r-w1" {
 		t.Errorf("Started = %v", a.Started)
 	}
 	cmd := a.ExecCommand(state.ContainerBinding{ContainerID: "c1", Workdir: "/workspaces/w"},

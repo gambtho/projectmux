@@ -11,30 +11,32 @@ import (
 
 	"github.com/gambtho/projectmux/internal/config"
 	"github.com/gambtho/projectmux/internal/controller"
-	"github.com/gambtho/projectmux/internal/resolve"
 	"github.com/gambtho/projectmux/internal/state"
 )
 
 const autostartHelp = `usage: projectmux autostart [--json] [--compact]
 
-Start containers for eligible registered primary worktrees: those whose
-configuration sets autostart: true and to which a container applies. No
-tmux sessions are created. Intended for the systemd user unit.
+Start containers for registered repositories: those whose configuration
+sets autostart: true and to which a container applies. Every session on a
+repository shares one container, so this starts one container per
+repository. No tmux sessions are created. Intended for the systemd user
+unit.
 
   --json     emit the versioned JSON envelope instead of human text
   --compact  emit the JSON on a single line (implies --json)
 `
 
-// autostartEnvelope is the versioned JSON structure for autostart. It
-// is written to stdout even when the command exits 1 (some workspaces
-// failed) — the report is the output (spec §5).
+// autostartEnvelope is the versioned JSON structure for autostart. It is
+// written to stdout even when the command exits 1 (some repositories
+// failed) — the report is the output (spec §5). It is keyed by repository
+// because that is what owns a container (spec §6.3).
 type autostartEnvelope struct {
 	SchemaVersion int              `json:"schema_version"`
-	Workspaces    []autostartEntry `json:"workspaces"`
+	Repositories  []autostartEntry `json:"repositories"`
 }
 
 type autostartEntry struct {
-	ID          string `json:"id"`
+	ID          string `json:"id"` // repository ID
 	Slug        string `json:"slug"`
 	Outcome     string `json:"outcome"` // started | already-running | skipped | failed
 	Reason      string `json:"reason,omitempty"`
@@ -73,9 +75,9 @@ func runAutostart(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
-	records, err := st.Workspaces()
+	repos, err := st.Repositories()
 	if err != nil {
-		return fmt.Errorf("reading stored workspaces: %w", err)
+		return fmt.Errorf("reading stored repositories: %w", err)
 	}
 	stateRoot, err := state.Root()
 	if err != nil {
@@ -91,57 +93,49 @@ func runAutostart(ctx context.Context, args []string, stdout io.Writer) error {
 		ContainerAct: newContainerActuator(),
 	}
 
-	env := autostartEnvelope{SchemaVersion: OutputSchemaVersion, Workspaces: []autostartEntry{}}
+	env := autostartEnvelope{SchemaVersion: OutputSchemaVersion, Repositories: []autostartEntry{}}
 	failed := 0
-	for _, rec := range records {
-		entry := autostartEntry{ID: rec.ID, Slug: rec.Slug}
+	for _, repo := range repos {
+		entry := autostartEntry{ID: repo.ID, Slug: repo.Slug}
 
-		// The stored worktree must exist before anything else: config
-		// loads never touch the worktree, and auto's applicability
-		// check would misread absence as "does not apply" — a vanished
-		// worktree must be a visible boot-log failure, not a silent
-		// skip (spec §3, Codex review finding).
-		if _, statErr := os.Stat(rec.RepoRoot); statErr != nil {
+		// The repository root must exist before anything else: config
+		// loads never touch it, and auto's applicability check would
+		// misread absence as "does not apply" — a vanished repository
+		// must be a visible boot-log failure, not a silent skip.
+		if _, statErr := os.Stat(repo.RepoRoot); statErr != nil {
 			entry.Outcome = "failed"
-			// Only confirmed absence may claim the worktree is gone;
+			// Only confirmed absence may claim the repository is gone;
 			// permission or I/O failures keep their own story.
 			if errors.Is(statErr, os.ErrNotExist) {
-				entry.Reason = "worktree no longer exists: " + rec.RepoRoot
+				entry.Reason = "repository root no longer exists: " + repo.RepoRoot
 			} else {
-				entry.Reason = "statting the worktree: " + statErr.Error()
+				entry.Reason = "statting the repository root: " + statErr.Error()
 			}
 			failed++
-			env.Workspaces = append(env.Workspaces, entry)
+			env.Repositories = append(env.Repositories, entry)
 			continue
 		}
 
-		effective, loadErr := config.Load(root, defaults, rec.Slug)
+		effective, loadErr := config.Load(root, defaults, repo.Slug)
 		if loadErr != nil {
 			entry.Outcome = "failed"
 			entry.Reason = loadErr.Error()
 			failed++
-			env.Workspaces = append(env.Workspaces, entry)
+			env.Repositories = append(env.Repositories, entry)
 			continue
 		}
 		if !effective.Config.Autostart {
 			entry.Outcome = "skipped"
 			entry.Reason = "autostart is not enabled"
-			env.Workspaces = append(env.Workspaces, entry)
+			env.Repositories = append(env.Repositories, entry)
 			continue
 		}
 
-		d := controller.Desired{
-			Workspace: resolve.Workspace{
-				ID:           rec.ID,
-				RepositoryID: rec.RepositoryID,
-				Slug:         rec.Slug,
-				RepoRoot:     rec.RepoRoot,
-				SessionName:  rec.ProposedSession,
-			},
-			Config: effective.Config,
-			Digest: effective.Digest,
-		}
-		outcome, obs, startErr := ctrl.StartWorkspaceContainer(ctx, d, lockDir, lockTimeout)
+		outcome, obs, startErr := ctrl.StartRepositoryContainer(ctx, controller.RepoDesired{
+			Repository: repo,
+			Config:     effective.Config,
+			Digest:     effective.Digest,
+		}, lockDir, lockTimeout)
 		switch {
 		case startErr != nil:
 			entry.Outcome = "failed"
@@ -156,7 +150,7 @@ func runAutostart(ctx context.Context, args []string, stdout io.Writer) error {
 				entry.ContainerID = obs.ContainerID
 			}
 		}
-		env.Workspaces = append(env.Workspaces, entry)
+		env.Repositories = append(env.Repositories, entry)
 	}
 
 	if *asJSON {
@@ -164,10 +158,10 @@ func runAutostart(ctx context.Context, args []string, stdout io.Writer) error {
 			return err
 		}
 	} else {
-		if len(env.Workspaces) == 0 {
-			fmt.Fprintln(stdout, "no registered primary workspaces")
+		if len(env.Repositories) == 0 {
+			fmt.Fprintln(stdout, "no registered repositories")
 		}
-		for _, e := range env.Workspaces {
+		for _, e := range env.Repositories {
 			line := fmt.Sprintf("%s\t%s", e.Slug, e.Outcome)
 			if e.ContainerID != "" {
 				line += "\t" + e.ContainerID
@@ -181,7 +175,7 @@ func runAutostart(ctx context.Context, args []string, stdout io.Writer) error {
 
 	if failed > 0 {
 		return &reportedError{msg: fmt.Sprintf(
-			"autostart failed for %d workspace(s); details are in the report above", failed)}
+			"autostart failed for %d repository(ies); details are in the report above", failed)}
 	}
 	return nil
 }

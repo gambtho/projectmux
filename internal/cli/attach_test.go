@@ -24,7 +24,7 @@ func TestAttachLiveSessionJSON(t *testing.T) {
 	ws := statusWorkspace(t)
 	installFakeStore(t, fake.NewStore())
 	live := controller.LiveSession{
-		Name: ws.SessionName, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.Worktree,
+		Name: ws.SessionName, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.RepoRoot,
 	}
 	installSessionObserver(t, controller.SessionObservation{
 		ByIdentity: &live, ByName: []controller.LiveSession{live},
@@ -51,7 +51,7 @@ func TestAttachPerformsTerminalAttachment(t *testing.T) {
 	ws := statusWorkspace(t)
 	installFakeStore(t, fake.NewStore())
 	live := controller.LiveSession{
-		Name: ws.SessionName, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.Worktree,
+		Name: ws.SessionName, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.RepoRoot,
 	}
 	installSessionObserver(t, controller.SessionObservation{ByIdentity: &live}, nil)
 	execs, switches := installAttachSpies(t)
@@ -73,7 +73,7 @@ func TestAttachAcrossServersRefusesBeforeAnnouncing(t *testing.T) {
 	ws := statusWorkspace(t)
 	installFakeStore(t, fake.NewStore())
 	live := controller.LiveSession{
-		Name: ws.SessionName, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.Worktree,
+		Name: ws.SessionName, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.RepoRoot,
 	}
 	installSessionObserver(t, controller.SessionObservation{ByIdentity: &live}, nil)
 	execs, switches := installAttachSpies(t)
@@ -141,7 +141,7 @@ func TestAttachNeverMutates(t *testing.T) {
 	ws := statusWorkspace(t)
 	installFakeStore(t, fake.NewStore())
 	live := controller.LiveSession{
-		Name: ws.SessionName, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.Worktree,
+		Name: ws.SessionName, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.RepoRoot,
 	}
 	installSessionObserver(t, controller.SessionObservation{ByIdentity: &live}, nil)
 	installAttachSpies(t)
