@@ -10,8 +10,8 @@ import (
 	"github.com/gambtho/projectmux/internal/config"
 )
 
-// Validation statuses. They are the JSON contract, so they are spelled once
-// here rather than inline.
+// Validation statuses. They appear verbatim in the JSON output, so they are
+// spelled once here rather than inline.
 const (
 	statusOK      = "ok"
 	statusWarn    = "warn"
@@ -226,7 +226,7 @@ func knownList(slugs []string) string {
 }
 
 // writeValidationText renders the human report. As everywhere else, this
-// layout is not a compatibility contract; automation uses --json.
+// layout may change in any release; automation uses --json.
 func writeValidationText(w io.Writer, report validationReport) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	for _, r := range report.Results {

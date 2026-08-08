@@ -28,8 +28,10 @@ to the repository it belongs to, and it cannot be named on its own. Every tree
 of a project therefore shares one workspace, one session, and one container.
 
 `projectmux <workspace>` with no command is shorthand for
-`projectmux open <workspace>`. A mistyped command therefore resolves as a
-workspace name and exits 4, not 2 — a documented trade for the shorthand.
+`projectmux open <workspace>`. A mistyped *bare* command therefore resolves as
+a workspace name and exits 4 when no worktree matches it, not 2 — a documented
+trade for the shorthand. Flag-shaped tokens and bad arguments to real commands
+still exit 2.
 
 **`--json` and `--compact`.** Every command that produces a report accepts
 `--json`, which emits a versioned envelope carrying `schema_version`, and
@@ -39,9 +41,10 @@ current version is **2**: it renamed the workspace's path field from
 consumer of version 1 breaks loudly on the missing field, which is the point
 — a repository root read as a worktree path would be silently wrong.
 
-**What is a contract.** The JSON envelopes and the exit codes are
-compatibility contracts. Human-readable output is not — its layout may change
-in any release. Parse `--json`.
+**What is not frozen.** Nothing here is a compatibility contract below 1.0 —
+the JSON envelopes, the exit codes, and the command surface may all change.
+Human-readable output is the least stable of them: its layout may change in
+any release. Parse `--json`, and pin the version you tested against.
 
 **Environment.** Three variables move the resources every command touches:
 

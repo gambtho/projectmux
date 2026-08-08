@@ -42,7 +42,7 @@ const (
 )
 
 // String names the case for test failures and debugging. It is not part of
-// any output contract; the report renders Conflict.Reason.
+// the JSON output; the report renders Conflict.Reason.
 func (c Case) String() string {
 	switch c {
 	case CaseSettled:

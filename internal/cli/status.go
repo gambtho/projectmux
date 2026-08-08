@@ -344,8 +344,8 @@ func statusEnvelopeFrom(ws resolve.Workspace, effective config.Effective, snap c
 	return env
 }
 
-// writeStatusHuman renders a readable report. This layout is explicitly
-// not a compatibility contract; automation should use --json.
+// writeStatusHuman renders a readable report. This layout
+// may change in any release; automation should use --json.
 func writeStatusHuman(w io.Writer, env statusEnvelope) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 

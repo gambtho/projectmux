@@ -19,8 +19,8 @@ import (
 	"github.com/gambtho/projectmux/internal/resolve"
 )
 
-// Exit codes. They are part of the command contract: automation branches on
-// them, so they must stay stable as commands are added.
+// Exit codes. Automation branches on them, so they should not churn without a
+// reason — but they are not frozen below 1.0. See docs/design.md §12.
 const (
 	ExitOK               = 0
 	ExitError            = 1 // unexpected or I/O failure

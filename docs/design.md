@@ -283,8 +283,10 @@ The first release retains the useful command vocabulary under the public
   integrity, orphaned sessions, and stale bindings. State rebuilding is
   explicit rather than an automatic response to corruption.
 
-Human output is not a compatibility contract. Commands offering JSON emit a
-top-level schema version and use a documented, versioned structure.
+Nothing ProjectMux emits is a compatibility contract below 1.0. Human output
+is the least stable of the three: human text, `--json`, and the exit codes.
+Commands offering JSON at least carry a top-level schema version and a
+documented, versioned structure.
 
 `projectmux list` and `projectmux status` render container health as the primary
 fact. A retained ID with `health=missing` or `health=unknown` must never read as
@@ -515,6 +517,53 @@ a compatibility commitment. `v1.0.0` is deliberately not being cut on the
 strength of it, because the number would promise a stability the project has
 not yet decided to offer — and a 1.0 that quietly means "our CI got better"
 teaches readers to distrust the version number.
+
+### What 1.0 means, and why nothing is promised before it
+
+The section above closed the two named pre-1.0 gates without saying what 1.0
+would commit to. The answer is now recorded: **nothing ProjectMux emits is a
+compatibility contract below 1.0**, and the two that were advertised — the
+versioned JSON envelope and the exit codes — are withdrawn rather than
+extended. The full reasoning is in
+`docs/superpowers/specs/2026-08-07-v1-stability-contracts-design.md`; the
+durable parts are these.
+
+**The promise was not backed.** One of the ten `--json` shapes is pinned
+against a fixed key set (`config`, by
+`TestConfigJSONEnvelopeIsVersionedAndComplete`). The other nine are covered
+only by tests that read the fields they happen to care about, which cannot
+catch a rename — retagging a field moves the assertion along with the wire
+format. A promise nine-tenths of which no test can enforce is a promise the
+project could break without noticing.
+
+**One `schema_version` spans ten independent shapes.** The constant is shared,
+so bumping it for a break in `status` signals a break to `list` consumers who
+saw none, and not bumping it makes the number track nothing. It has never
+moved, so the ambiguity is untested. This is the part of the envelope promise
+most likely to fail first, and it has no decided rule.
+
+**The exit codes were different, and were withdrawn anyway.** They are
+genuinely enforced — 100 test lines across `internal/cli` reference the seven
+constants (101 occurrences; `wiring_test.go:222` carries two) and all seven are
+exercised. They go for consistency of
+message alone: a README saying "nothing is frozen below 1.0, except this one
+thing" invites exactly the selective reading the retraction exists to prevent.
+This is the one place the decision goes further than its evidence demands, and
+it is recorded as a cost. The tests do not change; they still pin the
+behavior. The project simply stops promising it to third parties.
+
+**The prerelease flag still needs no change**, for the third time and now for
+this reason too: it keys on the tag pattern, so `v0.*` publishes as a
+prerelease and a future `v1.0.0` as a full release, with no workflow edit
+either way.
+
+**What 1.0 would require**, so it is not re-litigated from scratch: users whose
+breakage would carry real cost, or a survived config-schema change; golden
+tests pinning the nine unpinned shapes; a decided `schema_version` rule; a
+config upgrade path (`internal/config` has the version *gate* but no
+migrations, where `internal/state` has both); a resolved exit-code set; and a
+deprecation policy, which only becomes meaningful once something is promised.
+None of it is scheduled. The trigger is evidence, not a date.
 
 ## 13. Extraction sequence
 
