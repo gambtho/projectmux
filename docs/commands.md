@@ -23,9 +23,11 @@ directory. With an argument, it is looked up by name under the
 
 Either way the answer is a *repository*, never one of its trees: a linked
 worktree — including the conventional `.worktrees/` and `.claude/worktrees/`
-directories — is a directory inside a repository, so working in one resolves
-to the repository it belongs to, and it cannot be named on its own. Every tree
-of a project therefore shares one workspace, one session, and one container.
+directories, and any tree `git worktree add` placed elsewhere on the disk —
+is a separate working tree attached to the same repository, so working in one
+resolves to the repository it belongs to, and it cannot be named on its own.
+Every tree of a project therefore shares one workspace, one session, and one
+container.
 
 `projectmux <workspace>` with no command is shorthand for
 `projectmux open <workspace>`. A mistyped *bare* command therefore resolves as

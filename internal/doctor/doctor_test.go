@@ -410,7 +410,7 @@ func TestOrphanedSessionsReportsUnregisteredAndMissingWorktree(t *testing.T) {
 		t.Errorf("slab = %q, want ok", got)
 	}
 	if got := findItem(t, check, "gone"); got.Status != StatusWarn ||
-		!strings.Contains(got.Detail, "worktree no longer exists") {
+		!strings.Contains(got.Detail, "repository root no longer exists") {
 		t.Errorf("gone = %+v, want warn about the worktree", got)
 	}
 	if got := findItem(t, check, "stray"); got.Status != StatusWarn ||

@@ -15,18 +15,34 @@ import (
 
 // linkedWorktree adds a linked worktree to the repository the test is
 // running in and returns its canonical path.
-func linkedWorktree(t *testing.T, name string) string {
+//
+// The name is derived from the test rather than taken as a fixed value:
+// `git worktree add -b` fails on a branch that already exists, so two
+// tests sharing a literal name collide, and so does a rerun after a test
+// that died before its cleanup. Both the worktree and its branch are
+// removed afterwards — this writes into the real repository the suite is
+// running in, not a temporary directory.
+func linkedWorktree(t *testing.T, suffix string) string {
 	t.Helper()
 	repo, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
 	}
+	name := strings.NewReplacer("/", "-", " ", "-").Replace(t.Name()) + "-" + suffix
 	path := filepath.Join(repo, ".worktrees", name)
 	cmd := exec.Command("git", "worktree", "add", "-b", name, path)
 	cmd.Dir = repo
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git worktree add: %v\n%s", err, out)
 	}
+	t.Cleanup(func() {
+		remove := exec.Command("git", "worktree", "remove", "--force", path)
+		remove.Dir = repo
+		_ = remove.Run()
+		branch := exec.Command("git", "branch", "-D", name)
+		branch.Dir = repo
+		_ = branch.Run()
+	})
 	canonical, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		t.Fatalf("EvalSymlinks: %v", err)

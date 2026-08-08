@@ -86,17 +86,21 @@ func (a *Applier) collapseRows(ctx context.Context, res *MigrationResult) {
 						"so the row is kept and nothing was written", resolveErr))
 				continue
 			}
-			res.Migrated = append(res.Migrated, Migrated{
+			dropped := append([]Migrated{{
 				Subject: repo.RepoRoot, Action: "dropped",
-			})
-			res.Migrated = appendDiscardedBinding(res.Migrated, repo, "")
+			}}, appendDiscardedBinding(nil, repo, "")...)
 			if a.DryRun {
+				// A preview reports what the run would do; nothing is
+				// attempted, so there is no outcome to wait for.
+				res.Migrated = append(res.Migrated, dropped...)
 				continue
 			}
 			if err := a.Repos.DropRepository(repo.ID); err != nil {
 				res.Conflicts = append(res.Conflicts, conflictAt(repo.RepoRoot,
 					"dropping the repository whose path is gone failed: %v", err))
+				continue
 			}
+			res.Migrated = append(res.Migrated, dropped...)
 			continue
 		}
 		if ws.RepoRoot == repo.RepoRoot {
@@ -124,12 +128,15 @@ func (a *Applier) collapseRows(ctx context.Context, res *MigrationResult) {
 // repository onto a container chosen for one worktree. The discard is
 // reported instead, with the container ID, because reattaching or
 // removing that container is a decision only the operator can make.
+// A result is recorded only once the mutation it describes has succeeded.
+// A dry run reports the whole intent, since nothing is attempted; a real
+// run that fails partway reports a conflict and no success beside it.
 func (a *Applier) collapseInto(ctx context.Context, repo state.Repository, ws resolve.Workspace, res *MigrationResult) {
-	res.Migrated = append(res.Migrated, Migrated{
+	collapsed := append([]Migrated{{
 		Subject: repo.RepoRoot, Action: "collapsed", Into: ws.RepoRoot,
-	})
-	res.Migrated = appendDiscardedBinding(res.Migrated, repo, ws.RepoRoot)
+	}}, appendDiscardedBinding(nil, repo, ws.RepoRoot)...)
 	if a.DryRun {
+		res.Migrated = append(res.Migrated, collapsed...)
 		return
 	}
 
@@ -159,11 +166,21 @@ func (a *Applier) collapseInto(ctx context.Context, repo state.Repository, ws re
 		return
 	}
 	if err := a.Repos.DropRepository(repo.ID); err != nil {
+		// Half of the collapse stands: the parent is registered and every
+		// session will key on it. Reporting "collapsed" would overstate
+		// that, and reporting nothing would hide a write that happened, so
+		// the partial outcome gets its own action.
+		res.Migrated = append(res.Migrated, Migrated{
+			Subject: repo.RepoRoot, Action: "partially-collapsed", Into: ws.RepoRoot,
+			Detail: "the parent repository was registered; the linked-worktree row remains",
+		})
 		res.Conflicts = append(res.Conflicts, conflictAt(repo.RepoRoot,
 			"the parent repository %s was registered, but dropping the "+
 				"linked-worktree row failed: %v; a later rebuild completes it",
 			ws.RepoRoot, err))
+		return
 	}
+	res.Migrated = append(res.Migrated, collapsed...)
 }
 
 // retagSessions points sessions created before the change at their
@@ -240,10 +257,11 @@ func (a *Applier) retagSessions(ctx context.Context, res *MigrationResult) {
 			continue
 		}
 
-		res.Migrated = append(res.Migrated, Migrated{
+		retagged := Migrated{
 			Subject: sess.Name, Action: "retagged", Into: ws.RepoRoot,
-		})
+		}
 		if a.DryRun {
+			res.Migrated = append(res.Migrated, retagged)
 			continue
 		}
 
@@ -261,6 +279,7 @@ func (a *Applier) retagSessions(ctx context.Context, res *MigrationResult) {
 					"keeps its old keys and a later rebuild retries", sess.Name, err))
 			continue
 		}
+		res.Migrated = append(res.Migrated, retagged)
 		res.Live[i].WorkspaceID = ws.ID
 		res.Live[i].Worktree = ws.RepoRoot
 	}

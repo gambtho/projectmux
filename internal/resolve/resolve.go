@@ -117,14 +117,21 @@ func Resolve(name string, roots []string, cwd string) (Workspace, error) {
 }
 
 // byName searches each configured root for a directly-named repository. A
-// linked worktree is no longer findable by name: it is a directory inside a
-// repository, and its sessions belong to that repository.
+// linked worktree is no longer findable by name: it is a separate working tree
+// attached to a repository — wherever on the disk it sits — and its sessions
+// belong to that repository.
 func byName(name string, roots []string) (string, error) {
 	// name is one literal directory component, not a pattern or a path.
 	// Without this guard a separator escapes the configured roots, and a glob
 	// metacharacter would be looked up as a directory that cannot exist,
 	// reporting "unknown" for a name the user may have meant literally.
-	if name != filepath.Base(name) || strings.ContainsAny(name, `*?[\`) {
+	//
+	// "." and ".." pass filepath.Base unchanged, so they need naming: joined
+	// onto a root they address the root itself and its parent, which would
+	// resolve a name to a directory that is not a repository under that root
+	// at all — and, for "..", to one outside every configured root.
+	if name != filepath.Base(name) || name == "." || name == ".." ||
+		strings.ContainsAny(name, `*?[\`) {
 		return "", &UnknownWorkspaceError{Name: name, Roots: roots}
 	}
 	var candidates []string

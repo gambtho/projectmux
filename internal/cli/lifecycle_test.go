@@ -483,7 +483,7 @@ func TestLifecycleRebuildThenAutostart(t *testing.T) {
 	// The envelope names the field repo_root as of Task 7 (schema_version
 	// 2); the value it carries is the repository root.
 	if got := env.Registered[0]; got.ID != ws.ID || got.Slug != ws.Slug ||
-		got.RepoRoot != ws.RepoRoot || got.Session != ws.SessionName {
+		got.RepoRoot != ws.RepoRoot || got.SessionName != ws.SessionName {
 		t.Fatalf("registered = %+v, want %s at %s, session %s", got, ws.Slug, ws.RepoRoot, ws.SessionName)
 	}
 

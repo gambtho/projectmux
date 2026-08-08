@@ -282,8 +282,10 @@ func (s *Store) Workspace(id string) (state.Record, error) {
 }
 
 // Workspaces returns every registered workspace ordered by slug, then
-// repository root, mirroring the real store's ORDER BY
-// (internal/state/store.go).
+// repository root, then session, mirroring the real store's ORDER BY
+// (internal/state/store.go). The session key is not cosmetic: a repository
+// holds several sessions at one root, so without it their order is the map
+// iteration order and a test that lists them is flaky.
 func (s *Store) Workspaces() ([]state.Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -295,7 +297,10 @@ func (s *Store) Workspaces() ([]state.Record, error) {
 		if out[i].Slug != out[j].Slug {
 			return out[i].Slug < out[j].Slug
 		}
-		return out[i].RepoRoot < out[j].RepoRoot
+		if out[i].RepoRoot != out[j].RepoRoot {
+			return out[i].RepoRoot < out[j].RepoRoot
+		}
+		return out[i].Session < out[j].Session
 	})
 	return out, nil
 }

@@ -76,18 +76,21 @@ func assertWorkspaceHasSession(t *testing.T, stdout string) {
 }
 
 // assertEnvelopeHasSessionField checks, by quote-and-colon-delimited
-// substring, that the rendered document contains a "session" key. It is
+// substring, that the rendered document contains the given key. It is
 // safe for list and rebuild only: neither embeds workspaceInfo, and in
-// both, listRow.Session (list.go:39) / rebuildRegistered.Session
-// (rebuild.go:55) is the only field whose key is exactly "session" —
+// both, listRow.Session (list.go:39) / rebuildRegistered.SessionName
+// (rebuild.go:60) is the only field whose key matches exactly —
 // "proposed_session", "actual_session", "session_state", and
 // "live_session" all fail the delimiter, since none of them ends its key
 // in a closing quote immediately followed by a colon the way "session"
 // itself does.
-func assertEnvelopeHasSessionField(t *testing.T, stdout string) {
+//
+// The two envelopes name different things and so use different keys: list
+// carries the session component, rebuild the tmux session name.
+func assertEnvelopeHasSessionField(t *testing.T, stdout, key string) {
 	t.Helper()
-	if !strings.Contains(stdout, `"session":`) {
-		t.Errorf("envelope has no session field:\n%s", stdout)
+	if !strings.Contains(stdout, `"`+key+`":`) {
+		t.Errorf("envelope has no %s field:\n%s", key, stdout)
 	}
 }
 
@@ -187,7 +190,7 @@ func TestListEnvelopeIsSchemaV2(t *testing.T) {
 		t.Fatalf("exit %d, stderr: %s", code, stderr)
 	}
 	assertSchemaV2(t, stdout)
-	assertEnvelopeHasSessionField(t, stdout)
+	assertEnvelopeHasSessionField(t, stdout, "session")
 	if !strings.Contains(stdout, `"repo_root"`) {
 		t.Errorf("list rows have no repo_root:\n%s", stdout)
 	}
@@ -204,7 +207,7 @@ func TestRebuildEnvelopeIsSchemaV2(t *testing.T) {
 		t.Fatalf("exit %d, stderr: %s", code, stderr)
 	}
 	assertSchemaV2(t, stdout)
-	assertEnvelopeHasSessionField(t, stdout)
+	assertEnvelopeHasSessionField(t, stdout, "session_name")
 	// The fixture seeds one live session, so the registered array is
 	// guaranteed non-empty here; the repo_root check below therefore lands
 	// on an actual rebuildRegistered entry rather than passing vacuously

@@ -100,9 +100,18 @@ func (c *Controller) Observe(ctx context.Context, d Desired) (Snapshot, error) {
 
 	// A container belongs to a repository, so the observation needs the
 	// binding and nothing else about the session that asked for it.
+	//
+	// A registered session already carries the repository's binding on its
+	// record. An unregistered one carries no record at all, and reading the
+	// repository directly is what keeps `status` on a session that has never
+	// been opened from reporting a container its siblings are using as
+	// absent. Ensure never reaches that branch — it registers first — so this
+	// is the inspection path.
 	var binding *state.ContainerBinding
 	if snap.Stored != nil {
 		binding = snap.Stored.Container
+	} else if repo, err := c.Store.Repository(d.Workspace.RepositoryID); err == nil {
+		binding = repo.Container
 	}
 	snap.Container = c.observeContainer(ctx, d, binding)
 	return snap, nil

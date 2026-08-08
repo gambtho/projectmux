@@ -81,9 +81,13 @@ func TestObserveQueriesTheAssignedNameToo(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 	// Occupy "slabledger" with another workspace so w1 gets a suffixed name.
+	// It is a different repository, so it needs its own RepositoryID as well
+	// as its own root: the two are keyed together, and sharing the ID would
+	// point both roots at one repository row.
 	other := ws
 	other.ID = "w0"
 	other.RepoRoot = "/w/other"
+	other.RepositoryID = "repo-other"
 	if err := d.store.RegisterWorkspace(other, "sha256:x", testTime); err != nil {
 		t.Fatalf("register other: %v", err)
 	}

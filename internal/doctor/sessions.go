@@ -48,18 +48,18 @@ func (r *Runner) orphanedSessions(ctx context.Context) Check {
 
 func orphanItem(name, workspaceID string, registered map[string]string) Item {
 	item := Item{Subject: name, Status: StatusOK}
-	worktree, ok := registered[workspaceID]
+	repoRoot, ok := registered[workspaceID]
 	if !ok {
 		item.Status = StatusWarn
 		item.Detail = "session not registered: no workspace " + workspaceID
 		return item
 	}
-	if _, err := os.Stat(worktree); err != nil {
+	if _, err := os.Stat(repoRoot); err != nil {
 		// Only a confirmed absence is a finding. A permission or I/O
-		// error says nothing about whether the worktree is there.
+		// error says nothing about whether the repository root is there.
 		if errors.Is(err, fs.ErrNotExist) {
 			item.Status = StatusWarn
-			item.Detail = "worktree no longer exists: " + worktree
+			item.Detail = "repository root no longer exists: " + repoRoot
 		} else {
 			item.Status = StatusUnknown
 			item.Detail = err.Error()

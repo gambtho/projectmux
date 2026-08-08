@@ -37,7 +37,7 @@ type DevContainer struct {
 	// Enabled is "auto", "true", or "false" — a string rather than a bool
 	// because "auto" is a real third state, not an absent one.
 	Enabled string `json:"enabled"`
-	// Config is an optional worktree-relative path to devcontainer.json.
+	// Config is an optional repository-root-relative path to devcontainer.json.
 	Config       *string  `json:"config"`
 	StartTimeout Duration `json:"start_timeout"`
 }
@@ -49,7 +49,7 @@ type Window struct {
 	Agent   *string `json:"agent"`
 	Command *string `json:"command"`
 	Shell   bool    `json:"shell"`
-	// Cwd is an optional worktree-relative working directory.
+	// Cwd is an optional repository-root-relative working directory.
 	Cwd *string `json:"cwd"`
 	// Location is "host", "container", or nil. It stays nil when omitted: the
 	// design's default is "container when one exists", which is conditional on
@@ -73,7 +73,7 @@ type Pane struct {
 	Agent   *string `json:"agent"`
 	Command *string `json:"command"`
 	Shell   bool    `json:"shell"`
-	// Cwd is an optional worktree-relative working directory; absent means
+	// Cwd is an optional repository-root-relative working directory; absent means
 	// the window's directory.
 	Cwd   *string `json:"cwd"`
 	Focus bool    `json:"focus"`

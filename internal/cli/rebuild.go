@@ -62,11 +62,16 @@ type rebuildMigrated struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// rebuildRegistered names the tmux session a registration recorded, not the
+// session component of the workspace identity. The key is "session_name"
+// because every other envelope's "session" carries the component — "" for
+// the default, "review" for slab--review — and one key meaning two things
+// across envelopes is worse than a longer key.
 type rebuildRegistered struct {
-	ID       string `json:"id"`
-	Slug     string `json:"slug"`
-	RepoRoot string `json:"repo_root"`
-	Session  string `json:"session"`
+	ID          string `json:"id"`
+	Slug        string `json:"slug"`
+	RepoRoot    string `json:"repo_root"`
+	SessionName string `json:"session_name"`
 }
 
 type rebuildConflict struct {
@@ -141,10 +146,10 @@ func rebuildEnvelopeFrom(report rebuild.Report) rebuildEnvelope {
 	}
 	for _, r := range report.Registered {
 		env.Registered = append(env.Registered, rebuildRegistered{
-			ID:       r.ID,
-			Slug:     r.Slug,
-			RepoRoot: r.RepoRoot,
-			Session:  r.Session,
+			ID:          r.ID,
+			Slug:        r.Slug,
+			RepoRoot:    r.RepoRoot,
+			SessionName: r.Session,
 		})
 	}
 	for _, c := range report.Conflicts {
@@ -182,7 +187,7 @@ func writeRebuildHuman(w io.Writer, env rebuildEnvelope) error {
 		fmt.Fprintln(tw, cells(m.Action, m.Subject, trailer))
 	}
 	for _, r := range env.Registered {
-		fmt.Fprintln(tw, cells(registered, r.Slug, r.Session))
+		fmt.Fprintln(tw, cells(registered, r.Slug, r.SessionName))
 	}
 	for _, c := range env.Conflicts {
 		fmt.Fprintln(tw, cells("conflict", c.Subject, c.Reason))
