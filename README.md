@@ -85,29 +85,31 @@ projectmux open
 You attach, detach, and navigate with tmux exactly as you normally would.
 
 > [!IMPORTANT]
-> ProjectMux is alpha. Every documented command works, but the configuration
-> schema and the command surface may change before 1.0, and there is no
-> migration support for `v0.x` configuration. The versioned JSON envelope and
-> the documented exit codes are the compatibility contracts.
+> ProjectMux is alpha. Every documented command works, but **nothing it emits
+> is a compatibility contract below 1.0** — the configuration schema, the
+> command surface, the JSON envelopes, and the exit codes may all change, and
+> there is no migration support for `v0.x` configuration.
 
 ## Project status
 
-**The command surface is complete; the contracts are not yet stable.**
+**The command surface is complete; nothing about it is frozen.**
 ProjectMux opens, attaches to, stops, and reports on workspaces, starts
 containers at boot, and diagnoses its own installation. Every command listed
 below works.
 
-Expect breaking changes to the configuration schema and the command surface
-while the version remains below 1.0. There is no migration support, and `v0.x`
-builds are published as prereleases.
+**Nothing is a compatibility contract below 1.0.** Expect breaking changes to
+the configuration schema, the command surface, the JSON envelopes, and the
+exit codes while the version remains below 1.0. There is no migration support,
+and `v0.x` builds are published as prereleases.
 
-Two things are compatibility contracts even during the alpha:
+Releases up to `v0.4.0` named the JSON output and the exit codes as contracts
+that held even during the alpha. That claim is withdrawn. It was made before
+anything pinned those shapes, and only `config --json` is checked against a
+fixed set of keys today; a field in any of the other nine envelopes could be
+renamed by accident without a test noticing.
 
-- The **JSON output** of the reporting commands, which carries a
-  `schema_version` field.
-- The **exit codes** listed below.
-
-Human-readable output is deliberately *not* a contract. Parse `--json` instead.
+Human-readable output remains the least stable of the three, so parse `--json`
+if you automate against ProjectMux — but pin the version you tested against.
 
 ## Platform support
 
@@ -310,6 +312,10 @@ including linked worktrees in the conventional `.worktrees/` and
 | 4 | the workspace name matched no worktree |
 | 5 | invalid configuration |
 | 6 | the plan refused: a conflict or uncertainty; do not blindly retry |
+
+A mistyped *bare* command resolves as a workspace name rather than a usage
+error — `projectmux opne` exits 4, not 2. Flag-shaped tokens and bad arguments
+to real commands still exit 2.
 
 ## Relationship to tmux and Dev Containers
 
