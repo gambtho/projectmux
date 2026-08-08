@@ -32,9 +32,9 @@ Tasks 1–9 are sequential: each consumes types the previous one produces. Task 
 
 One property Task 11 relies on was checked against the code rather than assumed: `Ensure` takes its lock as the first statement of the pass (`internal/controller/ensure.go:81`) and releases it in a `defer`, so registration, observation, the container phase, and the terminal commit all run inside one continuous hold. Task 3 substitutes `lockPhases` at that same position and returns a single release closure, so the repository lock spans the whole pass too. **The observe phase therefore runs inside the repository lock**, and no lock-ordering change is needed to make concurrent opens deduplicate. Task 11's remaining risk is the other half of the composition — whether a binding written under a repository ID is readable through a *sibling* session's record — and its Step 3 is written to resolve that by running the test rather than by predicting the answer.
 
-The tree does not build between Task 1 and Task 9. Task 1 removes `resolve.Workspace.Worktree` and `.IsPrimary`, which six packages read; Tasks 2–8 each convert the callers they own, and Task 9 converts the ones left over — `internal/controller/ensure.go`, `internal/controller/plan.go`, `internal/controller/fake`, `internal/doctor`, and `internal/rebuild/classify.go` — so `go build ./...` is green again only at Task 9. Each earlier task's verification is scoped to the packages it owns, and every task states this where it applies. Do not treat an unrelated package's build failure before Task 9 as a regression.
+The tree does not build between Task 1 and Task 5. Task 1 removes `resolve.Workspace.Worktree` and `.IsPrimary`, which six packages read, and Task 2 does the same to `state.Record`. Every remaining reader is converted by the first task that gates the package it lives in, which is what makes each task's verification runnable: `internal/controller` and its fake convert in Task 3, whose very first test run is `go test ./internal/controller/`; `internal/container`'s docker-gated fixture converts in Task 4; and `internal/cli` — whose test binary links `internal/container`, `internal/controller`, `internal/doctor`, `internal/rebuild` and `internal/tmux` (`go list -deps -test ./internal/cli/...`) — converts in Task 5, along with the `internal/doctor` and `internal/rebuild` readers it drags in. `go build ./...` is therefore green again from the end of Task 5. Do not treat an unrelated package's build failure before that point as a regression.
 
-Task 9 exists because a review found those readers belonged to no task's Files block. It is deliberately its own task rather than folded into Task 8: it is the convergence point for the whole conversion, and a reviewer should be able to gate on "the tree builds" by itself.
+`go test ./...` goes green one task later than `go build ./...`. `internal/doctor`'s own tests are the last unconverted readers, and no task before Task 9 gates that package, so they convert there and Task 9 is where the full suite becomes a meaningful gate again. Tasks 3 through 8 each run a gate scoped to the packages they own, and every one of those gates is achievable at the point it appears: a package a task tests is a package that task (or an earlier one) has already converted. Where a task's Files block names a file only to make a package compile, the step says so.
 
 One deliberate overlap: **Task 3 edits `internal/controller/autostart.go` to use `lockPhases`, and Task 5 then replaces that function entirely with `StartRepositoryContainer`, which takes the repository lock alone.** That is not a contradiction. Task 3 must leave the tree consistent at its own commit, and Task 5's replacement has no session to lock — autostart starts a container without opening one.
 
@@ -44,7 +44,7 @@ One deliberate overlap: **Task 3 edits `internal/controller/autostart.go` to use
 
 **Files:**
 - Modify: `internal/resolve/resolve.go:1-7` (package doc), `:20-22` (`nestedWorktreeDirs`), `:24-39` (`Workspace`), `:47-56` (`AmbiguousError.Error`), `:64-81` (`UnknownWorkspaceError.Error`), `:83-116` (`Resolve`), `:118-126` (`fromDirectory`), `:128-182` (`byName`), `:202-244` (`isPrimary`, `slugFor`)
-- Test: `internal/resolve/resolve_test.go`
+- Test: `internal/resolve/resolve_test.go:8` (the `regexp` import), `:68-76`, `:98-112`, `:114-129`, `:131-148`, `:150-165` (identity and primacy tests, replaced in Step 1), `:167-186`, `:188-214`, `:216-226` (name-lookup and ambiguity tests, replaced in Step 3), `:228-239` (`TestTheSameTreeReachedThroughOverlappingRootsIsNotAmbiguous`, whose assertion reads the dropped `Worktree` field — converted in Step 4), `:250` (the searched-roots expectation), `:294-310` (deleted in Step 3), `:312-329` (fallback assertions rewritten in Step 3)
 
 **Interfaces:**
 - Consumes: nothing
@@ -62,7 +62,7 @@ One deliberate overlap: **Task 3 edits `internal/controller/autostart.go` to use
   ```
   and the unexported `mainWorktree(path string) string`, which replaces both `isPrimary` and `slugFor`.
 
-Note on scope: this task deliberately breaks compilation of `internal/cli`, `internal/controller`, `internal/container`, `internal/rebuild`, `internal/tmux`, and `internal/doctor`, which read `ws.Worktree` and `ws.IsPrimary` (`internal/container/adapter.go:56,95,150,152`, `internal/controller/ensure.go:265-286,392,441`, `internal/cli/config.go:136-166`, `internal/cli/autostart.go:97-142`, `internal/rebuild/apply.go:330-331`). Verification here is scoped to `./internal/resolve/...`; the callers are converted in later tasks, and `go build ./...` is green again only at the end of the plan.
+Note on scope: this task deliberately breaks compilation of `internal/cli`, `internal/controller`, `internal/container`, `internal/rebuild`, `internal/tmux`, and `internal/doctor`, which read `ws.Worktree` and `ws.IsPrimary` (`internal/container/adapter.go:56,95,150,152`, `internal/controller/ensure.go:265-286,392,441`, `internal/cli/config.go:136-166`, `internal/cli/autostart.go:97-142`, `internal/rebuild/apply.go:330-331`). Verification here is scoped to `./internal/resolve/...`; the callers are converted in later tasks, and `go build ./...` is green again only at the end of Task 5.
 
 - [ ] **Step 1: Rewrite the identity tests in `resolve_test.go` against the repository**
 
@@ -221,12 +221,45 @@ In `TestCwdResolutionOutsideGitFallsBackToTheDirectory` (`:312-329`) replace the
 	}
 ```
 
-- [ ] **Step 4: Run the tests to verify they fail**
+- [ ] **Step 4: Move the overlapping-roots test onto the repository root**
+
+`TestTheSameTreeReachedThroughOverlappingRootsIsNotAmbiguous` (`resolve_test.go:228-239`) is about
+root deduplication in `byName`, not about primacy, so it survives the rewrite — but its single
+assertion reads `ws.Worktree`, the field this task deletes. Without this conversion the package does
+not compile and Step 11 cannot pass. Replace the assertion at `:236-238`.
+
+Before:
+
+```go
+	ws := mustResolve(t, "euro_trip", roots, base)
+	if ws.Worktree != repo {
+		t.Errorf("worktree = %q, want %q", ws.Worktree, repo)
+	}
+```
+
+After:
+
+```go
+	ws := mustResolve(t, "euro_trip", roots, base)
+	if ws.RepoRoot != repo {
+		t.Errorf("repo root = %q, want %q", ws.RepoRoot, repo)
+	}
+```
+
+That is the last `Worktree` or `IsPrimary` read in the file. The others are accounted for by the
+preceding steps: Step 1 deletes the five identity and primacy tests that hold `:106`, `:109`,
+`:123`, `:126`, `:142-145` and `:162`; Step 3 replaces `TestNestedWorktreeDirectoriesAreSearched`
+(`:181-182`), deletes `TestCwdResolutionFromASubdirectoryFindsTheWorktreeRoot` (`:304-305`), and
+rewrites the fallback assertions in `TestCwdResolutionOutsideGitFallsBackToTheDirectory`
+(`:320-326`), whose `IsPrimary` check disappears because every resolved workspace is a main tree by
+construction.
+
+- [ ] **Step 5: Run the tests to verify they fail**
 
 Run: `go test ./internal/resolve/... -v`
 Expected: FAIL to build — `ws.RepoRoot undefined (type Workspace has no field or method RepoRoot)`, plus the same for `RepositoryID` and `Session`.
 
-- [ ] **Step 5: Restate `Workspace` and the package doc**
+- [ ] **Step 6: Restate `Workspace` and the package doc**
 
 Replace `resolve.go:1-7` and `:24-39`:
 
@@ -262,7 +295,7 @@ type Workspace struct {
 }
 ```
 
-- [ ] **Step 6: Rewrite `Resolve` against the repository root**
+- [ ] **Step 7: Rewrite `Resolve` against the repository root**
 
 Replace `resolve.go:83-126` (`Resolve` and `fromDirectory`):
 
@@ -308,7 +341,7 @@ func Resolve(name string, roots []string, cwd string) (Workspace, error) {
 }
 ```
 
-- [ ] **Step 7: Replace `isPrimary` and `slugFor` with `mainWorktree`**
+- [ ] **Step 8: Replace `isPrimary` and `slugFor` with `mainWorktree`**
 
 Delete `resolve.go:202-244` and put in their place:
 
@@ -338,7 +371,7 @@ func mainWorktree(path string) string {
 }
 ```
 
-- [ ] **Step 8: Narrow `byName` to directly-named repositories**
+- [ ] **Step 9: Narrow `byName` to directly-named repositories**
 
 Delete `nestedWorktreeDirs` (`resolve.go:20-22`) and replace `byName` (`:128-182`) with:
 
@@ -385,7 +418,7 @@ func byName(name string, roots []string) (string, error) {
 }
 ```
 
-- [ ] **Step 9: Say "repository" in both error messages**
+- [ ] **Step 10: Say "repository" in both error messages**
 
 Replace `resolve.go:41-56` and the loop body at `:72-79`:
 
@@ -417,17 +450,17 @@ func (e *AmbiguousError) Error() string {
 	return b.String()
 ```
 
-- [ ] **Step 10: Run the resolve tests**
+- [ ] **Step 11: Run the resolve tests**
 
 Run: `go test ./internal/resolve/... -v`
 Expected: PASS, including `TestEveryWorktreeOfARepositoryResolvesToOneWorkspace` and `TestNestedWorktreeDirectoriesAreNoLongerSearched`.
 
-- [ ] **Step 11: Format and confirm the package builds**
+- [ ] **Step 12: Format and confirm the package builds**
 
 Run: `gofmt -l internal/resolve && go build ./internal/resolve/...`
 Expected: no output from either. `go build ./...` still fails in the packages listed under Interfaces above; those are later tasks.
 
-- [ ] **Step 12: Commit**
+- [ ] **Step 13: Commit**
 
 Run:
 ```
@@ -972,12 +1005,18 @@ CREATE TABLE container_bindings (
 -- last_operations stays keyed on workspace_id: an operation is performed by a
 -- session, not by a repository.
 --
--- ON UPDATE CASCADE is declared for the re-keying that step 9 performs, but
--- nothing relies on it firing: this database never enables foreign keys
--- (internal/state/state.go:63-64 sets busy_timeout and journal_mode only, and
--- SQLite defaults foreign_keys off), so every REFERENCES clause here states
--- intent for a reader rather than enforcing it at runtime. Every cascade the
--- Go code depends on is written out as its own statement.
+-- ON UPDATE CASCADE is what carries this row along when step 9 re-keys a
+-- migrated workspace. Foreign keys are enforced here: Open puts
+-- _pragma=foreign_keys(1) on the DSN so every pooled connection has them on
+-- (internal/state/state.go:65), and migrate_test.go:152-156 asserts it per
+-- connection. The declaration is therefore load-bearing, not documentation.
+--
+-- Step 9 still writes its cleanup out statement by statement rather than
+-- leaning on ON DELETE CASCADE. That is a readability choice, not a
+-- correctness one: a reader of RegisterWorkspace should be able to see which
+-- rows a stale repository takes with it without reconstructing the schema
+-- from memory, and the explicit order is the same order the cascade would
+-- have used.
 CREATE TABLE last_operations (
     workspace_id  TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE ON UPDATE CASCADE,
     operation     TEXT NOT NULL,
@@ -1094,9 +1133,13 @@ func (s *Store) RegisterWorkspace(ws resolve.Workspace, desiredDigest string, no
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Foreign keys are off (see the 0002 schema comment), so nothing below
-	// cascades on its own. Every dependent row this function must remove or
-	// move is removed or moved by its own statement, in dependency order.
+	// Foreign keys are enforced on this connection (internal/state/state.go:65),
+	// so deleting the stale repository alone would cascade the rest away. The
+	// cleanup is written out statement by statement anyway, in dependency
+	// order, so that a reader can see what a stale repository takes with it
+	// without reconstructing the schema from memory. Each statement is a no-op
+	// when the cascade would have covered it, because the cascade has not run
+	// yet — the repository row is deleted last.
 	//
 	// repo_root is UNIQUE, so a row recorded under a different ID for this
 	// same path would fail the insert rather than be refreshed by it. This is
@@ -1156,15 +1199,17 @@ func (s *Store) RegisterWorkspace(ws resolve.Workspace, desiredDigest string, no
 	case err != nil:
 		return fmt.Errorf("looking for a stale ID for %s: %w", ws.SessionName, err)
 	default:
+		// last_operations follows on its own: its workspace_id is declared
+		// ON UPDATE CASCADE and foreign keys are enforced on this connection
+		// (internal/state/state.go:65). An explicit UPDATE here would match
+		// nothing, because the cascade has already moved the row by the time
+		// it ran. The regression test asserts the operation survives under
+		// the new ID, so a schema change that dropped the cascade would fail
+		// there rather than silently orphan the row.
 		if _, err := tx.Exec(
 			"UPDATE workspaces SET id = ?, updated_at = ? WHERE id = ?",
 			ws.ID, encodeTime(now), stale); err != nil {
 			return fmt.Errorf("re-keying the migrated session %s: %w", ws.SessionName, err)
-		}
-		if _, err := tx.Exec(
-			"UPDATE last_operations SET workspace_id = ? WHERE workspace_id = ?",
-			ws.ID, stale); err != nil {
-			return fmt.Errorf("re-keying operations for %s: %w", ws.SessionName, err)
 		}
 	}
 
@@ -1518,7 +1563,7 @@ which autostart iterates in place of the dropped is_primary flag."
 
 ---
 
-### Task 3: Repository-scoped locking
+### Task 3: Repository-scoped locking, and the controller's own path readers
 
 **Files:**
 - Modify: `internal/lock/lock.go:1-70` (package comment, `ErrLockHeld`, `Acquire`)
@@ -1527,14 +1572,35 @@ which autostart iterates in place of the dropped is_primary flag."
 - Modify: `internal/controller/ensure.go:79-85` (the `lock.Acquire` call is line 81)
 - Modify: `internal/controller/stop.go:28-34` (the `lock.Acquire` call is line 30)
 - Modify: `internal/controller/autostart.go:27-33` (the `lock.Acquire` call is line 29)
-- Modify: `internal/controller/ensure_test.go:107-115` (`ensureWorkspace`)
+- Modify: `internal/controller/ensure.go:255-257, 265, 272, 278, 280, 286, 392, 441` (window/pane dirs, the `SessionSpec` value, and the post-create identity confirmation)
+- Modify: `internal/controller/plan.go:107-113` (`SessionBelongsTo` comparison and its doc comment)
+- Modify: `internal/controller/fake/fake.go:246-262` (the `Workspaces` ordering)
+- Modify: `internal/controller/ensure_test.go:107-115` (`ensureWorkspace`), `:114-116`, `:269`
 - Test: `internal/controller/lock_ordering_test.go`
+- Test: `internal/controller/plan_test.go:32, 313`
+- Test: `internal/controller/observe_test.go:23-25, 86`
+- Test: `internal/controller/render_test.go:31, 57, 73`
+- Test: `internal/controller/fake/fake_test.go:21-23, 80-81`
 
 **Interfaces:**
 - Consumes: `resolve.Workspace{ID, RepositoryID, Slug, RepoRoot, Session, SessionName}` (Task 1); `fake.NewStore() *fake.Store`, `fake.ContainerObserver`, `fake.SessionActuator`, `fake.Clock` (`internal/controller/fake/fake.go`); `controller.Controller`, `controller.Desired`, `controller.Ensure`.
 - Produces: `func lock.Acquire(ctx context.Context, dir, key string, timeout time.Duration) (*lock.Lock, error)`; `type lock.ErrLockHeld struct{ Key string }`; unexported `controller.lockPhases(ctx context.Context, dir, repositoryID, workspaceID string, timeout time.Duration) (func(), error)`.
 
 Verified before renaming: the only `lock.Acquire` callers are `internal/controller/ensure.go:81`, `internal/controller/stop.go:30`, `internal/controller/autostart.go:29` and `internal/cli/rebuild.go:260`; the only `ErrLockHeld` construction is `internal/lock/lock.go:61`, and the only assertions on its field are `internal/lock/lock_test.go:41-44` and `internal/controller/ensure_test.go:499-501` (which reads the type, not the field). `internal/cli/rebuild.go:259` (`workspaceLocker.Lock`) locks the recovery workflow's per-session registration and keeps the workspace ID; the parameter rename does not touch it.
+
+Steps 2 through 7 are not about locking. They convert `internal/controller` and its in-memory fake
+onto the renamed `resolve.Workspace` and `state.Record` fields, and they live here because this task
+is the first in the plan to run a controller test: Step 9's red run cannot report a failing
+assertion in a package that does not compile, and `go test ./internal/controller/` links
+`internal/controller/fake` whether or not the fake's own tests are being run. They are mechanical
+and change no behaviour — the value flowing through each site is the same absolute path it always
+was, only now guaranteed to be a main worktree.
+
+Telling the two directions of the mirror apart is the one thing that needs care. Where the code
+reads a *workspace or record* field the name becomes `RepoRoot`; where it reads a *tmux-derived*
+field on `controller.LiveSession` or writes `controller.SessionSpec` the name stays `Worktree` and
+only the right-hand side moves. `ensure.go:392` and `ensure.go:441` are exactly that case, and so
+are the `LiveSession` literals scattered through the controller tests, which must be left alone.
 
 - [ ] **Step 1: Give the ensure test workspace a repository ID**
 
@@ -1552,7 +1618,482 @@ func ensureWorkspace() resolve.Workspace {
 }
 ```
 
-- [ ] **Step 2: Write the failing concurrency test**
+- [ ] **Step 2: Point `ensure.go`'s window and pane directories at the repository root**
+
+`renderWindows` derives every window's and pane's working directory from the workspace path. Five
+reads change, plus the comment above the container-pane branch, which explains the host-side `-c`
+in terms of "the worktree".
+
+Before (lines 255-257 and 262-267):
+
+```go
+				// its own; inside the container that is the exec relDir,
+				// while the host-side -c stays the worktree, matching the
+				// window itself.
+				relDir := in.RelDir
+				if p.RelDir != "" {
+					relDir = p.RelDir
+				}
+				panes = append(panes, PaneSpec{
+					Name:    p.Name,
+					Command: act.ExecCommand(binding, p.Command, relDir, d.Config.Environment),
+					Dir:     d.Workspace.Worktree,
+					Focus:   p.Focus,
+				})
+```
+
+After:
+
+```go
+				// its own; inside the container that is the exec relDir,
+				// while the host-side -c stays the repository root,
+				// matching the window itself.
+				relDir := in.RelDir
+				if p.RelDir != "" {
+					relDir = p.RelDir
+				}
+				panes = append(panes, PaneSpec{
+					Name:    p.Name,
+					Command: act.ExecCommand(binding, p.Command, relDir, d.Config.Environment),
+					Dir:     d.Workspace.RepoRoot,
+					Focus:   p.Focus,
+				})
+```
+
+Before (lines 269-274, the container window itself):
+
+```go
+			specs = append(specs, WindowSpec{
+				Name:    in.Name,
+				Command: act.ExecCommand(binding, in.Command, in.RelDir, d.Config.Environment),
+				Dir:     d.Workspace.Worktree,
+				Focus:   in.Focus,
+				Panes:   panes,
+			})
+```
+
+After:
+
+```go
+			specs = append(specs, WindowSpec{
+				Name:    in.Name,
+				Command: act.ExecCommand(binding, in.Command, in.RelDir, d.Config.Environment),
+				Dir:     d.Workspace.RepoRoot,
+				Focus:   in.Focus,
+				Panes:   panes,
+			})
+```
+
+Before (lines 278-288, the host branch):
+
+```go
+		dir := d.Workspace.Worktree
+		if in.RelDir != "" {
+			dir = filepath.Join(d.Workspace.Worktree, in.RelDir)
+		}
+		panes := make([]PaneSpec, 0, len(in.Panes))
+		for _, p := range in.Panes {
+			paneDir := dir
+			if p.RelDir != "" {
+				paneDir = filepath.Join(d.Workspace.Worktree, p.RelDir)
+			}
+```
+
+After:
+
+```go
+		dir := d.Workspace.RepoRoot
+		if in.RelDir != "" {
+			dir = filepath.Join(d.Workspace.RepoRoot, in.RelDir)
+		}
+		panes := make([]PaneSpec, 0, len(in.Panes))
+		for _, p := range in.Panes {
+			paneDir := dir
+			if p.RelDir != "" {
+				paneDir = filepath.Join(d.Workspace.RepoRoot, p.RelDir)
+			}
+```
+
+- [ ] **Step 3: Feed the repository root into the `SessionSpec` and the post-create confirmation**
+
+`SessionSpec.Worktree` is written straight onto the tmux `@dev_worktree` user option by
+`internal/tmux/actuate.go`, and `LiveSession.Worktree` is what comes back out of it. Both field
+names stay; only the workspace-side expression changes.
+
+Before (lines 388-395):
+
+```go
+	spec := SessionSpec{
+		Name:        name,
+		WorkspaceID: id,
+		Slug:        d.Workspace.Slug,
+		Worktree:    d.Workspace.Worktree,
+		Env:         d.Config.Environment,
+		Windows:     windows,
+	}
+```
+
+After:
+
+```go
+	spec := SessionSpec{
+		Name:        name,
+		WorkspaceID: id,
+		Slug:        d.Workspace.Slug,
+		Worktree:    d.Workspace.RepoRoot,
+		Env:         d.Config.Environment,
+		Windows:     windows,
+	}
+```
+
+Before (lines 440-443, inside `confirmCreation`):
+
+```go
+	if live.WorkspaceID != d.Workspace.ID || live.Slug != d.Workspace.Slug ||
+		live.Worktree != d.Workspace.Worktree {
+		return fmt.Sprintf("session %q carries contradictory identity keys after creation", live.Name)
+	}
+```
+
+After:
+
+```go
+	if live.WorkspaceID != d.Workspace.ID || live.Slug != d.Workspace.Slug ||
+		live.Worktree != d.Workspace.RepoRoot {
+		return fmt.Sprintf("session %q carries contradictory identity keys after creation", live.Name)
+	}
+```
+
+- [ ] **Step 4: Update `SessionBelongsTo` and say what the third key now means**
+
+The doc comment calls the third identity key a worktree. Post-change the tag still spells
+`@dev_worktree`, but the value it carries is the repository root, and a reader comparing this
+function against the design needs the comment to say so.
+
+Before (lines 107-114):
+
+```go
+// SessionBelongsTo compares all three load-bearing identity keys
+// (design §7): a session with the right workspace ID but a contradictory
+// slug or worktree is evidence of corruption or collision, not a match.
+// The CLI's status and attach verdicts reuse it so the rendered identity
+// can never drift from planning's.
+func SessionBelongsTo(s LiveSession, ws resolve.Workspace) bool {
+	return s.WorkspaceID == ws.ID && s.Slug == ws.Slug && s.Worktree == ws.Worktree
+}
+```
+
+After:
+
+```go
+// SessionBelongsTo compares all three load-bearing identity keys
+// (design §7): a session with the right workspace ID but a contradictory
+// slug or repository root is evidence of corruption or collision, not a
+// match. The CLI's status and attach verdicts reuse it so the rendered
+// identity can never drift from planning's. LiveSession.Worktree keeps
+// its name because it mirrors the tmux user option @dev_worktree, which
+// is unchanged; the value it carries is now the repository root.
+func SessionBelongsTo(s LiveSession, ws resolve.Workspace) bool {
+	return s.WorkspaceID == ws.ID && s.Slug == ws.Slug && s.Worktree == ws.RepoRoot
+}
+```
+
+- [ ] **Step 5: Convert the in-memory fake store's field reads and ordering**
+
+`internal/controller/fake` is a non-test file that stands in for the SQLite store across the
+controller, doctor, and rebuild tests, and `go test ./internal/controller/` links it, so it has to
+compile before any gate in this task can run. Two functions read the dropped fields. Convert both to
+the renamed ones here; Task 5 comes back to `RegisterWorkspace` and reshapes it to write a
+*repository* row alongside the session row, which is a behaviour change this task neither needs nor
+should make.
+
+`RegisterWorkspace` (lines 101-123) has four reads, two on the update path and two on the insert
+path. Before:
+
+```go
+	if rec, ok := s.records[ws.ID]; ok {
+		rec.Slug = ws.Slug
+		rec.Worktree = ws.Worktree
+		rec.IsPrimary = ws.IsPrimary
+		rec.ProposedSession = ws.SessionName
+```
+
+After — `RepositoryID` comes across too, because the record now carries it and the sibling lookups
+Task 5 adds read it:
+
+```go
+	if rec, ok := s.records[ws.ID]; ok {
+		rec.Slug = ws.Slug
+		rec.RepositoryID = ws.RepositoryID
+		rec.RepoRoot = ws.RepoRoot
+		rec.ProposedSession = ws.SessionName
+```
+
+Before:
+
+```go
+	s.records[ws.ID] = &state.Record{
+		ID:              ws.ID,
+		Slug:            ws.Slug,
+		Worktree:        ws.Worktree,
+		IsPrimary:       ws.IsPrimary,
+		ProposedSession: ws.SessionName,
+```
+
+After:
+
+```go
+	s.records[ws.ID] = &state.Record{
+		ID:              ws.ID,
+		RepositoryID:    ws.RepositoryID,
+		Slug:            ws.Slug,
+		RepoRoot:        ws.RepoRoot,
+		ProposedSession: ws.SessionName,
+```
+
+The second is `Workspaces`, whose sort key still names the dropped field.
+
+Before (lines 246-262):
+
+```go
+// Workspaces returns every registered workspace ordered by slug, then
+// worktree, mirroring the real store's ORDER BY (internal/state/store.go).
+func (s *Store) Workspaces() ([]state.Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]state.Record, 0, len(s.records))
+	for _, rec := range s.records {
+		out = append(out, s.copyRecordLocked(rec))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Slug != out[j].Slug {
+			return out[i].Slug < out[j].Slug
+		}
+		return out[i].Worktree < out[j].Worktree
+	})
+	return out, nil
+}
+```
+
+After:
+
+```go
+// Workspaces returns every registered workspace ordered by slug, then
+// repository root, mirroring the real store's ORDER BY
+// (internal/state/store.go).
+func (s *Store) Workspaces() ([]state.Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]state.Record, 0, len(s.records))
+	for _, rec := range s.records {
+		out = append(out, s.copyRecordLocked(rec))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Slug != out[j].Slug {
+			return out[i].Slug < out[j].Slug
+		}
+		return out[i].RepoRoot < out[j].RepoRoot
+	})
+	return out, nil
+}
+```
+
+- [ ] **Step 6: Convert the controller tests that build workspaces and records**
+
+These are `resolve.Workspace` and `state.Record` literals only. Every `controller.LiveSession`
+literal in the same files (`ensure_test.go:134, 329, 402`, `stop_test.go:113`, `plan_test.go:44, 170`)
+keeps `Worktree` and must not be touched.
+
+`ensureWorkspace` at `internal/controller/ensure_test.go:110-118` was already converted in
+Step 1 of this task, which is also where it gained its `RepositoryID`; it needs nothing
+further here.
+
+`internal/controller/ensure_test.go:268-270` before:
+
+```go
+	other := resolve.Workspace{
+		ID: "w2", Slug: "other", Worktree: "/w/other", SessionName: "other",
+	}
+```
+
+after:
+
+```go
+	other := resolve.Workspace{
+		ID: "w2", Slug: "other", RepoRoot: "/w/other", SessionName: "other",
+	}
+```
+
+`internal/controller/plan_test.go:28-36` before:
+
+```go
+	return &state.Record{
+		ID:              "w1",
+		Slug:            "slabledger",
+		Worktree:        "/w/slabledger",
+		ProposedSession: "slabledger",
+		ActualSession:   actual,
+		AppliedDigest:   applied,
+	}
+```
+
+after:
+
+```go
+	return &state.Record{
+		ID:              "w1",
+		Slug:            "slabledger",
+		RepoRoot:        "/w/slabledger",
+		ProposedSession: "slabledger",
+		ActualSession:   actual,
+		AppliedDigest:   applied,
+	}
+```
+
+`internal/controller/plan_test.go:313` before:
+
+```go
+			Workspace: resolve.Workspace{ID: "w1", Slug: "s", Worktree: "/w"},
+```
+
+after:
+
+```go
+			Workspace: resolve.Workspace{ID: "w1", Slug: "s", RepoRoot: "/w"},
+```
+
+`internal/controller/observe_test.go:20-27` before:
+
+```go
+		Workspace: resolve.Workspace{
+			ID:          "w1",
+			Slug:        "slabledger",
+			Worktree:    "/w/slabledger",
+			SessionName: "slabledger",
+			IsPrimary:   true,
+		},
+```
+
+after:
+
+```go
+		Workspace: resolve.Workspace{
+			ID:          "w1",
+			Slug:        "slabledger",
+			RepoRoot:    "/w/slabledger",
+			SessionName: "slabledger",
+		},
+```
+
+`internal/controller/observe_test.go:86` before:
+
+```go
+	other.Worktree = "/w/other"
+```
+
+after:
+
+```go
+	other.RepoRoot = "/w/other"
+```
+
+`internal/controller/render_test.go:31, 57, 73` before (three occurrences, the third spanning onto
+the following line):
+
+```go
+	d := Desired{Workspace: resolve.Workspace{Worktree: "/w/slab"}}
+```
+
+```go
+	d := Desired{Workspace: resolve.Workspace{Worktree: "/w/slab"},
+		Config: config.Config{Environment: map[string]string{"K": "v"}}}
+```
+
+after:
+
+```go
+	d := Desired{Workspace: resolve.Workspace{RepoRoot: "/w/slab"}}
+```
+
+```go
+	d := Desired{Workspace: resolve.Workspace{RepoRoot: "/w/slab"},
+		Config: config.Config{Environment: map[string]string{"K": "v"}}}
+```
+
+Give the `observe_test.go` workspace fixture the same `RepositoryID: "r1"` that `ensureWorkspace`
+carries. Nothing in this task reads it, but Task 5 re-keys the fake store's container bindings on
+the repository ID, and a fixture that leaves the field empty would file every binding under the
+empty string.
+
+- [ ] **Step 7: Convert the fake store's own tests**
+
+`internal/controller/fake/fake_test.go:17-25` before:
+
+```go
+func testWorkspace(id, session string) resolve.Workspace {
+	return resolve.Workspace{
+		ID:          id,
+		Slug:        "slabledger",
+		Worktree:    "/w/" + id,
+		SessionName: session,
+		IsPrimary:   true,
+	}
+}
+```
+
+after:
+
+```go
+func testWorkspace(id, session string) resolve.Workspace {
+	return resolve.Workspace{
+		ID:          id,
+		Slug:        "slabledger",
+		RepoRoot:    "/w/" + id,
+		SessionName: session,
+	}
+}
+```
+
+`internal/controller/fake/fake_test.go:72-83` before:
+
+```go
+// TestFakeStoreWorkspacesOrdersBySlugThenWorktree mirrors the real store's
+// ORDER BY w.slug, w.worktree (internal/state/store.go): the fake iterates a
+// map, so without an explicit sort the order would be nondeterministic.
+func TestFakeStoreWorkspacesOrdersBySlugThenWorktree(t *testing.T) {
+	s := NewStore()
+	register := func(id, slug, worktree string) {
+		t.Helper()
+		ws := resolve.Workspace{
+			ID: id, Slug: slug, Worktree: worktree,
+			SessionName: id, IsPrimary: true,
+		}
+```
+
+after:
+
+```go
+// TestFakeStoreWorkspacesOrdersBySlugThenRepoRoot mirrors the real store's
+// ORDER BY w.slug, w.repo_root (internal/state/store.go): the fake iterates a
+// map, so without an explicit sort the order would be nondeterministic.
+func TestFakeStoreWorkspacesOrdersBySlugThenRepoRoot(t *testing.T) {
+	s := NewStore()
+	register := func(id, slug, repoRoot string) {
+		t.Helper()
+		ws := resolve.Workspace{
+			ID: id, Slug: slug, RepoRoot: repoRoot,
+			SessionName: id,
+		}
+```
+
+The three `register(...)` calls below it pass positional strings and need no change; the assertion
+message at line 106 should read `ordered by (slug, repo root)` for consistency.
+
+Add `RepositoryID: "r-" + id` to `testWorkspace` and `RepositoryID: id` to the `register` closure,
+for the same reason: Task 5 keys the fake's bindings on the repository, and an empty repository ID
+would collapse the three registrations onto one key.
+
+- [ ] **Step 8: Write the failing concurrency test**
 
 Create `internal/controller/lock_ordering_test.go`:
 
@@ -1700,12 +2241,12 @@ func TestConcurrentOpensOnOneRepositorySerializeTheContainerStart(t *testing.T) 
 }
 ```
 
-- [ ] **Step 3: Run the test to verify it fails**
+- [ ] **Step 9: Run the test to verify it fails**
 
 Run: `go test ./internal/controller/ -run TestConcurrentOpensOnOneRepositorySerializeTheContainerStart -v`
 Expected: FAIL with `2 concurrent devcontainer ups; the repository lock must serialize them` — both Ensures lock on their per-session workspace IDs and overlap.
 
-- [ ] **Step 4: Move the lock test onto the renamed field**
+- [ ] **Step 10: Move the lock test onto the renamed field**
 
 `internal/lock/lock_test.go`, in `TestAcquireTimesOutWithTypedError` (currently lines 41-44), and add `"strings"` to the import block:
 
@@ -1722,12 +2263,12 @@ Expected: FAIL with `2 concurrent devcontainer ups; the repository lock must ser
 	}
 ```
 
-- [ ] **Step 5: Run the lock test to verify it fails**
+- [ ] **Step 11: Run the lock test to verify it fails**
 
 Run: `go test ./internal/lock/ -run TestAcquireTimesOutWithTypedError -v`
 Expected: FAIL to build with `heldErr.Key undefined (type *ErrLockHeld has no field or method Key)`.
 
-- [ ] **Step 6: Rename the lock key and document the ordering**
+- [ ] **Step 12: Rename the lock key and document the ordering**
 
 `internal/lock/lock.go` lines 1-5 and 17-70:
 
@@ -1809,12 +2350,12 @@ func Acquire(ctx context.Context, dir, key string, timeout time.Duration) (*Lock
 }
 ```
 
-- [ ] **Step 7: Run the lock package tests**
+- [ ] **Step 13: Run the lock package tests**
 
 Run: `go test ./internal/lock/ -v`
 Expected: PASS, including `TestAcquireTimesOutWithTypedError` and `TestChildDoesNotInheritTheLock`.
 
-- [ ] **Step 8: Add the controller's lock helper**
+- [ ] **Step 14: Add the controller's lock helper**
 
 Create `internal/controller/locking.go`:
 
@@ -1854,7 +2395,7 @@ func lockPhases(ctx context.Context, dir, repositoryID, workspaceID string, time
 }
 ```
 
-- [ ] **Step 9: Lock the repository and the workspace in Ensure**
+- [ ] **Step 15: Lock the repository and the workspace in Ensure**
 
 `internal/controller/ensure.go`, replacing lines 81-85:
 
@@ -1869,7 +2410,7 @@ func lockPhases(ctx context.Context, dir, repositoryID, workspaceID string, time
 
 Then drop the now-unused `"github.com/gambtho/projectmux/internal/lock"` import (line 10).
 
-- [ ] **Step 10: Lock the repository in Stop only when the container is in play**
+- [ ] **Step 16: Lock the repository in Stop only when the container is in play**
 
 `internal/controller/stop.go`, replacing lines 30-34:
 
@@ -1892,7 +2433,7 @@ Then drop the now-unused `"github.com/gambtho/projectmux/internal/lock"` import 
 
 Then drop the `"github.com/gambtho/projectmux/internal/lock"` import (line 9).
 
-- [ ] **Step 11: Lock the repository in StartWorkspaceContainer**
+- [ ] **Step 17: Lock the repository in StartWorkspaceContainer**
 
 `internal/controller/autostart.go`, replacing lines 29-33:
 
@@ -1910,17 +2451,23 @@ Then drop the `"github.com/gambtho/projectmux/internal/lock"` import (line 9).
 
 Then drop the `"github.com/gambtho/projectmux/internal/lock"` import (line 8).
 
-- [ ] **Step 12: Run the controller tests**
+- [ ] **Step 18: Run the controller tests**
 
 Run: `go test ./internal/controller/... -v`
 Expected: PASS, including `TestConcurrentOpensOnOneRepositorySerializeTheContainerStart` (`peak` stays 1, `starts` is 2) and the existing `TestEnsureRespectsTheWorkspaceLock`.
 
-- [ ] **Step 13: Run the whole suite and the formatting gate**
+- [ ] **Step 19: Run the owned packages and the formatting gate**
 
-Run: `go test ./... && gofmt -l .`
-Expected: all packages PASS and `gofmt -l` prints nothing.
+Run: `go test ./internal/lock/... ./internal/controller/... && gofmt -l internal/lock internal/controller`
+Expected: both packages PASS and `gofmt -l` prints nothing.
 
-- [ ] **Step 14: Commit**
+The gate is scoped to the packages this task owns rather than to `go test ./...`, because
+the tree does not build between Task 1 and Task 5 — see "Task Ordering and Interactions"
+above. Every package named on this line has been converted by this task or an earlier one,
+so the gate is achievable as written; a full-suite run would fail on readers a later task
+owns and say nothing about this one.
+
+- [ ] **Step 20: Commit**
 
 Run:
 ```
@@ -1929,7 +2476,13 @@ git commit -am "fix(lock): scope container locking to the repository
 Container work locks the repository ID and session work the workspace ID,
 with repository-before-workspace ordering documented in the lock package.
 ErrLockHeld.WorkspaceID becomes Key, since the key is no longer always a
-workspace."
+workspace.
+
+The controller's own readers of the renamed workspace and record fields
+move in the same commit: session rendering, the post-create identity
+confirmation, SessionBelongsTo, the in-memory fake's ordering, and the
+tests around them. They are mechanical, but the package does not compile
+without them, and this is the first task that runs a controller test."
 ```
 
 ---
@@ -1941,13 +2494,28 @@ workspace."
 - Modify: `internal/container/adapter.go:93-98` (the `devcontainer.local_folder` filter, line 95)
 - Modify: `internal/container/adapter.go:145-153` (`devcontainer up --workspace-folder`, line 150, and the `--config` join, line 152)
 - Modify: `internal/container/adapter_test.go:30-32,67,114` (the `adapterWorkspace` fixture and its two `ws.Worktree` readers)
+- Modify: `internal/container/integration_test.go:114` (the docker-gated fixture; converted here only because the package's test binary will not compile without it)
 - Test: `internal/container/adapter_test.go`
 
 **Interfaces:**
-- Consumes: `resolve.Workspace{ID, RepositoryID, Slug, RepoRoot, Session, SessionName}` (Task 1). Task 1 removes the `Worktree` field, and these four reads in `internal/container` are its last references, so the package does not build until Step 4 below.
+- Consumes: `resolve.Workspace{ID, RepositoryID, Slug, RepoRoot, Session, SessionName}` (Task 1). Task 1 removes the `Worktree` field, and these four reads in `internal/container` are its last references, so the package does not build until Step 5 below.
 - Produces: no new exported names. `Adapter.Applies`, `Adapter.DiscoverContainer` and `Adapter.StartContainer` keep their signatures and change which field they read — this is the change that turns N worktrees of one repository into one container.
 
-- [ ] **Step 1: Point the existing adapter test fixture at the repository root**
+- [ ] **Step 1: Convert the docker-gated integration fixture**
+
+`internal/container/integration_test.go:114` builds a `resolve.Workspace` in the dropped shape. It
+is guarded by a docker build tag and never runs in CI, but the file is still compiled by every
+`go test ./internal/container/...` invocation, which makes it a prerequisite of this task's own
+gate rather than of a later task:
+
+```go
+	ws := resolve.Workspace{ID: "it", RepositoryID: "it-repo", Slug: "it", RepoRoot: worktree}
+```
+
+The local variable keeps the name `worktree`: it is the path the fixture created with `git init`,
+which is a main worktree and therefore a repository root. Renaming it is churn no gate can see.
+
+- [ ] **Step 2: Point the existing adapter test fixture at the repository root**
 
 `internal/container/adapter_test.go`, replacing `adapterWorkspace` (lines 30-32) and renaming the `writeDevcontainerJSON` parameter so it reads honestly:
 
@@ -1972,7 +2540,7 @@ func writeDevcontainerJSON(t *testing.T, repoRoot string) {
 
 Then change the two callers `writeDevcontainerJSON(t, ws.Worktree)` (lines 67 and 114) to `writeDevcontainerJSON(t, ws.RepoRoot)`.
 
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 3: Write the failing test**
 
 Append to `internal/container/adapter_test.go`:
 
@@ -2042,12 +2610,12 @@ func TestContainersAreKeyedOnTheRepositoryRoot(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run the test to verify it fails**
+- [ ] **Step 4: Run the test to verify it fails**
 
 Run: `go test ./internal/container/ -run TestContainersAreKeyedOnTheRepositoryRoot -v`
 Expected: FAIL to build with `ws.Worktree undefined (type resolve.Workspace has no field or method Worktree)` at `adapter.go:56`, `adapter.go:95`, `adapter.go:150` and `adapter.go:152`.
 
-- [ ] **Step 4: Key applicability on the repository root**
+- [ ] **Step 5: Key applicability on the repository root**
 
 `internal/container/adapter.go`, line 56 and the `configPaths` helper (lines 69-77):
 
@@ -2071,7 +2639,7 @@ func configPaths(repoRoot string, cfg config.Config) []string {
 }
 ```
 
-- [ ] **Step 5: Key discovery on the repository root**
+- [ ] **Step 6: Key discovery on the repository root**
 
 `internal/container/adapter.go`, replacing lines 93-98:
 
@@ -2087,7 +2655,7 @@ func configPaths(repoRoot string, cfg config.Config) []string {
 	})
 ```
 
-- [ ] **Step 6: Start the container at the repository root**
+- [ ] **Step 7: Start the container at the repository root**
 
 `internal/container/adapter.go`, replacing lines 150-153:
 
@@ -2098,17 +2666,23 @@ func configPaths(repoRoot string, cfg config.Config) []string {
 	}
 ```
 
-- [ ] **Step 7: Run the container package tests**
+- [ ] **Step 8: Run the container package tests**
 
 Run: `go test ./internal/container/ -v`
 Expected: PASS, including `TestContainersAreKeyedOnTheRepositoryRoot`, `TestAppliesMatrix`, `TestDiscoverShapes` and `TestStartContainerSuccessAndFailures`.
 
-- [ ] **Step 8: Run the whole suite and the formatting gate**
+- [ ] **Step 9: Run the owned package and the formatting gate**
 
-Run: `go test ./... && gofmt -l .`
-Expected: all packages PASS and `gofmt -l` prints nothing.
+Run: `go test ./internal/container/... && gofmt -l internal/container`
+Expected: the container package PASSes and `gofmt -l` prints nothing.
 
-- [ ] **Step 9: Commit**
+The gate is scoped to the packages this task owns rather than to `go test ./...`, because
+the tree does not build between Task 1 and Task 5 — see "Task Ordering and Interactions"
+above. Every package named on this line has been converted by this task or an earlier one,
+so the gate is achievable as written; a full-suite run would fail on readers a later task
+owns and say nothing about this one.
+
+- [ ] **Step 10: Commit**
 
 Run:
 ```
@@ -2121,18 +2695,33 @@ share one container instead of demanding N."
 
 ---
 
-### Task 5: Autostart iterates repositories
+### Task 5: Autostart iterates repositories, and the rest of the tree converges
 
 **Files:**
 - Modify: `internal/controller/autostart.go:13-66` (replace `StartWorkspaceContainer` with the repository-scoped form)
 - Modify: `internal/controller/observe.go:100,104-146` (`observeContainer` takes a binding, not a record)
+- Modify: `internal/controller/interfaces.go:23-33` (`Store` gains `Repositories`; `RecordContainerObservation` takes a repository ID)
 - Modify: `internal/controller/fake/fake.go:83-89,358-364` (record the repository ID, not the workspace ID)
-- Modify: `internal/cli/autostart.go:11-190`
+- Modify: `internal/controller/fake/fake.go:91-99` (the `Store` struct and `NewStore`), `:101-123` (`RegisterWorkspace` writes both rows), `:155-189` (`RecordContainerObservation` and `recordContainerLocked` key on the repository), `:209-234` (`CommitReconciliation`'s container branch), `:243,253,264-291` (`copyRecord` becomes `copyRecordLocked` and projects the binding), plus the new `Repositories` reader
+- Modify: `internal/cli/autostart.go:11-190` (including the primacy filter at `:97` and the record readers at `:107, 112, 135-143`, converted in Step 3 so the package compiles before Step 14's red run)
+- Modify: `internal/doctor/sessions.go:31` (registered-path map value)
+- Modify: `internal/rebuild/classify.go:151, 205` (identity-mismatch gate and its reason string)
+- Modify: `internal/rebuild/apply.go:326-334` (`registeredFor` and its doc comment), `:349` (the conflict message's workspace-side argument)
+- Modify: `internal/cli/config.go:136,138`, `internal/cli/open.go:86,88`, `internal/cli/attach.go:139,141`, `internal/cli/stop.go:121,123`, `internal/cli/status.go:178,180`, `internal/cli/list.go:117-118,134` (envelope construction; the JSON field names stay for Task 7)
+- Modify: `internal/controller/ensure_test.go:624, 692`, `internal/controller/stop_test.go:145, 188`, `internal/controller/observe_test.go:130, 226, 251`, `internal/controller/fake/fake_test.go:51, 54` (container observations re-keyed on the repository)
 - Modify: `internal/cli/cli.go:50-51` (usage line)
 - Modify: `docs/commands.md:344-363`
 - Test: `internal/controller/autostart_test.go` (rewritten in full)
 - Test: `internal/cli/autostart_test.go:16-161` (fixture and matrix rewritten)
-- Test: `internal/cli/lifecycle_test.go:439-523` (the `is_primary` regression test, rewritten)
+- Test: `internal/cli/lifecycle_test.go:439-523` (the `is_primary` regression test, rewritten), `:90, 123, 126` (converted in Step 4)
+- Test: `internal/cli/attach_test.go:27, 54, 76, 144`
+- Test: `internal/cli/open_test.go:110-114`
+- Test: `internal/cli/rebuild_test.go:100-105`
+- Test: `internal/cli/rebuild_check_test.go:28-30, 150-152`
+- Test: `internal/cli/doctor_test.go:285-287`
+- Test: `internal/cli/list_test.go:15-22, 34, 39`
+- Test: `internal/cli/status_test.go:70-72, 152, 157, 243`
+- Test: `internal/cli/stop_test.go:108, 136`
 
 **Interfaces:**
 - Consumes (Task 1): `resolve.Workspace{ID, RepositoryID, Slug, RepoRoot, Session, SessionName}`.
@@ -2142,7 +2731,404 @@ share one container instead of demanding N."
 
 Autostart's operation record is deliberately dropped: `last_operations` stays keyed on `workspace_id` (spec §5.2 — "an operation is performed by a session, not by a repository"), and autostart is performed by no session. It records the container binding on the repository and nothing else. The tests below assert the binding in place of the old `autostart` operation.
 
-- [ ] **Step 1: Write the failing test — rewrite `internal/controller/autostart_test.go` in full**
+- [ ] **Step 1: Convert the doctor orphan check**
+
+`orphanedSessions` builds a workspace-ID-to-path map so `orphanItem` can stat the path and warn
+when it has disappeared. Only the field read changes; the local variable and messages downstream
+still speak of a worktree, which stays accurate — the repository root is one.
+
+Before (line 29-32):
+
+```go
+	registered := make(map[string]string, len(records))
+	for _, rec := range records {
+		registered[rec.ID] = rec.Worktree
+	}
+```
+
+After:
+
+```go
+	registered := make(map[string]string, len(records))
+	for _, rec := range records {
+		registered[rec.ID] = rec.RepoRoot
+	}
+```
+
+`internal/doctor` has no other read of `Worktree` or `IsPrimary`: `internal/doctor/integration_test.go:44`
+passes `controller.KeyWorktree`, which is the tmux option name `@dev_worktree` and does not change.
+
+- [ ] **Step 2: Convert the rebuild classifier's identity gate**
+
+`classify.go` compares a live session's tmux keys against the stored row. The `s.*` reads are
+`controller.LiveSession` and keep their names; the `row.*` reads are `state.Record` and become
+`RepoRoot`.
+
+Before (line 151):
+
+```go
+		case row != nil && (row.Slug != s.Slug || row.Worktree != s.Worktree):
+```
+
+After:
+
+```go
+		case row != nil && (row.Slug != s.Slug || row.RepoRoot != s.Worktree):
+```
+
+Before (lines 198-206):
+
+```go
+// identityMismatchReason prints both identities side by side, because the
+// disagreement is the whole finding.
+func identityMismatchReason(s controller.LiveSession, row *state.Record) string {
+	return fmt.Sprintf(
+		"session %q carries slug %q and worktree %q, but workspace %s is recorded "+
+			"as slug %q and worktree %q; that contradiction is evidence of "+
+			"corruption or collision rather than a match, so nothing is written.",
+		s.Name, s.Slug, s.Worktree, row.ID, row.Slug, row.Worktree)
+}
+```
+
+After — the operator-facing wording is left byte-for-byte alone so the existing message assertions
+keep passing and operators' saved notes keep matching; only the row-side argument moves:
+
+```go
+// identityMismatchReason prints both identities side by side, because the
+// disagreement is the whole finding.
+func identityMismatchReason(s controller.LiveSession, row *state.Record) string {
+	return fmt.Sprintf(
+		"session %q carries slug %q and worktree %q, but workspace %s is recorded "+
+			"as slug %q and worktree %q; that contradiction is evidence of "+
+			"corruption or collision rather than a match, so nothing is written.",
+		s.Name, s.Slug, s.Worktree, row.ID, row.Slug, row.RepoRoot)
+}
+```
+
+- [ ] **Step 3: Point the CLI's and rebuild's readers at the repository root**
+
+`internal/cli` is the widest consumer of both renamed types, and its test binary links
+`internal/container`, `internal/controller`, `internal/controller/fake`, `internal/doctor`,
+`internal/rebuild` and `internal/tmux` as well (`go list -deps -test ./internal/cli/...`). This task
+is the first to gate `./internal/cli/...`, so every one of those readers has to compile before the
+autostart steps below can run their own tests. The conversions are mechanical and each moves only a
+right-hand side.
+
+Two of the envelope fields have no source left. `worktree` keeps its name and now carries the
+repository root, which is what the tmux option `@dev_worktree` has carried since Task 1, so the
+value is still true to the key. `is_primary` becomes the constant `true`, which is also true: after
+Task 1 every registered workspace *is* a repository. Both fields are deleted, and
+`schema_version` bumped, by Task 7 — that is a user-visible envelope decision and it belongs in the
+task that owns the envelope, not in a compile-driven conversion step. Until then the v1 envelope
+keeps its documented shape and its documented meaning.
+
+The same two-line pair appears at `internal/cli/config.go:136,138`, `internal/cli/open.go:86,88`,
+`internal/cli/attach.go:139,141`, `internal/cli/stop.go:121,123` and
+`internal/cli/status.go:178,180`. Before:
+
+```go
+			Worktree:    ws.Worktree,
+			IsPrimary:   ws.IsPrimary,
+```
+
+After:
+
+```go
+			Worktree:    ws.RepoRoot,
+			IsPrimary:   true,
+```
+
+`internal/cli/config.go:163,166` and `internal/cli/status.go:257,259` read the same two fields off
+`env.Workspace`, which is the `workspaceInfo` DTO rather than a `resolve.Workspace`; they compile
+unchanged and must be left for Task 7.
+
+`internal/cli/list.go:117-118` reads a record instead of a workspace. Before:
+
+```go
+			Worktree:        rec.Worktree,
+			IsPrimary:       rec.IsPrimary,
+```
+
+After:
+
+```go
+			Worktree:        rec.RepoRoot,
+			IsPrimary:       true,
+```
+
+`internal/cli/list.go:134` compares a live session against that record. The `s.*` side is a
+`controller.LiveSession` and keeps its name; only the record side moves. Before:
+
+```go
+			row.IdentityConflict = s.Slug != rec.Slug || s.Worktree != rec.Worktree
+```
+
+After:
+
+```go
+			row.IdentityConflict = s.Slug != rec.Slug || s.RepoRoot != rec.RepoRoot
+```
+
+`internal/cli/autostart.go` needs three changes to compile, and the first is a real behaviour
+change rather than a rename: the primacy filter at line 97 has nothing left to test, because the
+records the store now returns are one per repository. Delete it. Steps 15 and 16 below replace this
+whole loop with an iteration over `Repositories()`, so this edit is deliberately the smallest one
+that compiles and keeps the current behaviour honest in the meantime. Before (lines 96-99):
+
+```go
+	for _, rec := range records {
+		if !rec.IsPrimary {
+			continue
+		}
+```
+
+After:
+
+```go
+	for _, rec := range records {
+```
+
+Lines 107 and 112 stat the stored path and quote it in the failure reason. The operator-facing
+wording stays: "worktree no longer exists" is still true of a repository root, and rewording it
+would churn saved runbooks for no gain. Before:
+
+```go
+		if _, statErr := os.Stat(rec.Worktree); statErr != nil {
+```
+
+After:
+
+```go
+		if _, statErr := os.Stat(rec.RepoRoot); statErr != nil {
+```
+
+Before:
+
+```go
+				entry.Reason = "worktree no longer exists: " + rec.Worktree
+```
+
+After:
+
+```go
+				entry.Reason = "worktree no longer exists: " + rec.RepoRoot
+```
+
+Lines 135-143 rebuild a `resolve.Workspace` out of the record to hand to `controller.Desired`. The
+repository ID has to be carried across, or the repository lock Task 3 added would key on the empty
+string for every autostarted workspace. Before:
+
+```go
+		d := controller.Desired{
+			Workspace: resolve.Workspace{
+				ID:          rec.ID,
+				Slug:        rec.Slug,
+				Worktree:    rec.Worktree,
+				SessionName: rec.ProposedSession,
+				IsPrimary:   rec.IsPrimary,
+			},
+```
+
+After:
+
+```go
+		d := controller.Desired{
+			Workspace: resolve.Workspace{
+				ID:           rec.ID,
+				RepositoryID: rec.RepositoryID,
+				Slug:         rec.Slug,
+				RepoRoot:     rec.RepoRoot,
+				SessionName:  rec.ProposedSession,
+			},
+```
+
+Finally `internal/rebuild/apply.go:326-334`. `registeredFor` reports the resolver's identity for a
+workspace, and its doc comment explains a divergence that can no longer happen. Before:
+
+```go
+// registeredFor reports the resolver's identity for ws, not the stored
+// row's, by design. Slug and Worktree are provably equal to the row's —
+// the identity gate above requires it — so only IsPrimary can diverge,
+// and only if the worktree's primary-ness changed since registration. In
+// that case this reports the resolver's current view, not the row's.
+func registeredFor(ws resolve.Workspace, session string) *Registered {
+	return &Registered{
+		ID:        ws.ID,
+		Slug:      ws.Slug,
+		Worktree:  ws.Worktree,
+		IsPrimary: ws.IsPrimary,
+		Session:   session,
+	}
+}
+```
+
+After — the comment's premise is gone with the field, so it says what is now true:
+
+```go
+// registeredFor reports the resolver's identity for ws, not the stored
+// row's, by design. Slug and the repository root are provably equal to
+// the row's — the identity gate above requires it — so the two views can
+// no longer diverge at all; the function stays as the single place the
+// report is built, rather than being inlined at both call sites.
+func registeredFor(ws resolve.Workspace, session string) *Registered {
+	return &Registered{
+		ID:        ws.ID,
+		Slug:      ws.Slug,
+		Worktree:  ws.RepoRoot,
+		IsPrimary: true,
+		Session:   session,
+	}
+}
+```
+
+`internal/rebuild/apply.go:349` closes the same conflict message. The three `s.*` reads on that line
+and the one above it are `controller.LiveSession` and stay; only the last argument moves. Before:
+
+```go
+		s.WorkspaceID, s.Slug, s.Worktree,
+		s.Worktree, ws.ID, ws.Slug, ws.Worktree)
+```
+
+After:
+
+```go
+		s.WorkspaceID, s.Slug, s.Worktree,
+		s.Worktree, ws.ID, ws.Slug, ws.RepoRoot)
+```
+
+Run: `go build ./...`
+
+Expected: exit 0 with no output. This is the point in the plan at which the whole tree compiles
+again; it has not since Task 1 removed the fields. `go test ./...` still fails, because
+`internal/doctor`'s own tests are not converted until Task 9.
+- [ ] **Step 4: Convert the CLI test readers**
+
+A sweep of the tree found eight CLI test files that read `Workspace.Worktree`, `Record.IsPrimary`,
+or build a `resolve.Workspace` literal in the dropped shape, and no earlier task's Files block
+names any of them. They land here because this task is the first to gate `./internal/cli/...`, and
+a Go test binary only runs when *every* test file in the package compiles — one unconverted
+literal in `attach_test.go` would take out this task's own autostart tests along with the rest of
+the package.
+
+Most of them are `controller.LiveSession` literals, where the *field* stays `Worktree` — it mirrors
+the `@dev_worktree` user option — and only the right-hand side moves to `RepoRoot`. Make these four
+edits in `internal/cli/attach_test.go` (lines 27, 54, 76 and 144; line 127's literal
+`Worktree: "/somewhere/else"` reads nothing and stays):
+
+```go
+	live := controller.LiveSession{
+		Name: ws.SessionName, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.RepoRoot,
+	}
+```
+
+`internal/cli/open_test.go:110-114` is the same change inside a helper:
+
+```go
+func ownLive(ws resolve.Workspace, name string) controller.LiveSession {
+	return controller.LiveSession{
+		Name: name, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.RepoRoot,
+	}
+}
+```
+
+`internal/cli/rebuild_test.go:100-105`:
+
+```go
+	installLiveSessions(t, []controller.LiveSession{{
+		Name:        "new-name",
+		WorkspaceID: ws.ID,
+		Slug:        ws.Slug,
+		Worktree:    ws.RepoRoot,
+	}}, nil)
+```
+
+`internal/cli/status_test.go:70-72`:
+
+```go
+	live := controller.LiveSession{
+		Name: actual, WorkspaceID: ws.ID, Slug: ws.Slug, Worktree: ws.RepoRoot,
+	}
+```
+
+The remaining sites are `resolve.Workspace` literals, which do change field names and must now
+carry a repository ID — registration writes a repository row keyed on it.
+`internal/cli/rebuild_check_test.go:28-30` before:
+
+```go
+	if err := st.RegisterWorkspace(resolve.Workspace{
+		ID: "id-1", Slug: "slab", Worktree: "/w/slab", SessionName: "slab", IsPrimary: true,
+	}, "sha256:abc", time.Now()); err != nil {
+```
+
+after:
+
+```go
+	if err := st.RegisterWorkspace(resolve.Workspace{
+		ID: "id-1", RepositoryID: "repo-1", Slug: "slab", RepoRoot: "/w/slab", SessionName: "slab",
+	}, "sha256:abc", time.Now()); err != nil {
+```
+
+`internal/cli/rebuild_check_test.go:150-152` is the same shape for the other workspace:
+
+```go
+	if err := st.RegisterWorkspace(resolve.Workspace{
+		ID: "id-2", RepositoryID: "repo-2", Slug: "other", RepoRoot: "/w/other", SessionName: "other",
+	}, "sha256:def", time.Now()); err != nil {
+```
+
+`internal/cli/doctor_test.go:285-287` repeats the `id-1` literal and takes the same replacement:
+
+```go
+	if err := st.RegisterWorkspace(resolve.Workspace{
+		ID: "id-1", RepositoryID: "repo-1", Slug: "slab", RepoRoot: "/w/slab", SessionName: "slab",
+	}, "sha256:abc", time.Now()); err != nil {
+```
+
+`internal/cli/list_test.go:15-22` is the fixture the whole file registers through, and because
+`RecordContainerObservation` now takes a repository ID the two calls that bind `"w1"` have to name
+the repository instead. Give the helper a derived repository ID so the two stay in step:
+
+```go
+func listWorkspace(id, slug string) resolve.Workspace {
+	return resolve.Workspace{
+		ID:           id,
+		RepositoryID: "r-" + id,
+		Slug:         slug,
+		RepoRoot:     "/w/" + slug,
+		SessionName:  slug,
+	}
+}
+```
+
+Then in `seededListStore`, change both `s.RecordContainerObservation("w1", ...)` calls
+(`list_test.go:34` and `:39`) to `s.RecordContainerObservation("r-w1", ...)`. The binding belongs to
+the repository, and the list rows still read it through the record's projection, which is exactly
+the sharing this plan introduces.
+
+`internal/cli/status_test.go` binds through a resolved workspace rather than a literal, so its three
+`RecordContainerObservation(ws.ID, ...)` calls (`:152`, `:157`, `:243`) become
+`RecordContainerObservation(ws.RepositoryID, ...)`.
+
+`internal/cli/lifecycle_test.go` has three reads outside the block Step 18 rewrites. Line 90 asserts
+the tmux-side value, so the comparison keeps `live[0].Worktree` on the left and moves only the right:
+
+```go
+	if len(live) != 1 || live[0].WorkspaceID != ws.ID || live[0].Worktree != ws.RepoRoot {
+		t.Fatalf("live = %+v", live)
+	}
+```
+
+Lines 123 and 126 build a pre-projectmux session by hand; both feed the repository root in, the
+second through the unchanged `@dev_worktree` option:
+
+```go
+		{"new-session", "-d", "-s", "bash-era", "-c", ws.RepoRoot},
+		{"set-option", "-t", "bash-era", controller.KeyWorkspaceID, ws.ID},
+		{"set-option", "-t", "bash-era", controller.KeySlug, ws.Slug},
+		{"set-option", "-t", "bash-era", controller.KeyWorktree, ws.RepoRoot},
+```
+
+- [ ] **Step 5: Write the failing test — rewrite `internal/controller/autostart_test.go` in full**
 
 ```go
 package controller_test
@@ -2320,12 +3306,12 @@ func TestStartRepositoryContainerUnobservableFails(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [ ] **Step 6: Run the test to verify it fails**
 
 Run: `go test ./internal/controller/ -run TestStartRepositoryContainer -v`
 Expected: FAIL to build with `undefined: controller.RepoDesired` and `r.ctrl.StartRepositoryContainer undefined (type *controller.Controller has no field or method StartRepositoryContainer)`.
 
-- [ ] **Step 3: Record the repository ID in the container fakes**
+- [ ] **Step 7: Record the repository ID in the container fakes**
 
 Replace the two `ws.ID` appends in `internal/controller/fake/fake.go` (lines 84 and 359).
 
@@ -2351,7 +3337,322 @@ func (a *ContainerActuator) StartContainer(_ context.Context, ws resolve.Workspa
 }
 ```
 
-- [ ] **Step 4: Narrow `observeContainer` to the binding it actually reads**
+- [ ] **Step 8: Give the fake store repositories and move its binding onto them**
+
+Steps 1 and 8 call `s.Repositories()` on `*fake.Store` and read `repo.Container`, and `fake` today
+exposes only `Workspace` and `Workspaces` (`internal/controller/fake/fake.go:236-262`) with the
+binding living on the record. The fake is a non-test file standing in for the SQLite store across
+the controller, CLI, doctor, and rebuild tests, so it has to mirror the split the real store just
+grew: a repository row per project, the binding keyed on the repository, and the record's
+`Container` a read-only projection of it.
+
+First widen the interface the fake satisfies. In `internal/controller/interfaces.go:25-33`, add
+`Repositories` to `Store` and rename `RecordContainerObservation`'s first parameter, which is now a
+repository ID rather than a workspace ID:
+
+```go
+// Store is the slice of the state store the controller uses. *state.Store
+// satisfies it; fakes mirror its semantics for tests.
+//
+// RecordContainerObservation takes a repository ID because a container
+// belongs to a repository and is shared by every session on it, while the
+// operation and reconciliation calls stay keyed on the workspace: an
+// operation is performed by a session (spec §5.2).
+type Store interface {
+	RegisterWorkspace(ws resolve.Workspace, desiredDigest string, now time.Time) error
+	AllocateSessionName(workspaceID string, now time.Time) (string, error)
+	AdoptSessionName(workspaceID, name string, now time.Time) error
+	RecordContainerObservation(repositoryID string, obs state.ContainerObservation, now time.Time) error
+	RecordOperation(workspaceID string, op state.Operation, now time.Time) error
+	CommitReconciliation(workspaceID string, r state.ReconciliationResult, now time.Time) error
+	Workspace(id string) (state.Record, error)
+	Workspaces() ([]state.Record, error)
+	Repositories() ([]state.Repository, error)
+}
+```
+
+`cli.stateStore` embeds `controller.Store`, and `guardedStore` in `internal/cli/wiring_test.go:24-31`
+embeds `*fake.Store`, so both pick the new method up without an edit of their own.
+
+Now the fake. Replace the struct and constructor at `internal/controller/fake/fake.go:91-99`:
+
+```go
+// Store is an in-memory controller.Store. Repositories and container
+// bindings live in maps of their own rather than on the record, mirroring
+// the repositories and repository-keyed container_bindings tables: every
+// session on a repository must read back the one binding its siblings
+// wrote, which is what lets a shared container be started once.
+type Store struct {
+	mu           sync.Mutex
+	records      map[string]*state.Record
+	repositories map[string]*state.Repository
+	containers   map[string]*state.ContainerBinding
+}
+
+func NewStore() *Store {
+	return &Store{
+		records:      map[string]*state.Record{},
+		repositories: map[string]*state.Repository{},
+		containers:   map[string]*state.ContainerBinding{},
+	}
+}
+```
+
+Replace `RegisterWorkspace` (`:101-123`) so it writes both rows. Task 3 already moved its field
+reads onto `RepositoryID` and `RepoRoot` — that was the minimum that compiled. What changes here is
+what it *writes*: a repository row alongside the session row, which is what makes `Repositories()`
+below return anything:
+
+```go
+func (s *Store) RegisterWorkspace(ws resolve.Workspace, desiredDigest string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.upsertRepositoryLocked(ws, now)
+	digest := desiredDigest
+	if rec, ok := s.records[ws.ID]; ok {
+		rec.RepositoryID = ws.RepositoryID
+		rec.Slug = ws.Slug
+		rec.RepoRoot = ws.RepoRoot
+		rec.Session = ws.Session
+		rec.ProposedSession = ws.SessionName
+		rec.DesiredDigest = &digest
+		rec.UpdatedAt = now
+		return nil
+	}
+	s.records[ws.ID] = &state.Record{
+		ID:              ws.ID,
+		RepositoryID:    ws.RepositoryID,
+		Slug:            ws.Slug,
+		RepoRoot:        ws.RepoRoot,
+		Session:         ws.Session,
+		ProposedSession: ws.SessionName,
+		DesiredDigest:   &digest,
+		RegisteredAt:    now,
+		UpdatedAt:       now,
+	}
+	return nil
+}
+
+// upsertRepositoryLocked mirrors the real store's two-statement
+// registration: the repository row is written first and the session row
+// references it. Registering a second session on a repository refreshes
+// the repository's mutable columns and deliberately leaves its binding
+// alone — a sibling opening a session must not disturb a running
+// container.
+func (s *Store) upsertRepositoryLocked(ws resolve.Workspace, now time.Time) {
+	if repo, ok := s.repositories[ws.RepositoryID]; ok {
+		repo.Slug = ws.Slug
+		repo.RepoRoot = ws.RepoRoot
+		repo.UpdatedAt = now
+		return
+	}
+	s.repositories[ws.RepositoryID] = &state.Repository{
+		ID:           ws.RepositoryID,
+		Slug:         ws.Slug,
+		RepoRoot:     ws.RepoRoot,
+		RegisteredAt: now,
+		UpdatedAt:    now,
+	}
+}
+```
+
+Replace `RecordContainerObservation` and `recordContainerLocked` (`:155-189`) so both key on the
+repository. Tri-state retention is unchanged, only relocated: a degraded observation updates the
+repository's binding rather than dropping it:
+
+```go
+func (s *Store) RecordContainerObservation(repositoryID string, obs state.ContainerObservation, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.recordContainerLocked(repositoryID, obs, now)
+}
+
+func (s *Store) recordContainerLocked(repositoryID string, obs state.ContainerObservation, now time.Time) error {
+	if _, ok := s.repositories[repositoryID]; !ok {
+		return fmt.Errorf("repository %s: %w", repositoryID, state.ErrNotFound)
+	}
+	switch obs.Health {
+	case state.HealthPresent:
+		if obs.ContainerID == "" {
+			return fmt.Errorf("a present container observation must carry a container ID")
+		}
+		s.containers[repositoryID] = &state.ContainerBinding{
+			Kind:          obs.Kind,
+			ContainerID:   obs.ContainerID,
+			ContainerUser: obs.ContainerUser,
+			Workdir:       obs.Workdir,
+			Health:        obs.Health,
+			ObservedAt:    now,
+		}
+	case state.HealthMissing, state.HealthUnknown:
+		if b, ok := s.containers[repositoryID]; ok {
+			b.Health = obs.Health
+			b.ObservedAt = now
+		}
+	default:
+		return fmt.Errorf("invalid container health %q", obs.Health)
+	}
+	return nil
+}
+```
+
+`CommitReconciliation` (`:209-234`) still takes a workspace ID, so its container branch has to look
+the repository up on the record it already fetched. Replace the branch that reads
+`if r.Container != nil {`:
+
+```go
+	if r.Container != nil {
+		// The observation is recorded against the repository the session
+		// belongs to, not the session, so a sibling reads the same binding.
+		if err := s.recordContainerLocked(rec.RepositoryID, *r.Container, now); err != nil {
+			return err
+		}
+	}
+```
+
+Turn `copyRecord` (`:264-291`) into a method so it can attach the shared binding, which is what the
+real store's `LEFT JOIN` produces, and update its two call sites at `:243` and `:253` to
+`s.copyRecordLocked(rec)`:
+
+```go
+// copyRecordLocked deep-copies a record and attaches the repository's
+// shared container binding. A session therefore sees whatever container
+// its repository is bound to, including one a sibling session started.
+func (s *Store) copyRecordLocked(rec *state.Record) state.Record {
+	out := *rec
+	if rec.ActualSession != nil {
+		v := *rec.ActualSession
+		out.ActualSession = &v
+	}
+	if rec.DesiredDigest != nil {
+		v := *rec.DesiredDigest
+		out.DesiredDigest = &v
+	}
+	if rec.AppliedDigest != nil {
+		v := *rec.AppliedDigest
+		out.AppliedDigest = &v
+	}
+	out.Container = nil
+	if b, ok := s.containers[rec.RepositoryID]; ok {
+		c := *b
+		out.Container = &c
+	}
+	if rec.LastOperation != nil {
+		o := *rec.LastOperation
+		out.LastOperation = &o
+		if rec.LastOperation.ExitStatus != nil {
+			e := *rec.LastOperation.ExitStatus
+			out.LastOperation.ExitStatus = &e
+		}
+	}
+	return out
+}
+```
+
+Finally add `Repositories` next to `Workspaces`, matching the real store's ordering
+(`ORDER BY r.slug, r.repo_root`, Task 2 Step 11) and the fake's existing copy-on-read discipline —
+callers get values, never the pointers the map holds:
+
+```go
+// Repositories returns every registered repository ordered by slug, then
+// repository root, mirroring the real store's ORDER BY
+// (internal/state/store.go). Container is the repository's binding, copied
+// out so a caller cannot mutate stored state through the result.
+func (s *Store) Repositories() ([]state.Repository, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]state.Repository, 0, len(s.repositories))
+	for _, repo := range s.repositories {
+		copied := *repo
+		copied.Container = nil
+		if b, ok := s.containers[repo.ID]; ok {
+			c := *b
+			copied.Container = &c
+		}
+		out = append(out, copied)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Slug != out[j].Slug {
+			return out[i].Slug < out[j].Slug
+		}
+		return out[i].RepoRoot < out[j].RepoRoot
+	})
+	return out, nil
+}
+```
+
+- [ ] **Step 9: Re-key every container-observation call site on the repository**
+
+Step 8 changed what the fake's first argument *means* without changing its type, so nothing the
+compiler can see moves. Every existing caller still passes a workspace ID, which now writes a
+binding under a key no repository will ever read back, and the symptom is a passing compile with
+tests that see an empty `Container` projection. Each site below takes the repository ID of the
+workspace it already has in hand.
+
+`internal/controller/ensure_test.go:624` and `:692` register through `ensureWorkspace()`, whose
+`RepositoryID` is `"r1"` (Task 3, Step 1). Before:
+
+```go
+		if err := r.store.RecordContainerObservation("w1", state.ContainerObservation{
+```
+
+After:
+
+```go
+		if err := r.store.RecordContainerObservation("r1", state.ContainerObservation{
+```
+
+`internal/controller/stop_test.go:145` and `:188` register through the same fixture and take the
+same edit, at one less level of indentation:
+
+```go
+	if err := r.store.RecordContainerObservation("r1", state.ContainerObservation{
+```
+
+`internal/controller/observe_test.go:130`, `:226` and `:251` use the package's own workspace
+fixture, which Task 3's Step 6 gave a `RepositoryID`. Pass that same value rather than `"w1"`:
+
+```go
+	if err := d.store.RecordContainerObservation("r1", state.ContainerObservation{
+```
+
+`internal/controller/fake/fake_test.go:51` and `:54` build their workspace with
+`testWorkspace(id, session)`, whose `RepositoryID` is `"r-" + id` (Task 3, Step 7). The two calls
+register `"w1"`, so both become:
+
+```go
+	if err := s.RecordContainerObservation("r-w1", obs, testTime); err != nil {
+```
+
+`internal/controller/autostart_test.go:53` needs no edit: Step 5 of this task rewrote that file in
+full, and the rewritten fixtures already key on the repository.
+
+`internal/cli/wiring_test.go:44` declares the method on `guardedStore` with unnamed parameters, so
+the widened interface does not change it. Its message string `"RecordContainerObservation"` is the
+method name and stays.
+
+`internal/cli/stop_test.go:108` and `:136` hold a resolved workspace. Before:
+
+```go
+	if err := s.RecordContainerObservation(ws.ID, state.ContainerObservation{
+```
+
+After:
+
+```go
+	if err := s.RecordContainerObservation(ws.RepositoryID, state.ContainerObservation{
+```
+
+`internal/cli/list_test.go:34,39` and `internal/cli/status_test.go:152,157,243` are converted by
+Step 4 above, which owns those two files.
+
+`internal/doctor/doctor_test.go:505` calls the *real* store, whose key changed in Task 2. It is
+converted in Task 9, which is the first task to gate `./internal/doctor/...`.
+`internal/state/store_test.go` calls the real store too, and Task 2 owns it: its
+`RecordContainerObservation("w1", ...)` calls (`:215`, `:238`, `:243`, `:265`, `:268`, `:272`,
+`:291`, `:302`, `:307`) are part of the Step 2 rewrite there, where `"w1"` becomes the registered
+repository ID and the `"absent"` case at `:302` becomes an unregistered *repository*.
+- [ ] **Step 10: Narrow `observeContainer` to the binding it actually reads**
 
 In `internal/controller/observe.go`, change the parameter and the one stored-binding branch, then the single call site at line 100.
 
@@ -2384,7 +3685,7 @@ func (c *Controller) observeContainer(ctx context.Context, d Desired, binding *s
 	return snap, nil
 ```
 
-- [ ] **Step 5: Replace `StartWorkspaceContainer` with `StartRepositoryContainer`**
+- [ ] **Step 11: Replace `StartWorkspaceContainer` with `StartRepositoryContainer`**
 
 Replace `internal/controller/autostart.go:22-66` (the doc comment and the function) with the following; the `errors` import is no longer used and comes out.
 
@@ -2501,12 +3802,12 @@ import (
 )
 ```
 
-- [ ] **Step 6: Run the controller tests to verify they pass**
+- [ ] **Step 12: Run the controller tests to verify they pass**
 
 Run: `go test ./internal/controller/... -v`
 Expected: PASS, including the four `TestStartRepositoryContainer*` cases.
 
-- [ ] **Step 7: Write the failing CLI test — rewrite the autostart fixture and matrix**
+- [ ] **Step 13: Write the failing CLI test — rewrite the autostart fixture and matrix**
 
 Replace `internal/cli/autostart_test.go:16-161`. The old "secondary" row (a non-primary worktree) becomes a second *session* on the eligible repository: the successor to the case `is_primary` used to filter.
 
@@ -2678,12 +3979,12 @@ func TestAutostartAllHealthyExitsZero(t *testing.T) {
 }
 ```
 
-- [ ] **Step 8: Run the CLI test to verify it fails**
+- [ ] **Step 14: Run the CLI test to verify it fails**
 
 Run: `go test ./internal/cli/ -run TestAutostart -v`
 Expected: FAIL to build with `env.Repositories undefined (type autostartEnvelope has no field or method Repositories)` and `undefined: fake.Store.Repositories` usage in `runAutostart`'s old body still calling `st.Workspaces()`.
 
-- [ ] **Step 9: Rewrite `runAutostart` over repositories**
+- [ ] **Step 15: Rewrite `runAutostart` over repositories**
 
 Replace `internal/cli/autostart.go:18-42` (help text and envelope types):
 
@@ -2718,7 +4019,7 @@ type autostartEntry struct {
 }
 ```
 
-- [ ] **Step 10: Rewrite the loop body**
+- [ ] **Step 16: Rewrite the loop body**
 
 Replace `internal/cli/autostart.go:76-189` (the store read through the tail) with:
 
@@ -2831,12 +4132,12 @@ Replace `internal/cli/autostart.go:76-189` (the store read through the tail) wit
 
 Drop `"github.com/gambtho/projectmux/internal/resolve"` from the import block: nothing in the file builds a workspace any more.
 
-- [ ] **Step 11: Run the CLI autostart tests**
+- [ ] **Step 17: Run the CLI autostart tests**
 
 Run: `go test ./internal/cli/ -run TestAutostart -v`
 Expected: PASS.
 
-- [ ] **Step 12: Rewrite the `is_primary` regression test**
+- [ ] **Step 18: Rewrite the `is_primary` regression test**
 
 Replace `internal/cli/lifecycle_test.go:439-523` in full. The behavior it protects — that a recovered installation still starts this container, exactly once — is asserted against the repository row and a real autostart run.
 
@@ -2964,12 +4265,12 @@ func TestLifecycleRebuildThenAutostart(t *testing.T) {
 }
 ```
 
-- [ ] **Step 13: Run the lifecycle test**
+- [ ] **Step 19: Run the lifecycle test**
 
 Run: `go test ./internal/cli/ -run TestLifecycleRebuildThenAutostart -v`
 Expected: PASS (skips if tmux is not installed).
 
-- [ ] **Step 14: Update the usage line and the command documentation**
+- [ ] **Step 20: Update the usage line and the command documentation**
 
 `internal/cli/cli.go:50-51`:
 
@@ -2995,10 +4296,15 @@ repository however many sessions it has. Autostart starts containers; it does
 not create tmux sessions.
 ```
 
-- [ ] **Step 15: Format, run the full suite, and commit**
+- [ ] **Step 21: Format, run the owned packages, and commit**
 
-Run: `gofmt -l . && go test ./...`
-Expected: no files listed by `gofmt`, all packages PASS.
+Run: `gofmt -l internal/controller internal/cli && go test ./internal/controller/... ./internal/cli/...`
+Expected: no files listed by `gofmt`, both packages PASS.
+
+The gate is scoped rather than run as `go test ./...` because `internal/doctor`'s own tests
+still read the dropped fields until Task 9 — see "Task Ordering and Interactions" above.
+Everything else in the tree builds and passes from the end of Task 5, so this line covers
+every package whose behaviour this task can change.
 
 ```
 git commit -am "feat(autostart): start one container per repository
@@ -3013,7 +4319,22 @@ StartWorkspaceContainer becomes StartRepositoryContainer and takes a
 state.Repository, so starting a container needs no session and reads no
 workspace row. Its report is keyed by repository ID and slug. The
 autostart operation record is dropped: last_operations belongs to a
-session, and autostart is performed by none."
+session, and autostart is performed by none.
+
+controller.Store gains Repositories and its RecordContainerObservation
+takes a repository ID. The in-memory fake follows the same split: a
+repositories map, a repository-keyed containers map, and a record whose
+Container is a copied-out projection of its repository's binding, which
+is the join the real store performs.
+
+This is also where the rest of the tree converges. internal/cli is the
+first package whose test binary links container, controller, doctor,
+rebuild and tmux together, so the last readers of the renamed fields
+convert here rather than in a later task: the doctor orphan check, the
+rebuild classifier and registeredFor, the CLI envelope construction, and
+the CLI test files that build workspaces by hand. The envelopes keep
+their worktree and is_primary field names and their schema_version 1
+shape; Task 7 owns removing them. go build ./... is green from here."
 ```
 
 ### Task 6: `stop --container` refuses while a sibling session is live
@@ -3478,10 +4799,15 @@ under one continuous hold of the repository lock, so a sibling cannot open
 into the gap between them.
 ```
 
-- [ ] **Step 13: Format, run the full suite, and commit**
+- [ ] **Step 13: Format, run the owned packages, and commit**
 
-Run: `gofmt -l . && go test ./...`
-Expected: no files listed by `gofmt`, all packages PASS.
+Run: `gofmt -l internal/controller internal/cli && go test ./internal/controller/... ./internal/cli/...`
+Expected: no files listed by `gofmt`, both packages PASS.
+
+The gate is scoped rather than run as `go test ./...` because `internal/doctor`'s own tests
+still read the dropped fields until Task 9 — see "Task Ordering and Interactions" above.
+Everything else in the tree builds and passes from the end of Task 5, so this line covers
+every package whose behaviour this task can change.
 
 ```
 git commit -am "feat(stop): refuse to stop a shared container under live siblings
@@ -3510,6 +4836,8 @@ the hold by probing the lock from inside StopContainer."
 - Modify: `internal/cli/rebuild.go:50-56` (`rebuildRegistered`), `internal/cli/rebuild.go:124-131`, `internal/cli/rebuild.go:224-229` (the `worktreeResolver` comment)
 - Modify: `internal/rebuild/apply.go:45-52` (`Registered`), `internal/rebuild/apply.go:321-334` (`registeredFor`)
 - Modify: `internal/cli/cli_test.go:185-189`, `internal/cli/cli_test.go:226-228`
+- Test: `internal/rebuild/classify_test.go:26-33`
+- Test: `internal/rebuild/apply_test.go:152-155, 169-183, 193, 216-222, 233-235, 496, 504-505, 516-518`
 - Modify: `docs/commands.md:29-32`, `docs/commands.md:85-89`, `docs/commands.md:100-104`, `docs/commands.md:193-197`
 - Test: `internal/cli/schema_version_test.go`
 
@@ -3517,9 +4845,270 @@ the hold by probing the lock from inside StopContainer."
 - Consumes: `resolve.Workspace{ID, RepositoryID, Slug, RepoRoot, Session, SessionName}` (Task 1); `state.Record` with `RepositoryID`, `RepoRoot`, `Session` and no `Worktree`/`IsPrimary` (Task 2).
 - Produces: `cli.OutputSchemaVersion == 2`; `cli.workspaceInfo{ID, Slug, RepoRoot, Session, SessionName}` with JSON `id`, `slug`, `repo_root`, `session`, `session_name`; `cli.listRow.RepoRoot`/`.Session`; `cli.rebuildRegistered.RepoRoot`; `rebuild.Registered{ID, Slug, RepoRoot, Session}`.
 
+Two things about this task's starting point. Its Step 1 converts the `internal/rebuild` tests, which
+belong to no earlier task's Files block and which this task is the first to gate — `go test
+./internal/rebuild/...` at Step 14 cannot run while `apply_test.go` builds workspaces in the dropped
+shape. And the carriers this task reshapes were already made to *compile* in Task 5: every
+`Worktree:` line below now reads `ws.RepoRoot` or `rec.RepoRoot` on the right and every `IsPrimary:`
+line reads the constant `true`. The field names, the JSON tags and the line structure are untouched,
+which is what this task removes; where a "before" fence below still shows `ws.Worktree`, read it as
+the same line with Task 5's right-hand side.
+
 Nine envelopes read `OutputSchemaVersion` (`doctor.go:113`, `validate.go:75`, `autostart.go:94` besides the seven here), so the single bump moves all of them. Only the seven in the table carry `worktree`/`is_primary`; `autostart`'s own per-repository fields are the autostart task's, and inherit this constant rather than a second one.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Convert the rebuild tests**
+
+`internal/rebuild`'s test files build `state.Record` and `resolve.Workspace` literals in the dropped
+shape. Task 5 converted the package's non-test files so that `internal/cli` could link it, but a
+test file only has to compile when its own package is tested, and this task is the first to do that.
+
+`internal/rebuild/classify_test.go:26-33` before:
+
+```go
+func stored(id, slug, worktree, actual string) state.Record {
+	rec := state.Record{
+		ID:              id,
+		Slug:            slug,
+		Worktree:        worktree,
+		IsPrimary:       true,
+		ProposedSession: slug,
+	}
+```
+
+after:
+
+```go
+func stored(id, slug, repoRoot, actual string) state.Record {
+	rec := state.Record{
+		ID:              id,
+		Slug:            slug,
+		RepoRoot:        repoRoot,
+		ProposedSession: slug,
+	}
+```
+
+The `live()` helper above it builds a `controller.LiveSession` and keeps `Worktree`, as do the
+message assertions quoting `worktree "/w/slab"` — Task 5's classifier conversion left the reason string's wording intact
+precisely so these keep passing.
+
+`internal/rebuild/apply_test.go:169-177` before:
+
+```go
+func workspace(id, slug, worktree, sessionName string, primary bool) resolve.Workspace {
+	return resolve.Workspace{
+		ID:          id,
+		Slug:        slug,
+		Worktree:    worktree,
+		SessionName: sessionName,
+		IsPrimary:   primary,
+	}
+}
+```
+
+after — the `primary` parameter has nothing left to set, so it goes, and the two call sites follow:
+
+```go
+func workspace(id, slug, repoRoot, sessionName string) resolve.Workspace {
+	return resolve.Workspace{
+		ID:          id,
+		Slug:        slug,
+		RepoRoot:    repoRoot,
+		SessionName: sessionName,
+	}
+}
+```
+
+`internal/rebuild/apply_test.go:179-183` before:
+
+```go
+func projectmux() resolve.Workspace {
+	return workspace(
+		"1111111111111111111111111111111111111111111111111111111111111111",
+		"projectmux", "/src/projectmux", "projectmux", true)
+}
+```
+
+after:
+
+```go
+func projectmux() resolve.Workspace {
+	return workspace(
+		"1111111111111111111111111111111111111111111111111111111111111111",
+		"projectmux", "/src/projectmux", "projectmux")
+}
+```
+
+`internal/rebuild/apply_test.go:152-155` before:
+
+```go
+func (h *harness) know(ws resolve.Workspace, digest string) {
+	h.resolver.byWorktree[ws.Worktree] = ws
+	h.config.digests[ws.Slug] = digest
+}
+```
+
+after:
+
+```go
+func (h *harness) know(ws resolve.Workspace, digest string) {
+	h.resolver.byWorktree[ws.RepoRoot] = ws
+	h.config.digests[ws.Slug] = digest
+}
+```
+
+`internal/rebuild/apply_test.go:187-195` before:
+
+```go
+func liveSession(ws resolve.Workspace, name string) controller.LiveSession {
+	return controller.LiveSession{
+		ID:          "$1",
+		Name:        name,
+		WorkspaceID: ws.ID,
+		Slug:        ws.Slug,
+		Worktree:    ws.Worktree,
+	}
+}
+```
+
+after — the `LiveSession` field name stays, only its source moves:
+
+```go
+func liveSession(ws resolve.Workspace, name string) controller.LiveSession {
+	return controller.LiveSession{
+		ID:          "$1",
+		Name:        name,
+		WorkspaceID: ws.ID,
+		Slug:        ws.Slug,
+		Worktree:    ws.RepoRoot,
+	}
+}
+```
+
+`internal/rebuild/apply_test.go:216-235` before:
+
+```go
+	want := []Registered{{
+		ID:        ws.ID,
+		Slug:      "projectmux",
+		Worktree:  "/src/projectmux",
+		IsPrimary: true,
+		Session:   "projectmux",
+	}}
+	if !reflect.DeepEqual(report.Registered, want) {
+		t.Fatalf("Registered = %+v, want %+v", report.Registered, want)
+	}
+
+	rec, err := h.fakeStore.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.ActualSession == nil || *rec.ActualSession != "projectmux" {
+		t.Errorf("ActualSession = %v, want %q", rec.ActualSession, "projectmux")
+	}
+	if !rec.IsPrimary {
+		t.Errorf("IsPrimary = false, want true — it comes from the resolver, not the session keys")
+	}
+```
+
+after — the `IsPrimary` assertion made the point that registration reads the resolver rather than
+the tmux keys, and `RepoRoot` is now the field that carries that point, so it takes over the check
+rather than being deleted outright:
+
+```go
+	want := []Registered{{
+		ID:       ws.ID,
+		Slug:     "projectmux",
+		RepoRoot: "/src/projectmux",
+		Session:  "projectmux",
+	}}
+	if !reflect.DeepEqual(report.Registered, want) {
+		t.Fatalf("Registered = %+v, want %+v", report.Registered, want)
+	}
+
+	rec, err := h.fakeStore.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.ActualSession == nil || *rec.ActualSession != "projectmux" {
+		t.Errorf("ActualSession = %v, want %q", rec.ActualSession, "projectmux")
+	}
+	if rec.RepoRoot != "/src/projectmux" {
+		t.Errorf("RepoRoot = %q, want %q — it comes from the resolver, not the session keys",
+			rec.RepoRoot, "/src/projectmux")
+	}
+```
+
+`internal/rebuild/apply_test.go:492-518` before:
+
+```go
+// Slug and worktree deliberately match: a row disagreeing on those is an
+// identity mismatch, which classification refuses before it ever reaches
+// application.
+func seedRecorded(t *testing.T, store *fake.Store, ws resolve.Workspace) {
+	t.Helper()
+	recorded := workspace(ws.ID, ws.Slug, ws.Worktree, "recorded-proposed", false)
+	if err := store.RegisterWorkspace(recorded, "sha256:recorded", testTime); err != nil {
+		t.Fatalf("seeding the recorded row: %v", err)
+	}
+}
+
+func assertRecordedFieldsUntouched(t *testing.T, rec state.Record, ws resolve.Workspace) {
+	t.Helper()
+	if rec.IsPrimary {
+		t.Errorf("IsPrimary = true, want the recorded false: adoption must not re-register")
+	}
+	if rec.ProposedSession != "recorded-proposed" {
+		t.Errorf("ProposedSession = %q, want %q", rec.ProposedSession, "recorded-proposed")
+	}
+	if rec.DesiredDigest == nil || *rec.DesiredDigest != "sha256:recorded" {
+		t.Errorf("DesiredDigest = %v, want %q", rec.DesiredDigest, "sha256:recorded")
+	}
+	if rec.Slug != ws.Slug {
+		t.Errorf("Slug = %q, want %q", rec.Slug, ws.Slug)
+	}
+	if rec.Worktree != ws.Worktree {
+		t.Errorf("Worktree = %q, want %q", rec.Worktree, ws.Worktree)
+	}
+}
+```
+
+after — `ProposedSession` and `DesiredDigest` still differ between the seeded row and what a
+re-registration would write, so the test keeps its teeth without `IsPrimary`:
+
+```go
+// Slug and repository root deliberately match: a row disagreeing on those
+// is an identity mismatch, which classification refuses before it ever
+// reaches application.
+func seedRecorded(t *testing.T, store *fake.Store, ws resolve.Workspace) {
+	t.Helper()
+	recorded := workspace(ws.ID, ws.Slug, ws.RepoRoot, "recorded-proposed")
+	if err := store.RegisterWorkspace(recorded, "sha256:recorded", testTime); err != nil {
+		t.Fatalf("seeding the recorded row: %v", err)
+	}
+}
+
+func assertRecordedFieldsUntouched(t *testing.T, rec state.Record, ws resolve.Workspace) {
+	t.Helper()
+	if rec.ProposedSession != "recorded-proposed" {
+		t.Errorf("ProposedSession = %q, want %q: adoption must not re-register",
+			rec.ProposedSession, "recorded-proposed")
+	}
+	if rec.DesiredDigest == nil || *rec.DesiredDigest != "sha256:recorded" {
+		t.Errorf("DesiredDigest = %v, want %q", rec.DesiredDigest, "sha256:recorded")
+	}
+	if rec.Slug != ws.Slug {
+		t.Errorf("Slug = %q, want %q", rec.Slug, ws.Slug)
+	}
+	if rec.RepoRoot != ws.RepoRoot {
+		t.Errorf("RepoRoot = %q, want %q", rec.RepoRoot, ws.RepoRoot)
+	}
+}
+```
+
+The two `controller.LiveSession` literals at lines 254-260 and 410-416 name a vanished path in
+`Worktree`; that field is unchanged and they stay exactly as they are.
+
+- [ ] **Step 2: Write the failing test**
 
 Create `internal/cli/schema_version_test.go`:
 
@@ -3679,13 +5268,13 @@ func TestRebuildEnvelopeIsSchemaV2(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `go test ./internal/cli/ -run 'EnvelopeIsSchemaV2' -v`
 
 Expected: all seven FAIL with `schema_version = 1, want 2`, plus `envelope still carries is_primary` and `has no repo_root` on each.
 
-- [ ] **Step 3: Bump the constant**
+- [ ] **Step 4: Bump the constant**
 
 In `internal/cli/config.go:19-22`:
 
@@ -3701,7 +5290,7 @@ In `internal/cli/config.go:19-22`:
 const OutputSchemaVersion = 2
 ```
 
-- [ ] **Step 4: Reshape `workspaceInfo`**
+- [ ] **Step 5: Reshape `workspaceInfo`**
 
 In `internal/cli/config.go:51-57`:
 
@@ -3719,7 +5308,7 @@ type workspaceInfo struct {
 }
 ```
 
-- [ ] **Step 5: Update `config`'s construction and human rendering**
+- [ ] **Step 6: Update `config`'s construction and human rendering**
 
 In `internal/cli/config.go:133-139`:
 
@@ -3743,7 +5332,7 @@ and in `writeHuman` (`internal/cli/config.go:162-167`), replacing the `worktree`
 	fmt.Fprintf(tw, "digest\t%s\n", env.Digest)
 ```
 
-- [ ] **Step 6: Update `open`, `attach`, and `stop`**
+- [ ] **Step 7: Update `open`, `attach`, and `stop`**
 
 The same five-field literal replaces the block at `open.go:83-89`, `attach.go:136-142`, and `stop.go:118-124`:
 
@@ -3757,7 +5346,7 @@ The same five-field literal replaces the block at `open.go:83-89`, `attach.go:13
 		},
 ```
 
-- [ ] **Step 7: Update `status`**
+- [ ] **Step 8: Update `status`**
 
 In `internal/cli/status.go:175-181` use the same literal, and in `writeStatusHuman` (`status.go:256-259`) replace the `worktree` and `primary` lines:
 
@@ -3767,7 +5356,7 @@ In `internal/cli/status.go:175-181` use the same literal, and in `writeStatusHum
 	fmt.Fprintf(tw, "id\t%s\n", env.Workspace.ID)
 ```
 
-- [ ] **Step 8: Update `list`'s own fields**
+- [ ] **Step 9: Update `list`'s own fields**
 
 In `internal/cli/list.go:36-39`:
 
@@ -3804,7 +5393,7 @@ and at `list.go:132-134` and `list.go:155-160`, where a live session's recorded 
 			SessionState:     "live",
 ```
 
-- [ ] **Step 9: Update `rebuild`'s own fields and the `Registered` type behind them**
+- [ ] **Step 10: Update `rebuild`'s own fields and the `Registered` type behind them**
 
 In `internal/rebuild/apply.go:45-52`:
 
@@ -3859,7 +5448,7 @@ and `rebuild.go:124-131`:
 	}
 ```
 
-- [ ] **Step 10: Fix the `worktreeResolver` comment that names the dropped field**
+- [ ] **Step 11: Fix the `worktreeResolver` comment that names the dropped field**
 
 `internal/cli/rebuild.go:224-229` claims resolution is "what recovers IsPrimary and the proposed session name". Only half of that still exists:
 
@@ -3870,7 +5459,7 @@ and `rebuild.go:124-131`:
 // (spec §3), and it is what lets rebuild verify the keys it was handed.
 ```
 
-- [ ] **Step 11: Fix the two stale assertions in `cli_test.go`**
+- [ ] **Step 12: Fix the two stale assertions in `cli_test.go`**
 
 At `cli_test.go:187-189`, `Worktree` no longer exists:
 
@@ -3882,19 +5471,30 @@ At `cli_test.go:187-189`, `Worktree` no longer exists:
 
 and delete the `IsPrimary` assertion at `cli_test.go:226-228` outright — every resolved workspace is a main worktree by construction, so there is nothing left to assert.
 
-- [ ] **Step 12: Run the new tests**
+- [ ] **Step 13: Run the new tests**
 
 Run: `go test ./internal/cli/ -run 'EnvelopeIsSchemaV2' -v`
 
 Expected: all seven PASS.
 
-- [ ] **Step 13: Run the whole suite**
+- [ ] **Step 14: Run the packages this task owns**
 
-Run: `go test ./...`
+Run: `go test ./internal/cli/... ./internal/rebuild/...`
 
 Expected: PASS. The `rebuild` and `list` package tests that construct `Registered`/`listRow` literals are updated in place if the compiler reports them.
 
-- [ ] **Step 14: Update the envelope documentation**
+The gate is scoped rather than run as `go test ./...` because `internal/doctor`'s own tests
+still read the dropped fields until Task 9 — see "Task Ordering and Interactions" above.
+Everything else in the tree builds and passes from the end of Task 5, so this line covers
+every package whose behaviour this task can change.
+
+Those two packages are exactly this task's Files block: every carrier it edits lives in
+`internal/cli`, and `internal/rebuild/apply.go`'s `Registered` is the one type it reshapes outside
+it. `internal/rebuild`'s own tests are converted by Step 1 of this task, which is why the gate can
+include them; `internal/doctor`'s are not converted until Task 9, which is the only thing keeping
+`go test ./...` off this line.
+
+- [ ] **Step 15: Update the envelope documentation**
 
 In `docs/commands.md`, the `--json` paragraph at 29-32 gains the version and its meaning:
 
@@ -3910,7 +5510,7 @@ consumer of version 1 breaks loudly on the missing field, which is the point
 
 Replace `worktree`/`primary` with `repository` in the `config` sample (85-89) and the `status` sample (193-197), and reword the identity paragraph at 100-104 so it describes a repository root and a session rather than a worktree and a primary flag.
 
-- [ ] **Step 15: Format and commit**
+- [ ] **Step 16: Format and commit**
 
 Run: `gofmt -l internal docs 2>/dev/null; gofmt -w internal`
 
@@ -5152,11 +6752,17 @@ Run: `go test ./internal/cli/ -run TestStatus -v`
 
 Expected: PASS.
 
-- [ ] **Step 23: Run the whole suite**
+- [ ] **Step 23: Run the packages this task owns**
 
-Run: `go test ./...`
+Run: `go test ./internal/rebuild/... ./internal/state/... ./internal/tmux/... ./internal/cli/...`
 
 Expected: PASS.
+
+The gate is scoped rather than run as `go test ./...` because `internal/doctor`'s own tests
+still read the dropped fields until Task 9 — see "Task Ordering and Interactions" above.
+Everything else in the tree builds and passes from the end of Task 5, so this line covers
+every package whose behaviour this task can change.
+
 
 - [ ] **Step 24: Document the upgrade step**
 
@@ -5177,7 +6783,10 @@ not a main worktree as needing this run.
 
 - [ ] **Step 25: Format and commit**
 
-Run: `gofmt -w internal && go test ./...`
+Run: `gofmt -w internal && go test ./internal/rebuild/... ./internal/state/... ./internal/tmux/... ./internal/cli/...`
+
+The test selection matches Step 23 for the same reason: `internal/doctor` still holds unconverted
+test readers until Task 9, which is where the full suite becomes a meaningful gate again.
 
 Then:
 
@@ -5204,635 +6813,45 @@ needing this run, since nothing else can tell the operator."
 
 ---
 
-### Task 9: Convert the remaining `Worktree` readers
+### Task 9: Convert the doctor tests and close the conversion out
 
 **Files:**
-- Modify: `internal/controller/ensure.go:255-257, 265, 272, 278, 280, 286, 392, 441` (window/pane dirs, the `SessionSpec` value, and the post-create identity confirmation)
-- Modify: `internal/controller/plan.go:107-113` (`SessionBelongsTo` comparison and its doc comment)
-- Modify: `internal/controller/fake/fake.go:105-123, 246-262` (in-memory `Store` mirror of `RegisterWorkspace` and the `Workspaces` ordering)
-- Modify: `internal/doctor/sessions.go:31` (registered-path map value)
-- Modify: `internal/rebuild/classify.go:151, 205` (identity-mismatch gate and its reason string)
-- Test: `internal/controller/ensure_test.go:114-116, 269`
-- Test: `internal/controller/plan_test.go:32, 313`
-- Test: `internal/controller/observe_test.go:23-25, 86`
-- Test: `internal/controller/render_test.go:31, 57, 73`
-- Test: `internal/controller/fake/fake_test.go:21-23, 80-81`
-- Test: `internal/doctor/doctor_test.go:381-383`
-- Test: `internal/rebuild/classify_test.go:30-31`
-- Test: `internal/rebuild/apply_test.go:153, 171-176, 193, 216-222, 233-235, 496, 504-505, 516-518`
+- Test: `internal/doctor/doctor_test.go:381-383` (the registered-path assertions), `:505` (the container observation's key)
 
 **Interfaces:**
 - Consumes: `resolve.Workspace{ID, RepositoryID, Slug, RepoRoot, Session, SessionName string}` and
   `state.Record{ID, RepositoryID, Slug, RepoRoot, Session, ProposedSession, ActualSession,
   DesiredDigest, AppliedDigest, RegisteredAt, UpdatedAt, Container, LastOperation}` — both from the
   earlier `internal/resolve` and `internal/state` tasks, with `Worktree` and `IsPrimary` removed.
-  Also consumes `rebuild.Registered{ID, Slug, RepoRoot, Session string}` as the `internal/rebuild/apply.go`
-  task leaves it (`IsPrimary` dropped, because there is no longer any field to source it from).
+  Also consumes `state.Store.RecordContainerObservation(repositoryID string, obs
+  state.ContainerObservation, now time.Time) error` as Task 2 leaves it.
   `controller.LiveSession.Worktree` and `controller.SessionSpec.Worktree` keep their names: both are
   the Go-side mirror of the tmux user option `@dev_worktree`, whose name is unchanged.
 - Produces: no new exported names. This task only rewires existing readers.
 
-This task exists because the field rename fans out further than the packages that own the renamed
-types. `internal/controller/ensure.go`, `internal/controller/plan.go`, `internal/controller/fake`,
-`internal/doctor`, and `internal/rebuild/classify.go` all read `Workspace.Worktree`,
-`Record.Worktree`, or `Record.IsPrimary` without themselves being part of the resolve/state/CLI
-conversions, so at the end of the preceding tasks the tree still does not compile. Every edit here
-is mechanical, and none of it changes behaviour: the value flowing through these call sites is the
-same absolute path it always was, only now guaranteed to be a main worktree.
+`internal/doctor` is the last package holding readers of the dropped fields, and it holds them only
+in its tests: Task 5 converted `sessions.go` because `internal/cli`'s test binary links the package,
+but a test file has to compile only when its own package is tested, and no gate before this one
+does that. So this task is small, and it is the point at which `go test ./...` becomes a meaningful
+gate again rather than the point at which the tree starts building — that happened at the end of
+Task 5.
 
-The one thing that needs care is telling the two directions of the mirror apart. Where the code
-reads a *workspace or record* field the name changes to `RepoRoot`; where it reads a *tmux-derived*
-field on `controller.LiveSession` or writes `controller.SessionSpec` the name stays `Worktree` and
-only the right-hand side moves. `ensure.go:392` and `ensure.go:441` are exactly that case, and so
-are the `LiveSession` literals scattered through the controller and rebuild tests, which must be
-left alone. Because this is the last package group to convert, it is also the point at which
-`go build ./...` succeeds for the first time in the plan.
+The rule for these edits is the same as everywhere else in the plan. Where the code reads a
+*workspace or record* field the name changes to `RepoRoot`; where it reads a *tmux-derived* field on
+`controller.LiveSession` or writes `controller.SessionSpec` the name stays `Worktree` and only the
+right-hand side moves. `internal/doctor/integration_test.go:44` passes `controller.KeyWorktree`,
+which is the tmux option name `@dev_worktree` and does not change.
 
-- [ ] **Step 1: Point `ensure.go`'s window and pane directories at the repository root**
-
-`renderWindows` derives every window's and pane's working directory from the workspace path. Five
-reads change, plus the comment above the container-pane branch, which explains the host-side `-c`
-in terms of "the worktree".
-
-Before (lines 255-257 and 262-267):
-
-```go
-				// its own; inside the container that is the exec relDir,
-				// while the host-side -c stays the worktree, matching the
-				// window itself.
-				relDir := in.RelDir
-				if p.RelDir != "" {
-					relDir = p.RelDir
-				}
-				panes = append(panes, PaneSpec{
-					Name:    p.Name,
-					Command: act.ExecCommand(binding, p.Command, relDir, d.Config.Environment),
-					Dir:     d.Workspace.Worktree,
-					Focus:   p.Focus,
-				})
-```
-
-After:
-
-```go
-				// its own; inside the container that is the exec relDir,
-				// while the host-side -c stays the repository root,
-				// matching the window itself.
-				relDir := in.RelDir
-				if p.RelDir != "" {
-					relDir = p.RelDir
-				}
-				panes = append(panes, PaneSpec{
-					Name:    p.Name,
-					Command: act.ExecCommand(binding, p.Command, relDir, d.Config.Environment),
-					Dir:     d.Workspace.RepoRoot,
-					Focus:   p.Focus,
-				})
-```
-
-Before (lines 269-274, the container window itself):
-
-```go
-			specs = append(specs, WindowSpec{
-				Name:    in.Name,
-				Command: act.ExecCommand(binding, in.Command, in.RelDir, d.Config.Environment),
-				Dir:     d.Workspace.Worktree,
-				Focus:   in.Focus,
-				Panes:   panes,
-			})
-```
-
-After:
-
-```go
-			specs = append(specs, WindowSpec{
-				Name:    in.Name,
-				Command: act.ExecCommand(binding, in.Command, in.RelDir, d.Config.Environment),
-				Dir:     d.Workspace.RepoRoot,
-				Focus:   in.Focus,
-				Panes:   panes,
-			})
-```
-
-Before (lines 278-288, the host branch):
-
-```go
-		dir := d.Workspace.Worktree
-		if in.RelDir != "" {
-			dir = filepath.Join(d.Workspace.Worktree, in.RelDir)
-		}
-		panes := make([]PaneSpec, 0, len(in.Panes))
-		for _, p := range in.Panes {
-			paneDir := dir
-			if p.RelDir != "" {
-				paneDir = filepath.Join(d.Workspace.Worktree, p.RelDir)
-			}
-```
-
-After:
-
-```go
-		dir := d.Workspace.RepoRoot
-		if in.RelDir != "" {
-			dir = filepath.Join(d.Workspace.RepoRoot, in.RelDir)
-		}
-		panes := make([]PaneSpec, 0, len(in.Panes))
-		for _, p := range in.Panes {
-			paneDir := dir
-			if p.RelDir != "" {
-				paneDir = filepath.Join(d.Workspace.RepoRoot, p.RelDir)
-			}
-```
-
-- [ ] **Step 2: Feed the repository root into the `SessionSpec` and the post-create confirmation**
-
-`SessionSpec.Worktree` is written straight onto the tmux `@dev_worktree` user option by
-`internal/tmux/actuate.go`, and `LiveSession.Worktree` is what comes back out of it. Both field
-names stay; only the workspace-side expression changes.
-
-Before (lines 388-395):
-
-```go
-	spec := SessionSpec{
-		Name:        name,
-		WorkspaceID: id,
-		Slug:        d.Workspace.Slug,
-		Worktree:    d.Workspace.Worktree,
-		Env:         d.Config.Environment,
-		Windows:     windows,
-	}
-```
-
-After:
-
-```go
-	spec := SessionSpec{
-		Name:        name,
-		WorkspaceID: id,
-		Slug:        d.Workspace.Slug,
-		Worktree:    d.Workspace.RepoRoot,
-		Env:         d.Config.Environment,
-		Windows:     windows,
-	}
-```
-
-Before (lines 440-443, inside `confirmCreation`):
-
-```go
-	if live.WorkspaceID != d.Workspace.ID || live.Slug != d.Workspace.Slug ||
-		live.Worktree != d.Workspace.Worktree {
-		return fmt.Sprintf("session %q carries contradictory identity keys after creation", live.Name)
-	}
-```
-
-After:
-
-```go
-	if live.WorkspaceID != d.Workspace.ID || live.Slug != d.Workspace.Slug ||
-		live.Worktree != d.Workspace.RepoRoot {
-		return fmt.Sprintf("session %q carries contradictory identity keys after creation", live.Name)
-	}
-```
-
-- [ ] **Step 3: Update `SessionBelongsTo` and say what the third key now means**
-
-The doc comment calls the third identity key a worktree. Post-change the tag still spells
-`@dev_worktree`, but the value it carries is the repository root, and a reader comparing this
-function against the design needs the comment to say so.
-
-Before (lines 107-114):
-
-```go
-// SessionBelongsTo compares all three load-bearing identity keys
-// (design §7): a session with the right workspace ID but a contradictory
-// slug or worktree is evidence of corruption or collision, not a match.
-// The CLI's status and attach verdicts reuse it so the rendered identity
-// can never drift from planning's.
-func SessionBelongsTo(s LiveSession, ws resolve.Workspace) bool {
-	return s.WorkspaceID == ws.ID && s.Slug == ws.Slug && s.Worktree == ws.Worktree
-}
-```
-
-After:
-
-```go
-// SessionBelongsTo compares all three load-bearing identity keys
-// (design §7): a session with the right workspace ID but a contradictory
-// slug or repository root is evidence of corruption or collision, not a
-// match. The CLI's status and attach verdicts reuse it so the rendered
-// identity can never drift from planning's. LiveSession.Worktree keeps
-// its name because it mirrors the tmux user option @dev_worktree, which
-// is unchanged; the value it carries is now the repository root.
-func SessionBelongsTo(s LiveSession, ws resolve.Workspace) bool {
-	return s.WorkspaceID == ws.ID && s.Slug == ws.Slug && s.Worktree == ws.RepoRoot
-}
-```
-
-- [ ] **Step 4: Mirror the new record shape in the in-memory fake store**
-
-`internal/controller/fake` is a non-test file that stands in for the SQLite store across the
-controller, doctor, and rebuild tests, so it has to copy exactly the columns the real store now
-writes. Registration gains `RepositoryID` and `Session`, loses `IsPrimary`, and renames `Worktree`.
-
-Before (lines 100-123):
-
-```go
-func (s *Store) RegisterWorkspace(ws resolve.Workspace, desiredDigest string, now time.Time) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	digest := desiredDigest
-	if rec, ok := s.records[ws.ID]; ok {
-		rec.Slug = ws.Slug
-		rec.Worktree = ws.Worktree
-		rec.IsPrimary = ws.IsPrimary
-		rec.ProposedSession = ws.SessionName
-		rec.DesiredDigest = &digest
-		rec.UpdatedAt = now
-		return nil
-	}
-	s.records[ws.ID] = &state.Record{
-		ID:              ws.ID,
-		Slug:            ws.Slug,
-		Worktree:        ws.Worktree,
-		IsPrimary:       ws.IsPrimary,
-		ProposedSession: ws.SessionName,
-		DesiredDigest:   &digest,
-		RegisteredAt:    now,
-		UpdatedAt:       now,
-	}
-	return nil
-}
-```
-
-After:
-
-```go
-func (s *Store) RegisterWorkspace(ws resolve.Workspace, desiredDigest string, now time.Time) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	digest := desiredDigest
-	if rec, ok := s.records[ws.ID]; ok {
-		rec.RepositoryID = ws.RepositoryID
-		rec.Slug = ws.Slug
-		rec.RepoRoot = ws.RepoRoot
-		rec.Session = ws.Session
-		rec.ProposedSession = ws.SessionName
-		rec.DesiredDigest = &digest
-		rec.UpdatedAt = now
-		return nil
-	}
-	s.records[ws.ID] = &state.Record{
-		ID:              ws.ID,
-		RepositoryID:    ws.RepositoryID,
-		Slug:            ws.Slug,
-		RepoRoot:        ws.RepoRoot,
-		Session:         ws.Session,
-		ProposedSession: ws.SessionName,
-		DesiredDigest:   &digest,
-		RegisteredAt:    now,
-		UpdatedAt:       now,
-	}
-	return nil
-}
-```
-
-Before (lines 246-262):
-
-```go
-// Workspaces returns every registered workspace ordered by slug, then
-// worktree, mirroring the real store's ORDER BY (internal/state/store.go).
-func (s *Store) Workspaces() ([]state.Record, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]state.Record, 0, len(s.records))
-	for _, rec := range s.records {
-		out = append(out, copyRecord(rec))
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Slug != out[j].Slug {
-			return out[i].Slug < out[j].Slug
-		}
-		return out[i].Worktree < out[j].Worktree
-	})
-	return out, nil
-}
-```
-
-After:
-
-```go
-// Workspaces returns every registered workspace ordered by slug, then
-// repository root, mirroring the real store's ORDER BY
-// (internal/state/store.go).
-func (s *Store) Workspaces() ([]state.Record, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]state.Record, 0, len(s.records))
-	for _, rec := range s.records {
-		out = append(out, copyRecord(rec))
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Slug != out[j].Slug {
-			return out[i].Slug < out[j].Slug
-		}
-		return out[i].RepoRoot < out[j].RepoRoot
-	})
-	return out, nil
-}
-```
-
-- [ ] **Step 5: Convert the doctor orphan check**
-
-`orphanedSessions` builds a workspace-ID-to-path map so `orphanItem` can stat the path and warn
-when it has disappeared. Only the field read changes; the local variable and messages downstream
-still speak of a worktree, which stays accurate — the repository root is one.
-
-Before (line 29-32):
-
-```go
-	registered := make(map[string]string, len(records))
-	for _, rec := range records {
-		registered[rec.ID] = rec.Worktree
-	}
-```
-
-After:
-
-```go
-	registered := make(map[string]string, len(records))
-	for _, rec := range records {
-		registered[rec.ID] = rec.RepoRoot
-	}
-```
-
-`internal/doctor` has no other read of `Worktree` or `IsPrimary`: `internal/doctor/integration_test.go:44`
-passes `controller.KeyWorktree`, which is the tmux option name `@dev_worktree` and does not change.
-
-- [ ] **Step 6: Convert the rebuild classifier's identity gate**
-
-`classify.go` compares a live session's tmux keys against the stored row. The `s.*` reads are
-`controller.LiveSession` and keep their names; the `row.*` reads are `state.Record` and become
-`RepoRoot`.
-
-Before (line 151):
-
-```go
-		case row != nil && (row.Slug != s.Slug || row.Worktree != s.Worktree):
-```
-
-After:
-
-```go
-		case row != nil && (row.Slug != s.Slug || row.RepoRoot != s.Worktree):
-```
-
-Before (lines 198-206):
-
-```go
-// identityMismatchReason prints both identities side by side, because the
-// disagreement is the whole finding.
-func identityMismatchReason(s controller.LiveSession, row *state.Record) string {
-	return fmt.Sprintf(
-		"session %q carries slug %q and worktree %q, but workspace %s is recorded "+
-			"as slug %q and worktree %q; that contradiction is evidence of "+
-			"corruption or collision rather than a match, so nothing is written.",
-		s.Name, s.Slug, s.Worktree, row.ID, row.Slug, row.Worktree)
-}
-```
-
-After — the operator-facing wording is left byte-for-byte alone so the existing message assertions
-keep passing and operators' saved notes keep matching; only the row-side argument moves:
-
-```go
-// identityMismatchReason prints both identities side by side, because the
-// disagreement is the whole finding.
-func identityMismatchReason(s controller.LiveSession, row *state.Record) string {
-	return fmt.Sprintf(
-		"session %q carries slug %q and worktree %q, but workspace %s is recorded "+
-			"as slug %q and worktree %q; that contradiction is evidence of "+
-			"corruption or collision rather than a match, so nothing is written.",
-		s.Name, s.Slug, s.Worktree, row.ID, row.Slug, row.RepoRoot)
-}
-```
-
-- [ ] **Step 7: Build the whole tree**
+- [ ] **Step 1: Build the whole tree**
 
 Run: `go build ./...`
 
-Expected: exit 0 with no output. This is the first step in the plan at which the full build is
-green — every preceding task left at least one unconverted reader behind. If anything still fails,
-it is a reader neither this task nor an earlier one enumerated; add it here rather than deferring.
+Expected: exit 0 with no output. The build first went green at the end of Task 5; this re-checks it
+before the full test gate, because Tasks 6 through 8 all changed non-test code under scoped gates.
+If it fails, the failure belongs to whichever task last touched the package — fix it there rather
+than absorbing it here.
 
-- [ ] **Step 8: Convert the controller tests that build workspaces and records**
-
-These are `resolve.Workspace` and `state.Record` literals only. Every `controller.LiveSession`
-literal in the same files (`ensure_test.go:134, 329, 402`, `stop_test.go:113`, `plan_test.go:44, 170`)
-keeps `Worktree` and must not be touched.
-
-`internal/controller/ensure_test.go:110-118` before:
-
-```go
-func ensureWorkspace() resolve.Workspace {
-	return resolve.Workspace{
-		ID:          "w1",
-		Slug:        "slab",
-		Worktree:    "/w/slab",
-		SessionName: "slab",
-		IsPrimary:   true,
-	}
-}
-```
-
-after:
-
-```go
-func ensureWorkspace() resolve.Workspace {
-	return resolve.Workspace{
-		ID:          "w1",
-		Slug:        "slab",
-		RepoRoot:    "/w/slab",
-		SessionName: "slab",
-	}
-}
-```
-
-`internal/controller/ensure_test.go:268-270` before:
-
-```go
-	other := resolve.Workspace{
-		ID: "w2", Slug: "other", Worktree: "/w/other", SessionName: "other",
-	}
-```
-
-after:
-
-```go
-	other := resolve.Workspace{
-		ID: "w2", Slug: "other", RepoRoot: "/w/other", SessionName: "other",
-	}
-```
-
-`internal/controller/plan_test.go:28-36` before:
-
-```go
-	return &state.Record{
-		ID:              "w1",
-		Slug:            "slabledger",
-		Worktree:        "/w/slabledger",
-		ProposedSession: "slabledger",
-		ActualSession:   actual,
-		AppliedDigest:   applied,
-	}
-```
-
-after:
-
-```go
-	return &state.Record{
-		ID:              "w1",
-		Slug:            "slabledger",
-		RepoRoot:        "/w/slabledger",
-		ProposedSession: "slabledger",
-		ActualSession:   actual,
-		AppliedDigest:   applied,
-	}
-```
-
-`internal/controller/plan_test.go:313` before:
-
-```go
-			Workspace: resolve.Workspace{ID: "w1", Slug: "s", Worktree: "/w"},
-```
-
-after:
-
-```go
-			Workspace: resolve.Workspace{ID: "w1", Slug: "s", RepoRoot: "/w"},
-```
-
-`internal/controller/observe_test.go:20-27` before:
-
-```go
-		Workspace: resolve.Workspace{
-			ID:          "w1",
-			Slug:        "slabledger",
-			Worktree:    "/w/slabledger",
-			SessionName: "slabledger",
-			IsPrimary:   true,
-		},
-```
-
-after:
-
-```go
-		Workspace: resolve.Workspace{
-			ID:          "w1",
-			Slug:        "slabledger",
-			RepoRoot:    "/w/slabledger",
-			SessionName: "slabledger",
-		},
-```
-
-`internal/controller/observe_test.go:86` before:
-
-```go
-	other.Worktree = "/w/other"
-```
-
-after:
-
-```go
-	other.RepoRoot = "/w/other"
-```
-
-`internal/controller/render_test.go:31, 57, 73` before (three occurrences, the third spanning onto
-the following line):
-
-```go
-	d := Desired{Workspace: resolve.Workspace{Worktree: "/w/slab"}}
-```
-
-```go
-	d := Desired{Workspace: resolve.Workspace{Worktree: "/w/slab"},
-		Config: config.Config{Environment: map[string]string{"K": "v"}}}
-```
-
-after:
-
-```go
-	d := Desired{Workspace: resolve.Workspace{RepoRoot: "/w/slab"}}
-```
-
-```go
-	d := Desired{Workspace: resolve.Workspace{RepoRoot: "/w/slab"},
-		Config: config.Config{Environment: map[string]string{"K": "v"}}}
-```
-
-- [ ] **Step 9: Convert the fake store's own tests**
-
-`internal/controller/fake/fake_test.go:17-25` before:
-
-```go
-func testWorkspace(id, session string) resolve.Workspace {
-	return resolve.Workspace{
-		ID:          id,
-		Slug:        "slabledger",
-		Worktree:    "/w/" + id,
-		SessionName: session,
-		IsPrimary:   true,
-	}
-}
-```
-
-after:
-
-```go
-func testWorkspace(id, session string) resolve.Workspace {
-	return resolve.Workspace{
-		ID:          id,
-		Slug:        "slabledger",
-		RepoRoot:    "/w/" + id,
-		SessionName: session,
-	}
-}
-```
-
-`internal/controller/fake/fake_test.go:72-83` before:
-
-```go
-// TestFakeStoreWorkspacesOrdersBySlugThenWorktree mirrors the real store's
-// ORDER BY w.slug, w.worktree (internal/state/store.go): the fake iterates a
-// map, so without an explicit sort the order would be nondeterministic.
-func TestFakeStoreWorkspacesOrdersBySlugThenWorktree(t *testing.T) {
-	s := NewStore()
-	register := func(id, slug, worktree string) {
-		t.Helper()
-		ws := resolve.Workspace{
-			ID: id, Slug: slug, Worktree: worktree,
-			SessionName: id, IsPrimary: true,
-		}
-```
-
-after:
-
-```go
-// TestFakeStoreWorkspacesOrdersBySlugThenRepoRoot mirrors the real store's
-// ORDER BY w.slug, w.repo_root (internal/state/store.go): the fake iterates a
-// map, so without an explicit sort the order would be nondeterministic.
-func TestFakeStoreWorkspacesOrdersBySlugThenRepoRoot(t *testing.T) {
-	s := NewStore()
-	register := func(id, slug, repoRoot string) {
-		t.Helper()
-		ws := resolve.Workspace{
-			ID: id, Slug: slug, RepoRoot: repoRoot,
-			SessionName: id,
-		}
-```
-
-The three `register(...)` calls below it pass positional strings and need no change; the assertion
-message at line 106 should read `ordered by (slug, repo root)` for consistency.
-
-- [ ] **Step 10: Convert the doctor tests**
+- [ ] **Step 2: Convert the doctor tests**
 
 `internal/doctor/doctor_test.go:376-385` before:
 
@@ -5865,304 +6884,71 @@ func register(t *testing.T, store *fake.Store, slug, repoRoot string) {
 from `worktree` to `repoRoot` keeps the two helpers reading alike. The test name
 `TestOrphanedSessionsReportsUnregisteredAndMissingWorktree` and the `"worktree no longer exists"`
 assertion at line 413 stay as they are: that string is `orphanItem`'s operator-facing detail, which
-Step 5 deliberately left unchanged.
+Task 5's doctor conversion deliberately left unchanged.
 
-- [ ] **Step 11: Convert the rebuild tests**
-
-`internal/rebuild/classify_test.go:26-33` before:
+`register` also needs a repository ID, because Task 5 re-keyed the fake store's container bindings
+on the repository and a fixture that leaves the field empty files every binding under the empty
+string. Add it to the literal above:
 
 ```go
-func stored(id, slug, worktree, actual string) state.Record {
-	rec := state.Record{
-		ID:              id,
-		Slug:            slug,
-		Worktree:        worktree,
-		IsPrimary:       true,
-		ProposedSession: slug,
+	ws := resolve.Workspace{
+		ID:           "id-" + slug,
+		RepositoryID: "r-" + slug,
+		Slug:         slug,
+		RepoRoot:     repoRoot,
+		SessionName:  slug,
 	}
 ```
 
-after:
+Then `internal/doctor/doctor_test.go:505`, the one call that writes a binding, takes the same key.
+Before:
 
 ```go
-func stored(id, slug, repoRoot, actual string) state.Record {
-	rec := state.Record{
-		ID:              id,
-		Slug:            slug,
-		RepoRoot:        repoRoot,
-		ProposedSession: slug,
-	}
+	if err := store.RecordContainerObservation("id-"+slug, state.ContainerObservation{
 ```
 
-The `live()` helper above it builds a `controller.LiveSession` and keeps `Worktree`, as do the
-message assertions quoting `worktree "/w/slab"` — Step 6 left the reason string's wording intact
-precisely so these keep passing.
-
-`internal/rebuild/apply_test.go:169-177` before:
+After:
 
 ```go
-func workspace(id, slug, worktree, sessionName string, primary bool) resolve.Workspace {
-	return resolve.Workspace{
-		ID:          id,
-		Slug:        slug,
-		Worktree:    worktree,
-		SessionName: sessionName,
-		IsPrimary:   primary,
-	}
-}
+	if err := store.RecordContainerObservation("r-"+slug, state.ContainerObservation{
 ```
 
-after — the `primary` parameter has nothing left to set, so it goes, and the two call sites follow:
-
-```go
-func workspace(id, slug, repoRoot, sessionName string) resolve.Workspace {
-	return resolve.Workspace{
-		ID:          id,
-		Slug:        slug,
-		RepoRoot:    repoRoot,
-		SessionName: sessionName,
-	}
-}
-```
-
-`internal/rebuild/apply_test.go:179-183` before:
-
-```go
-func projectmux() resolve.Workspace {
-	return workspace(
-		"1111111111111111111111111111111111111111111111111111111111111111",
-		"projectmux", "/src/projectmux", "projectmux", true)
-}
-```
-
-after:
-
-```go
-func projectmux() resolve.Workspace {
-	return workspace(
-		"1111111111111111111111111111111111111111111111111111111111111111",
-		"projectmux", "/src/projectmux", "projectmux")
-}
-```
-
-`internal/rebuild/apply_test.go:152-155` before:
-
-```go
-func (h *harness) know(ws resolve.Workspace, digest string) {
-	h.resolver.byWorktree[ws.Worktree] = ws
-	h.config.digests[ws.Slug] = digest
-}
-```
-
-after:
-
-```go
-func (h *harness) know(ws resolve.Workspace, digest string) {
-	h.resolver.byWorktree[ws.RepoRoot] = ws
-	h.config.digests[ws.Slug] = digest
-}
-```
-
-`internal/rebuild/apply_test.go:187-195` before:
-
-```go
-func liveSession(ws resolve.Workspace, name string) controller.LiveSession {
-	return controller.LiveSession{
-		ID:          "$1",
-		Name:        name,
-		WorkspaceID: ws.ID,
-		Slug:        ws.Slug,
-		Worktree:    ws.Worktree,
-	}
-}
-```
-
-after — the `LiveSession` field name stays, only its source moves:
-
-```go
-func liveSession(ws resolve.Workspace, name string) controller.LiveSession {
-	return controller.LiveSession{
-		ID:          "$1",
-		Name:        name,
-		WorkspaceID: ws.ID,
-		Slug:        ws.Slug,
-		Worktree:    ws.RepoRoot,
-	}
-}
-```
-
-`internal/rebuild/apply_test.go:216-235` before:
-
-```go
-	want := []Registered{{
-		ID:        ws.ID,
-		Slug:      "projectmux",
-		Worktree:  "/src/projectmux",
-		IsPrimary: true,
-		Session:   "projectmux",
-	}}
-	if !reflect.DeepEqual(report.Registered, want) {
-		t.Fatalf("Registered = %+v, want %+v", report.Registered, want)
-	}
-
-	rec, err := h.fakeStore.Workspace(ws.ID)
-	if err != nil {
-		t.Fatalf("Workspace: %v", err)
-	}
-	if rec.ActualSession == nil || *rec.ActualSession != "projectmux" {
-		t.Errorf("ActualSession = %v, want %q", rec.ActualSession, "projectmux")
-	}
-	if !rec.IsPrimary {
-		t.Errorf("IsPrimary = false, want true — it comes from the resolver, not the session keys")
-	}
-```
-
-after — the `IsPrimary` assertion made the point that registration reads the resolver rather than
-the tmux keys, and `RepoRoot` is now the field that carries that point, so it takes over the check
-rather than being deleted outright:
-
-```go
-	want := []Registered{{
-		ID:       ws.ID,
-		Slug:     "projectmux",
-		RepoRoot: "/src/projectmux",
-		Session:  "projectmux",
-	}}
-	if !reflect.DeepEqual(report.Registered, want) {
-		t.Fatalf("Registered = %+v, want %+v", report.Registered, want)
-	}
-
-	rec, err := h.fakeStore.Workspace(ws.ID)
-	if err != nil {
-		t.Fatalf("Workspace: %v", err)
-	}
-	if rec.ActualSession == nil || *rec.ActualSession != "projectmux" {
-		t.Errorf("ActualSession = %v, want %q", rec.ActualSession, "projectmux")
-	}
-	if rec.RepoRoot != "/src/projectmux" {
-		t.Errorf("RepoRoot = %q, want %q — it comes from the resolver, not the session keys",
-			rec.RepoRoot, "/src/projectmux")
-	}
-```
-
-`internal/rebuild/apply_test.go:492-518` before:
-
-```go
-// Slug and worktree deliberately match: a row disagreeing on those is an
-// identity mismatch, which classification refuses before it ever reaches
-// application.
-func seedRecorded(t *testing.T, store *fake.Store, ws resolve.Workspace) {
-	t.Helper()
-	recorded := workspace(ws.ID, ws.Slug, ws.Worktree, "recorded-proposed", false)
-	if err := store.RegisterWorkspace(recorded, "sha256:recorded", testTime); err != nil {
-		t.Fatalf("seeding the recorded row: %v", err)
-	}
-}
-
-func assertRecordedFieldsUntouched(t *testing.T, rec state.Record, ws resolve.Workspace) {
-	t.Helper()
-	if rec.IsPrimary {
-		t.Errorf("IsPrimary = true, want the recorded false: adoption must not re-register")
-	}
-	if rec.ProposedSession != "recorded-proposed" {
-		t.Errorf("ProposedSession = %q, want %q", rec.ProposedSession, "recorded-proposed")
-	}
-	if rec.DesiredDigest == nil || *rec.DesiredDigest != "sha256:recorded" {
-		t.Errorf("DesiredDigest = %v, want %q", rec.DesiredDigest, "sha256:recorded")
-	}
-	if rec.Slug != ws.Slug {
-		t.Errorf("Slug = %q, want %q", rec.Slug, ws.Slug)
-	}
-	if rec.Worktree != ws.Worktree {
-		t.Errorf("Worktree = %q, want %q", rec.Worktree, ws.Worktree)
-	}
-}
-```
-
-after — `ProposedSession` and `DesiredDigest` still differ between the seeded row and what a
-re-registration would write, so the test keeps its teeth without `IsPrimary`:
-
-```go
-// Slug and repository root deliberately match: a row disagreeing on those
-// is an identity mismatch, which classification refuses before it ever
-// reaches application.
-func seedRecorded(t *testing.T, store *fake.Store, ws resolve.Workspace) {
-	t.Helper()
-	recorded := workspace(ws.ID, ws.Slug, ws.RepoRoot, "recorded-proposed")
-	if err := store.RegisterWorkspace(recorded, "sha256:recorded", testTime); err != nil {
-		t.Fatalf("seeding the recorded row: %v", err)
-	}
-}
-
-func assertRecordedFieldsUntouched(t *testing.T, rec state.Record, ws resolve.Workspace) {
-	t.Helper()
-	if rec.ProposedSession != "recorded-proposed" {
-		t.Errorf("ProposedSession = %q, want %q: adoption must not re-register",
-			rec.ProposedSession, "recorded-proposed")
-	}
-	if rec.DesiredDigest == nil || *rec.DesiredDigest != "sha256:recorded" {
-		t.Errorf("DesiredDigest = %v, want %q", rec.DesiredDigest, "sha256:recorded")
-	}
-	if rec.Slug != ws.Slug {
-		t.Errorf("Slug = %q, want %q", rec.Slug, ws.Slug)
-	}
-	if rec.RepoRoot != ws.RepoRoot {
-		t.Errorf("RepoRoot = %q, want %q", rec.RepoRoot, ws.RepoRoot)
-	}
-}
-```
-
-The two `controller.LiveSession` literals at lines 254-260 and 410-416 name a vanished path in
-`Worktree`; that field is unchanged and they stay exactly as they are.
-
-- [ ] **Step 12: Confirm nothing is left**
+- [ ] **Step 3: Confirm nothing is left**
 
 Run: `grep -rn 'IsPrimary' --include='*.go' . ; grep -rn '\.Worktree' --include='*.go' internal/`
 
-Expected: no `IsPrimary` hits anywhere. Every remaining `.Worktree` hit is a
-`controller.LiveSession` or `controller.SessionSpec` field — `internal/tmux/actuate.go:60,149`,
-`internal/tmux/tmux.go:118`, `internal/controller/ensure.go`, `internal/controller/plan.go`,
-`internal/rebuild/classify.go`, `internal/rebuild/apply.go`, and their tests. Any hit on a
-`resolve.Workspace` or `state.Record` value is a miss and must be fixed before continuing.
+Expected: the only `IsPrimary` hits are the two envelope carriers Task 7 rewrote — grep after that
+task and they are gone too, so at this point the first command should print nothing at all. Every
+remaining `.Worktree` hit reads a `controller.LiveSession` or writes a `controller.SessionSpec`,
+both of which keep the name: `internal/tmux/actuate.go:60,149`, `internal/tmux/tmux.go:118`,
+`internal/tmux/actuate_test.go`, `internal/tmux/integration_test.go`,
+`internal/controller/ensure.go`, `internal/controller/plan.go`, `internal/controller/plan_test.go`,
+`internal/rebuild/classify.go`, `internal/rebuild/apply.go`, `internal/cli/list.go:158`, and
+`internal/cli/lifecycle_test.go:90`. Any hit whose receiver is a `resolve.Workspace` or a
+`state.Record` — that is, any surviving `ws.Worktree`, `rec.Worktree`, or `row.Worktree` — is a miss
+belonging to whichever task owns that package, and must be fixed before continuing.
 
-- [ ] **Step 13: Test and format**
+- [ ] **Step 4: Test and format**
 
 Run: `go test ./... && gofmt -l .`
 
 Expected: all packages report `ok` or `no test files`, and `gofmt -l .` prints nothing.
 
-- [ ] **Step 14: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add internal/controller/ensure.go internal/controller/plan.go \
-  internal/controller/fake/fake.go internal/doctor/sessions.go \
-  internal/rebuild/classify.go internal/controller/ensure_test.go \
-  internal/controller/plan_test.go internal/controller/observe_test.go \
-  internal/controller/render_test.go internal/controller/fake/fake_test.go \
-  internal/doctor/doctor_test.go internal/rebuild/classify_test.go \
-  internal/rebuild/apply_test.go
-git commit -m "refactor: point the remaining workspace-path readers at RepoRoot
+git add internal/doctor/doctor_test.go
+git commit -m "test(doctor): move the doctor fixtures onto RepoRoot
 
-The resolve and state conversions renamed Workspace.Worktree and
-Record.Worktree to RepoRoot and dropped IsPrimary, but several readers
-live outside the packages those tasks touched: session rendering and
-post-create confirmation in the controller, the identity comparison in
-SessionBelongsTo, the in-memory fake store the tests register through,
-the doctor orphan check, and the rebuild classifier's identity gate.
-Until all of them move together the tree does not build, so they land
-in one commit rather than being split by package.
+The doctor package's non-test files converted with the CLI, because the
+CLI test binary links them; its own tests could wait for the first gate
+that compiles them, which is this one. The fixture gains a repository ID
+so its container binding lands under the key the store now reads, and
+the container observation follows it.
 
-The tmux side keeps its names. LiveSession.Worktree and
-SessionSpec.Worktree mirror the @dev_worktree user option, whose name is
-unchanged and whose value simply became the repository root; renaming
-the Go fields would have implied a tag rename that never happened.
-Operator-facing wording in the doctor and rebuild findings is likewise
-left alone: 'worktree no longer exists' is still true of a repository
-root, and rewording it would churn saved runbooks for no gain.
-
-Where an assertion existed only to prove that registration reads the
-resolver rather than the tmux keys, the check moves to RepoRoot rather
-than disappearing with IsPrimary, so the behaviour stays covered."
+The operator-facing wording is left alone: 'worktree no longer exists'
+is still true of a repository root, and rewording it would churn saved
+runbooks for no gain."
 ```
 
 ---
@@ -6554,12 +7340,12 @@ Expected: `git commit` reports 6 files changed with a rename detected, and `git 
 
 **Files:**
 - Create: `internal/controller/concurrent_container_test.go`
-- Modify (only if Step 3 fails — see the failure signature there): `internal/controller/fake/fake.go:91-99`, `internal/controller/fake/fake.go:162-189`, `internal/controller/fake/fake.go:236-291`
+- Inspect (only if Step 3 fails — see the failure signature there): `internal/controller/fake/fake.go`, whose repository-keyed binding map and `copyRecordLocked` projection Task 5 already landed
 - Test: `internal/controller/concurrent_container_test.go`
 
 **Interfaces:**
 - Consumes: `resolve.Workspace{ID, RepositoryID, Slug, RepoRoot, Session, SessionName}` (Task 1); `fake.NewStore() *fake.Store` and `(*Store).Workspace(id string) (state.Record, error)` (Task 2); `lockPhases(ctx, dir, repositoryID, workspaceID string, timeout time.Duration) (func(), error)` indirectly, through `Ensure` (Task 3); `controller.ContainerObserver` / `controller.ContainerActuator` (`internal/controller/interfaces.go:52-73`); the existing `scriptedSessions`, `absentStep`, `liveStep`, `ensureTime` helpers in `internal/controller/ensure_test.go:26-58,21`.
-- Produces: no new exported names. One regression test, plus (conditionally) a repository-keyed binding map inside the unexported `fake.Store`.
+- Produces: no new exported names. One regression test. The repository-keyed binding map inside the unexported `fake.Store` is Task 5's, not this task's; Steps 4 and 5 only verify it survived.
 
 **What the code already says, before writing anything**
 
@@ -6824,109 +7610,35 @@ Run: `go test ./internal/controller/ -run TestConcurrentOpensIssueOneContainerSt
 
 This step decides whether Task 11 is test-only. Two outcomes are possible, and only the run distinguishes them:
 
-- **PASS** — the repository lock plus the repository-keyed binding already compose. Skip Steps 4 and 5 and go straight to Step 6.
-- **FAIL** with `devcontainer up invocations = 2, want exactly 1` — the second goroutine's `Observe` found no stored binding on its own record, fell to `DiscoverContainer`, saw the label shape (present, no workdir), and planned `acquire`, which runs a second `up` (`internal/controller/ensure.go:197-210`). The binding is written under the repository ID but is not readable through a sibling session's record; Steps 4 and 5 fix that.
+- **PASS** — the repository lock plus the repository-keyed binding Task 5 landed already compose. This is the expected outcome; skip Steps 4 and 5 and go straight to Step 6.
+- **FAIL** with `devcontainer up invocations = 2, want exactly 1` — the second goroutine's `Observe` found no stored binding on its own record, fell to `DiscoverContainer`, saw the label shape (present, no workdir), and planned `acquire`, which runs a second `up` (`internal/controller/ensure.go:197-210`). The binding is written under the repository ID but is not readable through a sibling session's record; Steps 4 and 5 locate which half of Task 5's fake-store change went missing.
 
-- [ ] **Step 4 (only on the Step 3 failure): Key the fake store's container bindings by repository**
+- [ ] **Step 4 (only on the Step 3 failure): Confirm the fake keys its bindings on the repository**
 
-The real `container_bindings` table is keyed on `repository_id` (design §5.2). A fake that keeps the binding on the workspace row contradicts it and would let this test pass or fail for reasons the production store does not share. Replace the struct and constructor at `internal/controller/fake/fake.go:91-99`, and the write path at `:162-189`, so the binding lives in its own repository-keyed map.
+Task 5 already moved the fake's container bindings off the record and into a repository-keyed map,
+because autostart records a binding for a repository that has no session at all. If Step 3 failed,
+the first thing to rule out is that this change is missing or was written back.
 
-```go
-// Store is an in-memory controller.Store. Container bindings live in a
-// map of their own keyed by repository ID rather than on the record,
-// mirroring the repository-keyed container_bindings table: every session
-// on a repository must read back the one binding its siblings wrote,
-// which is what lets a concurrent second open observe the container
-// instead of starting another.
-type Store struct {
-	mu         sync.Mutex
-	records    map[string]*state.Record
-	containers map[string]*state.ContainerBinding
-}
+Run: `grep -n 'containers\[' internal/controller/fake/fake.go`
 
-func NewStore() *Store {
-	return &Store{
-		records:    map[string]*state.Record{},
-		containers: map[string]*state.ContainerBinding{},
-	}
-}
-```
+Expected: `recordContainerLocked` writes `s.containers[repositoryID]` and reads it back for the
+degraded-health branch, and nothing assigns to `rec.Container`. If instead the binding is stored on
+the record, restore the Task 5 form — a fake that keeps the binding on the workspace row contradicts
+the repository-keyed `container_bindings` table (design §5.2) and would let this test pass or fail
+for reasons the production store does not share.
 
-```go
-func (s *Store) recordContainerLocked(workspaceID string, obs state.ContainerObservation, now time.Time) error {
-	rec, ok := s.records[workspaceID]
-	if !ok {
-		return fmt.Errorf("workspace %s: %w", workspaceID, state.ErrNotFound)
-	}
-	repo := rec.RepositoryID
-	switch obs.Health {
-	case state.HealthPresent:
-		if obs.ContainerID == "" {
-			return fmt.Errorf("a present container observation must carry a container ID")
-		}
-		s.containers[repo] = &state.ContainerBinding{
-			Kind:          obs.Kind,
-			ContainerID:   obs.ContainerID,
-			ContainerUser: obs.ContainerUser,
-			Workdir:       obs.Workdir,
-			Health:        obs.Health,
-			ObservedAt:    now,
-		}
-	case state.HealthMissing, state.HealthUnknown:
-		// Tri-state retention is unchanged, only relocated: degraded health
-		// updates the repository's binding rather than dropping it.
-		if b, ok := s.containers[repo]; ok {
-			b.Health = obs.Health
-			b.ObservedAt = now
-		}
-	default:
-		return fmt.Errorf("invalid container health %q", obs.Health)
-	}
-	return nil
-}
-```
+- [ ] **Step 5 (only on the Step 3 failure): Confirm every record read projects the repository binding**
 
-- [ ] **Step 5 (only on the Step 3 failure): Attach the repository binding on every record read**
+The second half of the composition is `copyRecordLocked`, which Task 5 introduced so that a record
+carries whatever container its repository is bound to — including one a sibling session started.
+That projection is exactly what `Observe` needs to take the probe branch instead of rediscovering.
 
-`copyRecord` at `internal/controller/fake/fake.go:264-291` is a free function with no access to the binding map. Make it a method and attach the repository's binding as it copies, then update the two call sites at `:243` and `:253`.
+Run: `grep -n 'copyRecord' internal/controller/fake/fake.go`
 
-```go
-// copyRecordLocked deep-copies a record and attaches the repository's
-// shared container binding, which is what the real store's join produces:
-// a session sees whatever container its repository is bound to, including
-// one a sibling session started.
-func (s *Store) copyRecordLocked(rec *state.Record) state.Record {
-	out := *rec
-	if rec.ActualSession != nil {
-		v := *rec.ActualSession
-		out.ActualSession = &v
-	}
-	if rec.DesiredDigest != nil {
-		v := *rec.DesiredDigest
-		out.DesiredDigest = &v
-	}
-	if rec.AppliedDigest != nil {
-		v := *rec.AppliedDigest
-		out.AppliedDigest = &v
-	}
-	out.Container = nil
-	if b, ok := s.containers[rec.RepositoryID]; ok {
-		c := *b
-		out.Container = &c
-	}
-	if rec.LastOperation != nil {
-		o := *rec.LastOperation
-		out.LastOperation = &o
-		if rec.LastOperation.ExitStatus != nil {
-			e := *rec.LastOperation.ExitStatus
-			out.LastOperation.ExitStatus = &e
-		}
-	}
-	return out
-}
-```
-
-Then change `internal/controller/fake/fake.go:243` from `return copyRecord(rec), nil` to `return s.copyRecordLocked(rec), nil`, and `:253` from `out = append(out, copyRecord(rec))` to `out = append(out, s.copyRecordLocked(rec))`.
+Expected: `copyRecordLocked` is a method on `*Store`, it sets `out.Container` from
+`s.containers[rec.RepositoryID]`, and both `Workspace` and `Workspaces` call it. If the free
+function `copyRecord` is still there, the sibling never sees the binding and Step 3's failure is
+explained; restore the Task 5 form.
 
 - [ ] **Step 6 (only on the Step 3 failure): Re-run the target test**
 
@@ -6983,7 +7695,7 @@ Every verification case the spec names, and the task that carries it. A case wit
 | Autostart over a repository with several sessions starts its container once, replacing `lifecycle_test.go:495` | Task 5 |
 | Every `--json` envelope reports `schema_version: 2` and omits `is_primary`, asserted per command | Task 7 |
 | Socket-isolated integration: `0002` succeeds with the filesystem absent, and a following `rebuild` collapses a linked-worktree row | Task 2 (migration) and Task 8 (collapse) |
-| Every remaining `Worktree`/`IsPrimary` reader converts and the tree builds again | Task 9 |
+| Every remaining `Worktree`/`IsPrimary` reader converts and the tree builds again | Tasks 3-5 (build), Task 9 (full suite) |
 | Bind rejection for a path outside the repository root, including via symlink | **Deferred** — `bind` is the second plan |
 | Bind fallback when the bound path is deleted | **Deferred** — `bind` is the second plan |
 
@@ -6991,7 +7703,7 @@ Every verification case the spec names, and the task that carries it. A case wit
 
 After Task 11, before calling the plan done:
 
-- [ ] `go build ./...` — still green. It first goes green at Task 9, which is the convergence point; Tasks 10 and 11 must not take it back down.
+- [ ] `go build ./...` — still green. It first goes green at the end of Task 5; Tasks 6 through 11 must not take it back down.
 - [ ] `go test ./...` — every package passes.
 - [ ] `gofmt -l .` — no output.
 - [ ] `git log --oneline` shows one commit per task, in order.
