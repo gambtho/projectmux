@@ -4,7 +4,7 @@
 
 **Goal:** Withdraw the claim that the JSON envelopes and exit codes are compatibility contracts, from every place the project asserts it, so that nothing is promised below 1.0.
 
-**Architecture:** Four surfaces assert or rely on the retracted claim — `README.md`, `docs/commands.md`, ten Go doc comments, and `docs/design.md` §12. Documentation lands first, then the comments that point at it, then the design amendment that records the decision, then a repository-wide grep that proves nothing was missed. No executable line changes anywhere in this plan.
+**Architecture:** Four surfaces assert or rely on the retracted claim — `README.md`, `docs/commands.md`, eleven Go doc comments, and `docs/design.md` (§8 and a new §12 amendment). Documentation lands first, then the comments that point at it, then the design amendment that records the decision, then a repository-wide grep that proves nothing was missed. No executable line changes anywhere in this plan.
 
 **Tech Stack:** Go 1.x (comment-only edits), Markdown. Verification is `go build ./...`, `go test ./...`, and `grep`.
 
@@ -24,7 +24,7 @@
 ### Task 1: Retract the claim in `README.md`
 
 **Files:**
-- Modify: `README.md:87-91` (alpha admonition), `README.md:95-110` (Project status), `README.md:299-309` (exit-code table caveat)
+- Modify: `README.md:87-91` (alpha admonition), `README.md:95-110` (Project status), `README.md:306-312` (exit-code table caveat)
 
 **Interfaces:**
 - Consumes: nothing.
@@ -91,8 +91,8 @@ and `v0.x` builds are published as prereleases.
 Releases up to `v0.4.0` named the JSON output and the exit codes as contracts
 that held even during the alpha. That claim is withdrawn. It was made before
 anything pinned those shapes, and only `config --json` is checked against a
-fixed set of keys today; the other nine commands could be renamed by accident
-without a test noticing.
+fixed set of keys today; a field in any of the other nine envelopes could be
+renamed by accident without a test noticing.
 
 Human-readable output remains the least stable of the three, so parse `--json`
 if you automate against ProjectMux — but pin the version you tested against.
@@ -100,7 +100,7 @@ if you automate against ProjectMux — but pin the version you tested against.
 
 - [ ] **Step 3: Add the code-2 caveat under the exit-code table**
 
-This is spec finding 3.5, in scope as documentation only. Immediately after the exit-code table (the `| 6 | ... |` row at `README.md:309`, before the `## Relationship to tmux and Dev Containers` heading), insert a blank line and:
+This is spec finding 3.5, in scope as documentation only. Immediately after the exit-code table (rows at `README.md:306-312`, the last being the `| 6 | ... |` row at line 312; before the `## Relationship to tmux and Dev Containers` heading), insert a blank line and:
 
 ```markdown
 A mistyped *bare* command resolves as a workspace name rather than a usage
@@ -112,11 +112,13 @@ to real commands still exit 2.
 
 Run: `grep -n "contract" README.md`
 
-Expected: exactly two matches, both in the new text, both in the negative —
-"nothing it emits is a compatibility contract below 1.0" in the admonition and
-"Nothing is a compatibility contract below 1.0" in Project status. The word
-still appears; what must be gone is any sentence saying something *is* one.
-Read both matches. Three or more matches means an assertion survived.
+Expected: exactly three matches, all in the new text, none asserting a live
+promise — "nothing it emits is a compatibility contract below 1.0" in the
+admonition, "Nothing is a compatibility contract below 1.0" in Project status,
+and "named the JSON output and the exit codes as contracts" in the retraction
+history, which describes the withdrawn claim in the past tense. The word still
+appears; what must be gone is any sentence saying something *is* one, in the
+present tense. Read all three matches. A fourth means an assertion survived.
 
 - [ ] **Step 5: Verify the caveat and the table both landed**
 
@@ -197,10 +199,10 @@ it does the most damage."
 
 ---
 
-### Task 3: Correct the ten Go doc comments
+### Task 3: Correct the eleven Go doc comments
 
 **Files:**
-- Modify: `internal/cli/config.go:19-21` and `:157-158`, `internal/cli/cli.go:22-23`, `internal/cli/validate.go:13` and `:228-229`, `internal/cli/list.go:168-169`, `internal/cli/doctor.go:133-135`, `internal/cli/rebuild.go:141-143`, `internal/cli/status.go:251-252`, `internal/config/config.go:23-25`
+- Modify: `internal/cli/config.go:19-21` and `:157-158`, `internal/cli/cli.go:22-23`, `internal/cli/validate.go:13` and `:228-229`, `internal/cli/list.go:168-169`, `internal/cli/doctor.go:133-135`, `internal/cli/rebuild.go:141-143`, `internal/cli/status.go:251-252`, `internal/config/config.go:23-25`, `cmd/projectmux/main.go:9-11`
 - Test: none created. `go build ./...` and `go test ./...` are the verification.
 
 **Interfaces:**
@@ -222,11 +224,15 @@ Line numbers shift as edits land within a file. Match on the exact comment text 
 with:
 
 ```go
-// OutputSchemaVersion versions the JSON envelope. Nothing is a compatibility
-// contract below 1.0, this included; the field exists so that a break is
-// expressible when there is something to break. Bump it only for a breaking
-// change to the structure below.
+// OutputSchemaVersion versions the JSON envelope. Below 1.0 nothing
+// ProjectMux emits is a compatibility contract, this included; the field
+// exists so that a break is expressible when there is something to break.
+// Bump it only for a breaking change to the structure below.
 ```
+
+The phrase "compatibility contract" must sit on one line. Step 6 and Task 5
+count it with an exact-string grep, which is line-based and cannot see a phrase
+split by a wrap.
 
 `internal/cli/cli.go:22-23` — replace:
 
@@ -340,7 +346,7 @@ Replace each exactly:
 // layout may change in any release; automation uses --json.
 ```
 
-- [ ] **Step 3: Rewrite the one comment naming a narrower contract**
+- [ ] **Step 3: Rewrite the remaining two comments**
 
 `internal/cli/validate.go:13` — replace:
 
@@ -355,6 +361,28 @@ with:
 // Validation statuses. They appear verbatim in the JSON output, so they are
 // spelled once here rather than inline.
 ```
+
+`cmd/projectmux/main.go:9-11` — the package doc makes the same JSON-versus-human
+contrast as the six redirects. Replace:
+
+```go
+// This build is an alpha. The configuration schema and the exit codes may
+// still change below 1.0; the JSON envelopes carry a schema_version, and
+// human-readable output is deliberately not a compatibility contract.
+```
+
+with:
+
+```go
+// This build is an alpha. Nothing it emits is a compatibility contract below
+// 1.0 — not the configuration schema, the command surface, the JSON
+// envelopes, or the exit codes. The envelopes carry a schema_version so a
+// break is expressible, and human-readable output remains the least stable of
+// them; automation should parse --json.
+```
+
+Keep "compatibility contract" on one line here too, for the same reason as
+Step 1.
 
 - [ ] **Step 4: Verify nothing executable changed**
 
@@ -380,10 +408,10 @@ wrapping shown in Step 2.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add internal/
+git add internal/ cmd/
 git commit -m "refactor: stop asserting a compatibility contract in doc comments
 
-Ten comments either claimed the JSON envelope and exit codes were
+Eleven comments either claimed the JSON envelope and exit codes were
 contracts or pointed automation at that guarantee. Both became false when
 the README retracted it. The six redirects keep their real point —
 human-readable layout is less stable than --json, which was true before
@@ -397,7 +425,7 @@ Comment-only: go build and go test are unchanged."
 ### Task 4: Record the decision in `docs/design.md` §12
 
 **Files:**
-- Modify: `docs/design.md` — append a new subsection at the end of §12, immediately before `## 13. Extraction sequence` (currently line 488)
+- Modify: `docs/design.md` — append a new subsection at the end of §12, immediately before `## 13. Extraction sequence` (currently line 488), and rewrite the standing claim at `docs/design.md:280-281` in §8
 
 **Interfaces:**
 - Consumes: Tasks 1-3, which must already be committed — this amendment describes what landed, and writing it first would make it a prediction.
@@ -413,10 +441,10 @@ Insert immediately before the `## 13. Extraction sequence` heading, preserving t
 ### What 1.0 means, and why nothing is promised before it
 
 The section above closed the two named pre-1.0 gates without saying what 1.0
-would commit to. The answer is now recorded: **nothing is a compatibility
-contract below 1.0**, and the two that were advertised — the versioned JSON
-envelope and the exit codes — are withdrawn rather than extended. The full
-reasoning is in
+would commit to. The answer is now recorded: **nothing ProjectMux emits is a
+compatibility contract below 1.0**, and the two that were advertised — the
+versioned JSON envelope and the exit codes — are withdrawn rather than
+extended. The full reasoning is in
 `docs/superpowers/specs/2026-08-07-v1-stability-contracts-design.md`; the
 durable parts are these.
 
@@ -435,8 +463,9 @@ moved, so the ambiguity is untested. This is the part of the envelope promise
 most likely to fail first, and it has no decided rule.
 
 **The exit codes were different, and were withdrawn anyway.** They are
-genuinely enforced — 101 lines across `internal/cli`'s tests reference the
-seven constants and all seven are exercised. They go for consistency of
+genuinely enforced — 101 test lines across `internal/cli` reference the seven
+constants (102 occurrences; `wiring_test.go:222` carries two) and all seven are
+exercised. They go for consistency of
 message alone: a README saying "nothing is frozen below 1.0, except this one
 thing" invites exactly the selective reading the retraction exists to prevent.
 This is the one place the decision goes further than its evidence demands, and
@@ -463,13 +492,34 @@ Run: `grep -n "^## 13\|^### What 1.0 means" docs/design.md`
 
 Expected: the `### What 1.0 means` line number is smaller than the `## 13` line number — the amendment is inside §12, not after it.
 
-- [ ] **Step 3: Verify the design doc asserts no surviving contract**
+- [ ] **Step 3: Retract the same claim in §8**
+
+`docs/design.md:280-281` already asserts the contrast the amendment withdraws —
+it survives the sweep only because it phrases the claim negatively. Replace:
+
+```markdown
+Human output is not a compatibility contract. Commands offering JSON emit a
+top-level schema version and use a documented, versioned structure.
+```
+
+with:
+
+```markdown
+Nothing ProjectMux emits is a compatibility contract below 1.0. Human output
+is the least stable of it: commands offering JSON at least carry a top-level
+schema version and a documented, versioned structure.
+```
+
+- [ ] **Step 4: Verify the design doc asserts no surviving contract**
 
 Run: `grep -n "compatibility contract" docs/design.md`
 
-Expected: one match, inside the amendment, in the sentence stating nothing is one below 1.0.
+Expected: exactly two matches — the rewritten §8 line from Step 3 and the
+amendment's opening claim from Step 1, both saying nothing *is* one below 1.0.
+Read both. One match means a replacement wrapped the phrase across two lines
+and grep cannot see it; three or more means an assertion survived.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add docs/design.md
@@ -497,11 +547,20 @@ codes went anyway despite being enforced, and what 1.0 would require."
 
 Run: `grep -rn "compatibility contract" --include='*.md' --include='*.go' . | grep -v docs/superpowers/`
 
-Expected: exactly five matches — two in `README.md` (Task 1), one in
-`docs/commands.md` (Task 2), one in `docs/design.md` (Task 4), and one in
-`internal/cli/config.go` (Task 3 Step 1). Read every one. **Each must be a sentence saying nothing *is* a contract below
+Expected: exactly seven matches — two in `README.md` (Task 1), one in
+`docs/commands.md` (Task 2), two in `docs/design.md` (Task 4 Steps 1 and 3),
+one in `internal/cli/config.go` (Task 3 Step 1), and one in
+`cmd/projectmux/main.go` (Task 3 Step 3). Read every one. **Each must be a
+sentence saying nothing *is* a contract below
 1.0.** Any line asserting that something *is* a compatibility contract is a
 survivor: fix it, then re-run this step.
+
+A count of seven is not by itself proof. This grep is line-based, so a
+replacement that wrapped "compatibility contract" across two lines is invisible
+to it — and an *unedited* site elsewhere can supply the missing match, leaving
+the total right and both locations wrong. That is why the expectation above
+names the file each match must come from. Check the filenames, not just the
+count.
 
 `docs/superpowers/` is excluded because the spec and this plan discuss the
 retracted claim by necessity; they are the record of it, not an assertion of
