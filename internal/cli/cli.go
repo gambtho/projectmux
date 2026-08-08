@@ -45,7 +45,7 @@ commands:
         observe, ensure, record, and attach the workspace session
   attach [--json] [--compact] [<workspace>]
         attach to the live workspace session; never creates one
-  stop [--container] [--json] [--compact] [<workspace>]
+  stop [--container] [--force] [--json] [--compact] [<workspace>]
         end the workspace session, and with --container its container
   autostart [--json] [--compact]
         start containers for registered repositories with autostart: true

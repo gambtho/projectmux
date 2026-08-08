@@ -323,7 +323,7 @@ honest report of an impossible operation. Detach first, or use
 ## projectmux stop
 
 ```text
-projectmux stop [--container] [--json] [--compact] [<workspace>]
+projectmux stop [--container] [--force] [--json] [--compact] [<workspace>]
 ```
 
 Ends the workspace session, and with `--container` its container too.
@@ -336,6 +336,19 @@ stopped session slabledger
 Stop is idempotent: stopping an already-stopped workspace succeeds. It kills
 the session by its observed session ID rather than by name, so a session
 renamed or replaced between observation and action is not killed by mistake.
+
+A container belongs to a repository and is shared by every session on it, so
+`stop --container` refuses with exit 6 when another session on the same
+repository is live, and names them:
+
+```text
+$ projectmux stop --container
+projectmux: the container is shared with live session(s) slabledger--feature-a; refusing to stop it (use --force)
+```
+
+`--force` stops it anyway. The sibling check and the container stop happen
+under one continuous hold of the repository lock, so a sibling cannot open
+into the gap between them.
 
 A partial failure — the session ended but the container did not — reports what
 succeeded and what did not on stdout, with a one-line summary on stderr and a

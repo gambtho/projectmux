@@ -15,13 +15,14 @@ import (
 	"github.com/gambtho/projectmux/internal/state"
 )
 
-const stopHelp = `usage: projectmux stop [--container] [--json] [--compact] [<workspace>]
+const stopHelp = `usage: projectmux stop [--container] [--force] [--json] [--compact] [<workspace>]
 
 End the workspace's tmux session, and with --container also stop its
 bound container. The only destructive command; idempotent — stopping an
 already-stopped workspace succeeds.
 
-  --container  also stop the workspace's bound container
+  --container  also stop the container the workspace's repository shares
+  --force      stop that container even while sibling sessions are live
   --json       emit the versioned JSON envelope instead of human text
   --compact    emit the JSON on a single line (implies --json)
 `
@@ -50,6 +51,7 @@ type stopContainerInfo struct {
 func runStop(ctx context.Context, args []string, stdout io.Writer) error {
 	fs := newFlagSet("stop")
 	stopContainer := fs.Bool("container", false, "also stop the bound container")
+	force := fs.Bool("force", false, "stop a shared container even while sibling sessions are live")
 	asJSON := fs.Bool("json", false, "emit the versioned JSON envelope")
 	compact := fs.Bool("compact", false, "emit the JSON on a single line")
 
@@ -104,7 +106,8 @@ func runStop(ctx context.Context, args []string, stdout io.Writer) error {
 		ContainerAct: newContainerActuator(),
 	}
 	res, stopErr := ctrl.Stop(ctx, controller.Desired{Workspace: ws},
-		*stopContainer, filepath.Join(stateRoot, "locks"), lockTimeout)
+		controller.StopOptions{Container: *stopContainer, Force: *force},
+		filepath.Join(stateRoot, "locks"), lockTimeout)
 
 	// Nothing was destroyed before a refusal or lock failure: normal
 	// error path, nothing on stdout. After partial progress the report
