@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"text/tabwriter"
 
@@ -37,15 +38,24 @@ restore container bindings, which the next open reacquires.
 `
 
 // rebuildEnvelope is the versioned JSON structure for projectmux
-// rebuild. Registered and Conflicts are always arrays, empty rather than
-// absent, matching doctor's always-full checks. The envelope is written
-// to stdout even when the command exits 6 — the report is the output
-// (stop/autostart spec §5).
+// rebuild. Migrated, Registered and Conflicts are always arrays, empty
+// rather than absent, matching doctor's always-full checks. The envelope
+// is written to stdout even when the command exits 6 — the report is the
+// output (stop/autostart spec §5).
 type rebuildEnvelope struct {
 	SchemaVersion int                 `json:"schema_version"`
 	DryRun        bool                `json:"dry_run"`
+	Migrated      []rebuildMigrated   `json:"migrated"`
 	Registered    []rebuildRegistered `json:"registered"`
 	Conflicts     []rebuildConflict   `json:"conflicts"`
+}
+
+// rebuildMigrated is one correction the upgrade pass made to state
+// migration 0002 left structurally valid but semantically stale.
+type rebuildMigrated struct {
+	Subject string `json:"subject"`
+	Action  string `json:"action"`
+	Into    string `json:"into,omitempty"`
 }
 
 type rebuildRegistered struct {
@@ -116,8 +126,14 @@ func rebuildEnvelopeFrom(report rebuild.Report) rebuildEnvelope {
 	env := rebuildEnvelope{
 		SchemaVersion: OutputSchemaVersion,
 		DryRun:        report.DryRun,
+		Migrated:      []rebuildMigrated{},
 		Registered:    []rebuildRegistered{},
 		Conflicts:     []rebuildConflict{},
+	}
+	for _, m := range report.Migrated {
+		env.Migrated = append(env.Migrated, rebuildMigrated{
+			Subject: m.Subject, Action: m.Action, Into: m.Into,
+		})
 	}
 	for _, r := range report.Registered {
 		env.Registered = append(env.Registered, rebuildRegistered{
@@ -140,7 +156,7 @@ func rebuildEnvelopeFrom(report rebuild.Report) rebuildEnvelope {
 // conflict. This layout is not a compatibility contract; automation
 // should use --json.
 func writeRebuildHuman(w io.Writer, env rebuildEnvelope) error {
-	if len(env.Registered) == 0 && len(env.Conflicts) == 0 {
+	if len(env.Registered) == 0 && len(env.Conflicts) == 0 && len(env.Migrated) == 0 {
 		fmt.Fprintln(w, "nothing to rebuild: every live session is already recorded")
 		return nil
 	}
@@ -149,6 +165,11 @@ func writeRebuildHuman(w io.Writer, env rebuildEnvelope) error {
 		registered = "would-register"
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	// Migrations print before registrations, since a collapse explains the
+	// registration that follows it.
+	for _, m := range env.Migrated {
+		fmt.Fprintln(tw, cells(m.Action, m.Subject, m.Into))
+	}
 	for _, r := range env.Registered {
 		fmt.Fprintln(tw, cells(registered, r.Slug, r.Session))
 	}
@@ -202,21 +223,33 @@ func buildRebuild(ctx context.Context, dryRun bool) (rebuild.Report, error) {
 				err.Error(),
 		}
 	}
+	applier := &rebuild.Applier{
+		Store:    st,
+		Repos:    st,
+		Sessions: newSessionObserver(),
+		Retagger: newSessionRetagger(),
+		Resolver: worktreeResolver{},
+		Config:   configDigests{root: configRoot, defaults: defaults},
+		Locker:   stateLocker{dir: filepath.Join(stateRoot, "locks")},
+		Clock:    systemClock{},
+		DryRun:   dryRun,
+	}
+
+	// The upgrade pass runs before the records are read: it moves rows and
+	// rewrites the workspace IDs live sessions claim, so a classification
+	// over the pre-pass state would register duplicates for sessions that
+	// are already running (design §9).
+	migration := applier.Migrate(ctx, live)
+
 	records, err := st.Workspaces()
 	if err != nil {
 		return rebuild.Report{}, fmt.Errorf("reading stored workspaces: %w", err)
 	}
 
-	applier := &rebuild.Applier{
-		Store:    st,
-		Sessions: newSessionObserver(),
-		Resolver: worktreeResolver{},
-		Config:   configDigests{root: configRoot, defaults: defaults},
-		Locker:   workspaceLocker{dir: filepath.Join(stateRoot, "locks")},
-		Clock:    systemClock{},
-		DryRun:   dryRun,
-	}
-	return applier.Apply(ctx, rebuild.Classify(live, records)), nil
+	report := applier.Apply(ctx, rebuild.Classify(migration.Live, records))
+	report.Migrated = migration.Migrated
+	report.Conflicts = append(report.Conflicts, migration.Conflicts...)
+	return report, nil
 }
 
 // worktreeResolver re-derives a workspace's identity the way every other
@@ -225,10 +258,18 @@ func buildRebuild(ctx context.Context, dryRun bool) (rebuild.Report, error) {
 // (spec §3), and it is what lets rebuild verify the keys it was handed.
 type worktreeResolver struct{}
 
-func (worktreeResolver) Resolve(worktree string) (resolve.Workspace, error) {
+func (worktreeResolver) Resolve(repoRoot string) (resolve.Workspace, error) {
 	// No name and no roots: roots feed only lookup by name, and rebuild
 	// resolves from a directory.
-	return resolve.Resolve("", nil, worktree)
+	return resolve.Resolve("", nil, repoRoot)
+}
+
+// Exists separates "the directory is gone" from "git would not answer",
+// which Resolve reports identically. A row whose path is gone is dropped;
+// a row whose path is present is never discarded on a resolution failure.
+func (worktreeResolver) Exists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // configDigests supplies the desired digest from current configuration.
@@ -248,13 +289,14 @@ func (c configDigests) Digest(slug string) (string, error) {
 	return effective.Digest, nil
 }
 
-// workspaceLocker is the per-workspace filesystem lock every mutating
-// command takes before its final observation and holds through the
-// resulting state commit.
-type workspaceLocker struct{ dir string }
+// stateLocker is the filesystem lock every mutating command takes before
+// its final observation and holds through the resulting state commit. The
+// key is a workspace ID or a repository ID depending on what is being
+// changed; the lock directory is the same either way.
+type stateLocker struct{ dir string }
 
-func (w workspaceLocker) Lock(ctx context.Context, workspaceID string) (func(), error) {
-	l, err := lock.Acquire(ctx, w.dir, workspaceID, lockTimeout)
+func (w stateLocker) Lock(ctx context.Context, key string) (func(), error) {
+	l, err := lock.Acquire(ctx, w.dir, key, lockTimeout)
 	if err != nil {
 		return nil, err
 	}

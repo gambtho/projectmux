@@ -19,8 +19,13 @@ illustrative path so the examples stay readable.
 **Naming a workspace.** Commands that accept `<workspace>` resolve it two
 ways. With no argument, the workspace is the one containing the current
 directory. With an argument, it is looked up by name under the
-`repository_roots` configured in `defaults.yaml`, including linked worktrees in
-the conventional `.worktrees/` and `.claude/worktrees/` directories.
+`repository_roots` configured in `defaults.yaml`.
+
+Either way the answer is a *repository*, never one of its trees: a linked
+worktree — including the conventional `.worktrees/` and `.claude/worktrees/`
+directories — is a directory inside a repository, so working in one resolves
+to the repository it belongs to, and it cannot be named on its own. Every tree
+of a project therefore shares one workspace, one session, and one container.
 
 `projectmux <workspace>` with no command is shorthand for
 `projectmux open <workspace>`. A mistyped command therefore resolves as a
@@ -58,8 +63,8 @@ identity keys.
 | 0 | success |
 | 1 | unexpected or I/O failure |
 | 2 | usage error |
-| 3 | the workspace name matched more than one worktree |
-| 4 | the workspace name matched no worktree |
+| 3 | the workspace name matched more than one repository |
+| 4 | the workspace name matched no repository |
 | 5 | invalid configuration |
 | 6 | the plan refused: a conflict or uncertainty; do not blindly retry |
 
@@ -112,10 +117,10 @@ root does not read as workspace configuration drift.
 
 ### `--validate`
 
-Checks configuration files **without resolving a worktree**. This is the point
-of the mode: ordinary `config <workspace>` resolves through git, so a workspace
-whose worktree has moved reports as unknown and never receives a configuration
-verdict. Here the argument names a workspace *file* directly.
+Checks configuration files **without resolving a repository**. This is the
+point of the mode: ordinary `config <workspace>` resolves through git, so a
+workspace whose repository has moved reports as unknown and never receives a
+configuration verdict. Here the argument names a workspace *file* directly.
 
 With no argument every configured workspace is checked:
 
@@ -225,6 +230,13 @@ refusal           tmux could not be observed; refusing to act on an unknown sess
 
 Status exits 0 whenever the observation succeeded. Findings are report content,
 not command failure.
+
+One finding is about the database rather than the workspace. A `needs rebuild`
+line — `needs_rebuild` and `needs_rebuild_reason` in the envelope — means a
+repository is still recorded at one of this repository's linked worktrees, the
+state the repository-scoped schema migration leaves behind. It is not an error,
+and status still reports everything else; `projectmux rebuild` collapses the
+row.
 
 ## projectmux doctor
 
@@ -402,9 +414,9 @@ projectmux rebuild [--dry-run] [--json] [--compact]
 
 Recovers workspace registrations the state database has lost. Every live
 projectmux session carries three identity keys — the workspace ID, the slug,
-and the worktree — so a session that outlived its database still describes the
-workspace it belongs to. Rebuild reads those keys, re-derives the rest of the
-registration from the worktree itself, and writes the row back.
+and the repository root — so a session that outlived its database still
+describes the workspace it belongs to. Rebuild reads those keys, re-derives the
+rest of the registration from the repository itself, and writes the row back.
 
 ```text
 $ projectmux rebuild
@@ -412,15 +424,26 @@ registered  slabledger  slabledger
 ```
 
 **What it does not do.** Rebuild recovers registrations *from live sessions*
-only. It does not rediscover worktrees from `repository_roots` — a workspace
+only. It does not rediscover repositories from `repository_roots` — a workspace
 with no live session stays unregistered until the next `open` — and it does not
 restore container bindings, which the next `open` reacquires. The name is
 broader than the command.
 
+**It completes the repository-scoped upgrade.** The schema migration that
+introduced repositories moves every stored row verbatim, treating each
+recorded path as a repository root, because telling a main worktree from a
+linked one needs git and a migration must never fail because a directory
+moved. Rebuild is what corrects that: rows recorded at a linked worktree
+collapse into their parent repository, and rows whose path is gone are
+dropped. Live sessions from before the upgrade are matched by the tree they
+record and retagged onto their repository, so a running session is adopted
+rather than duplicated. `status` reports a repository whose recorded root is
+not a main worktree as needing this run.
+
 **It only fills in what is missing.** Rebuild never overwrites a recorded
 value. A workspace already recorded with a different session name, two live
 sessions claiming the same workspace, a session whose keys disagree with the
-worktree they name — each is reported as a conflict and skipped, and the run
+repository they name — each is reported as a conflict and skipped, and the run
 exits 6. Nothing that was already known is lost by running it, which is why it
 applies by default rather than requiring confirmation.
 

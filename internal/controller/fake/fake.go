@@ -366,6 +366,28 @@ func (s *Store) Repositories() ([]state.Repository, error) {
 	return out, nil
 }
 
+// DropRepository removes a repository and everything keyed to it,
+// mirroring the cascade the real schema performs (migration 0002): the
+// repository row, every workspace belonging to it, and its container
+// binding. Each session's last operation goes with the record it hangs
+// off, the way last_operations cascades from workspaces.
+//
+// Dropping an id that is not there succeeds, matching the real store: a
+// second rebuild over an already-migrated installation must be a no-op
+// rather than an error.
+func (s *Store) DropRepository(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for wsID, rec := range s.records {
+		if rec.RepositoryID == id {
+			delete(s.records, wsID)
+		}
+	}
+	delete(s.containers, id)
+	delete(s.repositories, id)
+	return nil
+}
+
 // copyRepositoryLocked copies a repository and attaches its binding, which
 // is the LEFT JOIN the real store performs. The copy is what keeps a
 // caller from mutating stored state through the result.

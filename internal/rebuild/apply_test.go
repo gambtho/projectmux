@@ -61,6 +61,13 @@ func (r *mapResolver) Resolve(worktree string) (resolve.Workspace, error) {
 	return ws, nil
 }
 
+// Exists satisfies Resolver for the application tests, which never run
+// the upgrade pass. Every path they resolve is one the fixture says is
+// there, so the honest answer is unconditionally true; the pass that
+// actually turns on this distinction has its own resolver in
+// migrate_test.go.
+func (r *mapResolver) Exists(string) bool { return true }
+
 type mapConfig struct {
 	digests map[string]string
 	errs    map[string]error

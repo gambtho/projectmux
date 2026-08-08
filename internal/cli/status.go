@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/gambtho/projectmux/internal/config"
@@ -25,15 +26,17 @@ failures, resolved either from <workspace> or from the current directory.
 
 // statusEnvelope is the versioned JSON structure for projectmux status.
 type statusEnvelope struct {
-	SchemaVersion int            `json:"schema_version"`
-	Workspace     workspaceInfo  `json:"workspace"`
-	Registered    bool           `json:"registered"`
-	Stored        *storedInfo    `json:"stored,omitempty"`
-	Session       sessionInfo    `json:"session"`
-	Container     *containerInfo `json:"container,omitempty"`
-	Config        configInfo     `json:"config"`
-	LastOperation *operationInfo `json:"last_operation,omitempty"`
-	Plan          planInfo       `json:"plan"`
+	SchemaVersion      int            `json:"schema_version"`
+	Workspace          workspaceInfo  `json:"workspace"`
+	NeedsRebuild       bool           `json:"needs_rebuild"`
+	NeedsRebuildReason string         `json:"needs_rebuild_reason,omitempty"`
+	Registered         bool           `json:"registered"`
+	Stored             *storedInfo    `json:"stored,omitempty"`
+	Session            sessionInfo    `json:"session"`
+	Container          *containerInfo `json:"container,omitempty"`
+	Config             configInfo     `json:"config"`
+	LastOperation      *operationInfo `json:"last_operation,omitempty"`
+	Plan               planInfo       `json:"plan"`
 }
 
 type storedInfo struct {
@@ -152,6 +155,11 @@ func buildStatus(ctx context.Context, name string) (statusEnvelope, error) {
 	}
 	defer func() { _ = st.Close() }()
 
+	stale, err := staleRepositoryRoots(st, ws)
+	if err != nil {
+		return statusEnvelope{}, err
+	}
+
 	ctrl := controller.Controller{
 		Store:      st,
 		Sessions:   newSessionObserver(),
@@ -166,7 +174,49 @@ func buildStatus(ctx context.Context, name string) (statusEnvelope, error) {
 	if err != nil {
 		return statusEnvelope{}, err
 	}
-	return statusEnvelopeFrom(ws, effective, snap, controller.BuildPlan(snap)), nil
+	env := statusEnvelopeFrom(ws, effective, snap, controller.BuildPlan(snap))
+	if len(stale) > 0 {
+		env.NeedsRebuild = true
+		env.NeedsRebuildReason = fmt.Sprintf(
+			"%s is still recorded as a repository root but is a linked worktree of %s; "+
+				"run `projectmux rebuild` to collapse it",
+			strings.Join(stale, ", "), ws.RepoRoot)
+	}
+	return env, nil
+}
+
+// staleRepositoryRoots names repository rows recorded at a path that is
+// not this repository's root but resolves to it — what migration 0002
+// leaves behind for every linked worktree that used to be its own
+// workspace. Only `rebuild` can correct it, because the classification
+// needs git (design §9).
+//
+// Rows are filtered to this repository's slug first, so status makes at
+// most a couple of git calls: a linked worktree inherits its parent's
+// slug (resolve.slugFor), and 0002 moved the stored slug verbatim, so a
+// stale row for this repository always carries this repository's slug.
+//
+// A row whose path no longer resolves at all is skipped rather than
+// reported. It is rebuild's business — it will be dropped — but it cannot
+// be attributed to this repository, and two repositories of the same
+// directory name in two roots share a slug.
+func staleRepositoryRoots(st stateStore, ws resolve.Workspace) ([]string, error) {
+	repos, err := st.Repositories()
+	if err != nil {
+		return nil, fmt.Errorf("reading stored repositories: %w", err)
+	}
+	var stale []string
+	for _, repo := range repos {
+		if repo.Slug != ws.Slug || repo.RepoRoot == ws.RepoRoot {
+			continue
+		}
+		resolved, err := resolve.Resolve("", nil, repo.RepoRoot)
+		if err != nil || resolved.RepoRoot != ws.RepoRoot {
+			continue
+		}
+		stale = append(stale, repo.RepoRoot)
+	}
+	return stale, nil
 }
 
 func statusEnvelopeFrom(ws resolve.Workspace, effective config.Effective, snap controller.Snapshot, plan controller.Plan) statusEnvelope {
@@ -256,6 +306,9 @@ func writeStatusHuman(w io.Writer, env statusEnvelope) error {
 	fmt.Fprintf(tw, "workspace\t%s\n", env.Workspace.Slug)
 	fmt.Fprintf(tw, "repository\t%s\n", env.Workspace.RepoRoot)
 	fmt.Fprintf(tw, "id\t%s\n", env.Workspace.ID)
+	if env.NeedsRebuild {
+		fmt.Fprintf(tw, "needs rebuild\t%s\n", env.NeedsRebuildReason)
+	}
 
 	if env.Registered {
 		recorded := env.Stored.ProposedSession + " (proposed, unassigned)"

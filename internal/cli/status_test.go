@@ -264,3 +264,53 @@ func TestStatusLiveProbeContradictsStalePresent(t *testing.T) {
 		t.Errorf("observation = %+v, want an attempted live missing", env.Container.Observation)
 	}
 }
+
+// A repository still recorded at a linked worktree is what migration 0002
+// leaves behind, and only rebuild can correct it. Status is where an
+// operator looks first, so status is where it has to say so.
+func TestStatusReportsAStaleRepositoryRootAsNeedingRebuild(t *testing.T) {
+	ws := statusWorkspace(t)
+	worktree := linkedWorktree(t, "1529")
+	s := fake.NewStore()
+	if err := s.RegisterWorkspace(resolve.Workspace{
+		ID:           "stale-workspace-id",
+		RepositoryID: "stale-repository-id",
+		Slug:         ws.Slug,
+		RepoRoot:     worktree,
+		SessionName:  ws.Slug + "--1529",
+	}, "sha256:seed", cliTestTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	installFakeStore(t, s)
+	installSessionObserver(t, controller.SessionObservation{}, nil)
+
+	code, stdout, stderr := run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	env := decodeStatus(t, stdout)
+	if !env.NeedsRebuild {
+		t.Fatalf("needs_rebuild = false; %s is recorded as a repository root", worktree)
+	}
+	if !strings.Contains(env.NeedsRebuildReason, worktree) {
+		t.Errorf("reason %q does not name the stale root", env.NeedsRebuildReason)
+	}
+}
+
+func TestStatusIsQuietWhenNoRepositoryRootIsStale(t *testing.T) {
+	ws := statusWorkspace(t)
+	s := fake.NewStore()
+	if err := s.RegisterWorkspace(ws, "sha256:seed", cliTestTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	installFakeStore(t, s)
+	installSessionObserver(t, controller.SessionObservation{}, nil)
+
+	code, stdout, stderr := run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	if env := decodeStatus(t, stdout); env.NeedsRebuild {
+		t.Errorf("needs_rebuild = true on a migrated installation: %s", env.NeedsRebuildReason)
+	}
+}

@@ -1,0 +1,210 @@
+package rebuild
+
+import (
+	"context"
+
+	"github.com/gambtho/projectmux/internal/controller"
+	"github.com/gambtho/projectmux/internal/resolve"
+	"github.com/gambtho/projectmux/internal/state"
+)
+
+// MigrationStore is the slice of the state store the upgrade pass writes
+// through. It is separate from Store because the two answer to different
+// invariants: Store is fill-only, and this one deletes.
+type MigrationStore interface {
+	Repositories() ([]state.Repository, error)
+	DropRepository(id string) error
+}
+
+// Retagger rewrites the identity keys of a live tmux session.
+type Retagger interface {
+	RetagSession(ctx context.Context, target, workspaceID, repoRoot string) error
+}
+
+// Migrated is one correction the upgrade pass made. Action is
+// "collapsed", "dropped", or "retagged"; Into is the repository root the
+// subject now belongs to, and is empty for a drop.
+type Migrated struct {
+	Subject string
+	Action  string
+	Into    string
+}
+
+// MigrationResult is the pass's output. Live carries the sessions
+// classification should see — corrected where they were stale — rather
+// than the ones tmux reported.
+type MigrationResult struct {
+	Live      []controller.LiveSession
+	Migrated  []Migrated
+	Conflicts []Conflict
+}
+
+// Migrate completes what migration 0002 could not. 0002 is pure SQL and
+// moved every stored row verbatim, treating each recorded path as a
+// repository root, because telling a main worktree from a linked one
+// requires git and a schema migration must never fail on a filesystem
+// that changed since the last run (design §9). The result is
+// over-counted, never wrong: extra repository rows that resolve to the
+// same real repository. This is the pass that merges them.
+//
+// It runs before classification, not as part of it, because both halves
+// change the inputs Classify reads: rows move, and live sessions change
+// the workspace ID they claim.
+func (a *Applier) Migrate(ctx context.Context, live []controller.LiveSession) MigrationResult {
+	res := MigrationResult{Live: live}
+	a.collapseRows(ctx, &res)
+	a.retagSessions(ctx, &res)
+	return res
+}
+
+// collapseRows folds every repository row that is really a linked
+// worktree into its parent, and drops the rows whose path is gone.
+func (a *Applier) collapseRows(ctx context.Context, res *MigrationResult) {
+	repos, err := a.Repos.Repositories()
+	if err != nil {
+		res.Conflicts = append(res.Conflicts, Conflict{
+			Subject: "repositories",
+			Reason: "reading the stored repositories failed: " + err.Error() +
+				"; nothing was migrated",
+		})
+		return
+	}
+
+	for _, repo := range repos {
+		ws, resolveErr := a.Resolver.Resolve(repo.RepoRoot)
+		if resolveErr != nil {
+			if a.Resolver.Exists(repo.RepoRoot) {
+				// The directory is there and git would not answer for it.
+				// Dropping the row here would discard state over a
+				// transient failure, so this refuses instead.
+				res.Conflicts = append(res.Conflicts, conflictAt(repo.RepoRoot,
+					"resolving the repository failed: %v; the directory still exists, "+
+						"so the row is kept and nothing was written", resolveErr))
+				continue
+			}
+			res.Migrated = append(res.Migrated, Migrated{
+				Subject: repo.RepoRoot, Action: "dropped",
+			})
+			if a.DryRun {
+				continue
+			}
+			if err := a.Repos.DropRepository(repo.ID); err != nil {
+				res.Conflicts = append(res.Conflicts, conflictAt(repo.RepoRoot,
+					"dropping the repository whose path is gone failed: %v", err))
+			}
+			continue
+		}
+		if ws.RepoRoot == repo.RepoRoot {
+			// Already a main worktree. Deliberately silent, so a second
+			// run over a migrated installation reports nothing.
+			continue
+		}
+		a.collapseInto(ctx, repo, ws, res)
+	}
+}
+
+// collapseInto registers the parent repository and then drops the stale
+// row. The order is load-bearing: a crash between the two leaves an extra
+// row that resolves to the same repository — the over-counted state this
+// pass already knows how to merge — where the other order would lose the
+// registration outright.
+func (a *Applier) collapseInto(ctx context.Context, repo state.Repository, ws resolve.Workspace, res *MigrationResult) {
+	res.Migrated = append(res.Migrated, Migrated{
+		Subject: repo.RepoRoot, Action: "collapsed", Into: ws.RepoRoot,
+	})
+	if a.DryRun {
+		return
+	}
+
+	digest, err := a.Config.Digest(ws.Slug)
+	if err != nil {
+		res.Conflicts = append(res.Conflicts, conflictAt(repo.RepoRoot,
+			"loading the configuration for %q failed: %v; nothing was written",
+			ws.Slug, err))
+		return
+	}
+
+	// The repository lock, not the workspace lock: this rewrites rows
+	// every session on the repository shares. It is taken and released
+	// here, before Apply takes any workspace lock, so the plan's global
+	// repository-then-workspace ordering holds without nesting.
+	release, err := a.Locker.Lock(ctx, ws.RepositoryID)
+	if err != nil {
+		res.Conflicts = append(res.Conflicts, conflictAt(repo.RepoRoot,
+			"taking the repository lock: %v", err))
+		return
+	}
+	defer release()
+
+	if err := a.Store.RegisterWorkspace(ws, digest, a.Clock.Now()); err != nil {
+		res.Conflicts = append(res.Conflicts, conflictAt(repo.RepoRoot,
+			"registering the parent repository %s: %v", ws.RepoRoot, err))
+		return
+	}
+	if err := a.Repos.DropRepository(repo.ID); err != nil {
+		res.Conflicts = append(res.Conflicts, conflictAt(repo.RepoRoot,
+			"the parent repository %s was registered, but dropping the "+
+				"linked-worktree row failed: %v; a later rebuild completes it",
+			ws.RepoRoot, err))
+	}
+}
+
+// retagSessions points sessions created before the change at their
+// repository.
+//
+// Existing workspace IDs change even for repositories that were already
+// main worktrees, because the session name is now an input to the hash.
+// The ID lives on the session as @dev_workspace_id, so a mismatch alone
+// says nothing about whether this is the same workspace. The session is
+// therefore matched by @dev_worktree — the one key whose value identifies
+// a tree rather than a derivation — and the ID is rewritten rather than
+// read as evidence of a different workspace.
+//
+// @dev_worktree keeps its name. Renaming it would strand every running
+// session from the rebuild that is supposed to recover it (design §5.1);
+// only its value changes, to the repository root.
+func (a *Applier) retagSessions(ctx context.Context, res *MigrationResult) {
+	for i, sess := range res.Live {
+		if sess.WorkspaceID == "" {
+			continue
+		}
+		ws, err := a.Resolver.Resolve(sess.Worktree)
+		if err != nil {
+			// A session whose tree is gone is not this pass's problem:
+			// applyCandidate already reports it, with the reason an
+			// operator needs.
+			continue
+		}
+		if sess.WorkspaceID == ws.ID && sess.Worktree == ws.RepoRoot {
+			continue
+		}
+
+		res.Migrated = append(res.Migrated, Migrated{
+			Subject: sess.Name, Action: "retagged", Into: ws.RepoRoot,
+		})
+		if a.DryRun {
+			continue
+		}
+
+		release, err := a.Locker.Lock(ctx, ws.ID)
+		if err != nil {
+			res.Conflicts = append(res.Conflicts, conflictAt(sess.Name,
+				"taking the workspace lock: %v", err))
+			continue
+		}
+		err = a.Retagger.RetagSession(ctx, sess.Name, ws.ID, ws.RepoRoot)
+		release()
+		if err != nil {
+			res.Conflicts = append(res.Conflicts, conflictAt(sess.Name,
+				"rewriting the identity keys of session %q failed: %v; the session "+
+					"keeps its old keys and a later rebuild retries", sess.Name, err))
+			continue
+		}
+		res.Live[i].WorkspaceID = ws.ID
+		res.Live[i].Worktree = ws.RepoRoot
+	}
+}
+
+func conflictAt(subject, format string, args ...any) Conflict {
+	return *conflictf(subject, format, args...)
+}

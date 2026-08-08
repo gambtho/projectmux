@@ -175,3 +175,34 @@ func (c *Client) KillSession(ctx context.Context, target string) error {
 	}
 	return nil
 }
+
+// RetagSession rewrites a live session's identity keys so that a session
+// created before repositories became the unit of a workspace is adopted
+// rather than duplicated (design §9).
+//
+// Two invocations rather than one chained command, and in this order:
+// @dev_worktree is what rebuild matches a stale session by, so it is the
+// key that must never be left pointing somewhere the ID no longer agrees
+// with. A failure after the first call leaves a session whose worktree is
+// correct and whose ID is stale — exactly the state this function already
+// knows how to fix on the next run.
+//
+// target is the plain session name: set-option's -t is not a
+// target-session, so it rejects the "=" exact-match prefix (verified on
+// tmux 3.4, see createArgv).
+func (c *Client) RetagSession(ctx context.Context, target, workspaceID, repoRoot string) error {
+	for _, kv := range [][2]string{
+		{controller.KeyWorktree, repoRoot},
+		{controller.KeyWorkspaceID, workspaceID},
+	} {
+		res, err := c.exec(ctx, "set-option", "-t", target, kv[0], kv[1])
+		if err != nil {
+			return err
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("tmux set-option %s exited %d: %s",
+				kv[0], res.ExitCode, bytes.TrimSpace(res.Stderr))
+		}
+	}
+	return nil
+}

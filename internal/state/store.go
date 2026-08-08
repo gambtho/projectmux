@@ -139,6 +139,21 @@ func (s *Store) RegisterWorkspace(ws resolve.Workspace, desiredDigest string, no
 	return tx.Commit()
 }
 
+// DropRepository removes a repository and everything keyed to it. The
+// workspaces, container binding, and last operations go with it: every
+// foreign key into repositories cascades (migration 0002), and the
+// connection string enables foreign_keys (state.go:65).
+//
+// Dropping an id that is not there succeeds. Rebuild is re-runnable, and
+// a second pass over an already-migrated installation must be a no-op
+// rather than an error.
+func (s *Store) DropRepository(id string) error {
+	if _, err := s.db.Exec(`DELETE FROM repositories WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("dropping repository %s: %w", id, err)
+	}
+	return nil
+}
+
 // selectRecord joins the repository for the identity columns and the
 // repository's container binding for the projection Record.Container
 // exposes. The binding join is on repository_id, not workspace_id: that is

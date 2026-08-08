@@ -13,11 +13,18 @@ import (
 	"github.com/gambtho/projectmux/internal/state"
 )
 
-// Resolver derives a workspace from a worktree directory. It is an
-// interface rather than a direct call to resolve.Resolve so application
-// is testable without a real git repository.
+// Resolver derives a workspace from a repository root. It is an interface
+// rather than a direct call to resolve.Resolve so application is testable
+// without a real git repository.
+//
+// Exists is separate from Resolve's error because the two failures call
+// for opposite actions: a path the filesystem no longer has is a row to
+// drop, while a path that is present but will not resolve is a refusal.
+// Resolve reports both as a plain error, so the distinction has to be
+// asked for.
 type Resolver interface {
-	Resolve(worktree string) (resolve.Workspace, error)
+	Resolve(repoRoot string) (resolve.Workspace, error)
+	Exists(path string) bool
 }
 
 // ConfigLoader returns the desired digest for a workspace slug.
@@ -35,11 +42,12 @@ type Store interface {
 	AdoptSessionName(workspaceID, name string, now time.Time) error
 }
 
-// Locker takes the per-workspace lock and returns its release. The
-// release is a plain func so the caller cannot forget which lock it
-// belongs to.
+// Locker takes a filesystem lock and returns its release. The release is a
+// plain func so the caller cannot forget which lock it belongs to. The key
+// is a workspace ID for session work and a repository ID for work that is
+// shared by every session on a repository.
 type Locker interface {
-	Lock(ctx context.Context, workspaceID string) (func(), error)
+	Lock(ctx context.Context, key string) (func(), error)
 }
 
 // Registered is one workspace rebuild recovered.
@@ -50,10 +58,11 @@ type Registered struct {
 	Session  string
 }
 
-// Report is what one rebuild run did and declined to do. Both slices are
-// non-nil even when empty: the JSON envelope always carries both arrays.
+// Report is what one rebuild run did and declined to do. Every slice is
+// non-nil even when empty: the JSON envelope always carries the arrays.
 type Report struct {
 	DryRun     bool
+	Migrated   []Migrated
 	Registered []Registered
 	Conflicts  []Conflict
 }
@@ -63,7 +72,9 @@ type Report struct {
 // tmux, or SQLite.
 type Applier struct {
 	Store    Store
+	Repos    MigrationStore
 	Sessions controller.SessionObserver
+	Retagger Retagger
 	Resolver Resolver
 	Config   ConfigLoader
 	Locker   Locker
@@ -77,6 +88,7 @@ type Applier struct {
 func (a *Applier) Apply(ctx context.Context, plan Plan) Report {
 	report := Report{
 		DryRun:     a.DryRun,
+		Migrated:   []Migrated{},
 		Registered: []Registered{},
 		Conflicts:  append([]Conflict{}, plan.Conflicts...),
 	}

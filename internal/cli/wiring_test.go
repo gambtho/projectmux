@@ -57,6 +57,10 @@ func (g guardedStore) AdoptSessionName(string, string, time.Time) error {
 	return g.forbidden("AdoptSessionName")
 }
 
+func (g guardedStore) DropRepository(string) error {
+	return g.forbidden("DropRepository")
+}
+
 func installFakeStore(t *testing.T, s *fake.Store) {
 	t.Helper()
 	orig := openStore

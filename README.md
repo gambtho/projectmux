@@ -31,8 +31,8 @@ runtime are actually doing, then makes the machine match that description.
 - **Reconciliation, not a startup script.** ProjectMux observes what exists,
   explains the drift, and converges toward the declared workspace instead of
   blindly recreating it.
-- **Worktree-aware lookup.** Open a repository by name from configured roots,
-  including linked git worktrees in the conventional directories.
+- **Worktree-aware lookup.** Open a repository by name from configured roots;
+  working inside a linked git worktree resolves to the repository it belongs to.
 - **Readable by humans and machines.** Concise terminal reports, or a versioned
   JSON envelope with documented exit codes.
 - **No replacement ecosystem.** Your tmux configuration, container runtime,
@@ -253,7 +253,7 @@ windows:
     shell: true
   - name: build
     command: make test
-    cwd: sub/dir       # relative to the worktree; may not escape it
+    cwd: sub/dir       # relative to the repository root; may not escape it
     location: container
 ```
 
@@ -295,9 +295,10 @@ and `--compact` for that envelope on one line.
 output, and the exit code each command returns.
 
 Commands that accept `<workspace>` resolve it from the current directory when
-you omit it, or look it up by name under the configured `repository_roots`,
-including linked worktrees in the conventional `.worktrees/` and
-`.claude/worktrees/` directories.
+you omit it, or look it up by name under the configured `repository_roots`.
+Either way the answer is a repository: a linked worktree — including the
+conventional `.worktrees/` and `.claude/worktrees/` directories — resolves to
+its parent repository rather than being a workspace of its own.
 
 ### Exit codes
 
@@ -306,8 +307,8 @@ including linked worktrees in the conventional `.worktrees/` and
 | 0 | success |
 | 1 | unexpected or I/O failure |
 | 2 | usage error |
-| 3 | the workspace name matched more than one worktree |
-| 4 | the workspace name matched no worktree |
+| 3 | the workspace name matched more than one repository |
+| 4 | the workspace name matched no repository |
 | 5 | invalid configuration |
 | 6 | the plan refused: a conflict or uncertainty; do not blindly retry |
 
@@ -357,16 +358,17 @@ agent-orchestration platform.
 
 ### Does it support git worktrees?
 
-Yes. Workspace lookup resolves linked worktrees, including those in the
-conventional `.worktrees/` and `.claude/worktrees/` directories, and workspace
-identity is collision-safe across them. A linked worktree shares its parent
-repository's configuration.
+Yes, by treating the repository as the unit. Working in a linked worktree —
+including those in the conventional `.worktrees/` and `.claude/worktrees/`
+directories — resolves to the repository it belongs to, so every worktree of a
+project shares one workspace identity, one tmux session, and one Dev Container
+rather than each getting its own.
 
 ### Does it create or manage worktrees?
 
 No. Managing project source and creating worktrees are explicit non-goals.
-ProjectMux opens worktrees that already exist; `git` and your existing tools
-remain responsible for creating them.
+ProjectMux opens repositories that already exist; `git` and your existing tools
+remain responsible for creating and removing their worktrees.
 
 ### Which operating systems are supported?
 
