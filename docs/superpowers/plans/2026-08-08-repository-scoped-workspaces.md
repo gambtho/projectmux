@@ -32,11 +32,13 @@ Tasks 1–9 are sequential: each consumes types the previous one produces. Task 
 
 One property Task 11 relies on was checked against the code rather than assumed: `Ensure` takes its lock as the first statement of the pass (`internal/controller/ensure.go:81`) and releases it in a `defer`, so registration, observation, the container phase, and the terminal commit all run inside one continuous hold. Task 3 substitutes `lockPhases` at that same position and returns a single release closure, so the repository lock spans the whole pass too. **The observe phase therefore runs inside the repository lock**, and no lock-ordering change is needed to make concurrent opens deduplicate. Task 11's remaining risk is the other half of the composition — whether a binding written under a repository ID is readable through a *sibling* session's record — and its Step 3 is written to resolve that by running the test rather than by predicting the answer.
 
-The tree does not build between Task 1 and Task 5. Task 1 removes `resolve.Workspace.Worktree` and `.IsPrimary`, which six packages read, and Task 2 does the same to `state.Record`. Every remaining reader is converted by the first task that gates the package it lives in, which is what makes each task's verification runnable: `internal/controller` and its fake convert in Task 3, whose very first test run is `go test ./internal/controller/`; `internal/container`'s docker-gated fixture converts in Task 4; and `internal/cli` — whose test binary links `internal/container`, `internal/controller`, `internal/doctor`, `internal/rebuild` and `internal/tmux` (`go list -deps -test ./internal/cli/...`) — converts in Task 5, along with the `internal/doctor` and `internal/rebuild` readers it drags in. `go build ./...` is therefore green again from the end of Task 5. Do not treat an unrelated package's build failure before that point as a regression.
+The tree does not build between Task 1 and Task 5a. Task 1 removes `resolve.Workspace.Worktree` and `.IsPrimary`, which six packages read, and Task 2 does the same to `state.Record`. Every remaining reader is converted by the first task that gates the package it lives in, which is what makes each task's verification runnable: `internal/controller` and its fake convert in Task 3, whose very first test run is `go test ./internal/controller/`; `internal/container`'s docker-gated fixture converts in Task 4; and `internal/cli` — whose test binary links `internal/container`, `internal/controller`, `internal/doctor`, `internal/rebuild` and `internal/tmux` (`go list -deps -test ./internal/cli/...`) — converts across Task 5a and Task 5b, along with the `internal/doctor` and `internal/rebuild` readers it drags in. `go build ./...` is therefore green again from the end of Task 5a. Do not treat an unrelated package's build failure before that point as a regression.
+
+Task 5a and Task 5b were one task. They are split at the `go build ./...` gate because that is the only consistent point between Task 4 and Task 6: Task 5a converts source files only and ends with the whole tree compiling; Task 5b rewrites `internal/controller/autostart_test.go` in its second step and does not restore the build until its thirteenth, so no cut inside 5b leaves a committable tree. Task 5b is the largest task in the plan and cannot honestly be made smaller.
 
 `go test ./...` goes green one task later than `go build ./...`. `internal/doctor`'s own tests are the last unconverted readers, and no task before Task 9 gates that package, so they convert there and Task 9 is where the full suite becomes a meaningful gate again. Tasks 3 through 8 each run a gate scoped to the packages they own, and every one of those gates is achievable at the point it appears: a package a task tests is a package that task (or an earlier one) has already converted. Where a task's Files block names a file only to make a package compile, the step says so.
 
-One deliberate overlap: **Task 3 edits `internal/controller/autostart.go` to use `lockPhases`, and Task 5 then replaces that function entirely with `StartRepositoryContainer`, which takes the repository lock alone.** That is not a contradiction. Task 3 must leave the tree consistent at its own commit, and Task 5's replacement has no session to lock — autostart starts a container without opening one.
+One deliberate overlap: **Task 3 edits `internal/controller/autostart.go` to use `lockPhases`, and Task 5b then replaces that function entirely with `StartRepositoryContainer`, which takes the repository lock alone.** That is not a contradiction. Task 3 must leave the tree consistent at its own commit, and Task 5b's replacement has no session to lock — autostart starts a container without opening one.
 
 ---
 
@@ -62,7 +64,7 @@ One deliberate overlap: **Task 3 edits `internal/controller/autostart.go` to use
   ```
   and the unexported `mainWorktree(path string) string`, which replaces both `isPrimary` and `slugFor`.
 
-Note on scope: this task deliberately breaks compilation of `internal/cli`, `internal/controller`, `internal/container`, `internal/rebuild`, `internal/tmux`, and `internal/doctor`, which read `ws.Worktree` and `ws.IsPrimary` (`internal/container/adapter.go:56,95,150,152`, `internal/controller/ensure.go:265-286,392,441`, `internal/cli/config.go:136-166`, `internal/cli/autostart.go:97-142`, `internal/rebuild/apply.go:330-331`). Verification here is scoped to `./internal/resolve/...`; the callers are converted in later tasks, and `go build ./...` is green again only at the end of Task 5.
+Note on scope: this task deliberately breaks compilation of `internal/cli`, `internal/controller`, `internal/container`, `internal/rebuild`, `internal/tmux`, and `internal/doctor`, which read `ws.Worktree` and `ws.IsPrimary` (`internal/container/adapter.go:56,95,150,152`, `internal/controller/ensure.go:265-286,392,441`, `internal/cli/config.go:136-166`, `internal/cli/autostart.go:97-142`, `internal/rebuild/apply.go:330-331`). Verification here is scoped to `./internal/resolve/...`; the callers are converted in later tasks, and `go build ./...` is green again only at the end of Task 5a.
 
 - [ ] **Step 1: Rewrite the identity tests in `resolve_test.go` against the repository**
 
@@ -516,7 +518,7 @@ identity is derived from the repository root and the session name."
   ```
   `CommitReconciliation(workspaceID string, ...)` keeps its signature and routes a container observation to the workspace's repository.
 
-  `Record.Container` survives the split, but its meaning changes: it is the *repository's* binding projected onto every session that shares it, filled by a `LEFT JOIN container_bindings ON repository_id`, and nil when no binding has been recorded. It is read-only — there is no per-session binding to write, and every write goes through `RecordContainerObservation`, which takes a repository ID. Tasks 5, 6, and 11 read it, and reading it is how a session learns about a container a *sibling* session started.
+  `Record.Container` survives the split, but its meaning changes: it is the *repository's* binding projected onto every session that shares it, filled by a `LEFT JOIN container_bindings ON repository_id`, and nil when no binding has been recorded. It is read-only — there is no per-session binding to write, and every write goes through `RecordContainerObservation`, which takes a repository ID. Tasks 5b, 6, and 11 read it, and reading it is how a session learns about a container a *sibling* session started.
 
 - [ ] **Step 1: Point the test fixtures at the new resolve shape**
 
@@ -1803,7 +1805,7 @@ func SessionBelongsTo(s LiveSession, ws resolve.Workspace) bool {
 `internal/controller/fake` is a non-test file that stands in for the SQLite store across the
 controller, doctor, and rebuild tests, and `go test ./internal/controller/` links it, so it has to
 compile before any gate in this task can run. Two functions read the dropped fields. Convert both to
-the renamed ones here; Task 5 comes back to `RegisterWorkspace` and reshapes it to write a
+the renamed ones here; Task 5b comes back to `RegisterWorkspace` and reshapes it to write a
 *repository* row alongside the session row, which is a behaviour change this task neither needs nor
 should make.
 
@@ -1819,7 +1821,7 @@ path. Before:
 ```
 
 After — `RepositoryID` comes across too, because the record now carries it and the sibling lookups
-Task 5 adds read it:
+Task 5b adds read it:
 
 ```go
 	if rec, ok := s.records[ws.ID]; ok {
@@ -2021,7 +2023,7 @@ after:
 ```
 
 Give the `observe_test.go` workspace fixture the same `RepositoryID: "r1"` that `ensureWorkspace`
-carries. Nothing in this task reads it, but Task 5 re-keys the fake store's container bindings on
+carries. Nothing in this task reads it, but Task 5b re-keys the fake store's container bindings on
 the repository ID, and a fixture that leaves the field empty would file every binding under the
 empty string.
 
@@ -2090,7 +2092,7 @@ The three `register(...)` calls below it pass positional strings and need no cha
 message at line 106 should read `ordered by (slug, repo root)` for consistency.
 
 Add `RepositoryID: "r-" + id` to `testWorkspace` and `RepositoryID: id` to the `register` closure,
-for the same reason: Task 5 keys the fake's bindings on the repository, and an empty repository ID
+for the same reason: Task 5b keys the fake's bindings on the repository, and an empty repository ID
 would collapse the three registrations onto one key.
 
 - [ ] **Step 8: Write the failing concurrency test**
@@ -2462,7 +2464,7 @@ Run: `go test ./internal/lock/... ./internal/controller/... && gofmt -l internal
 Expected: both packages PASS and `gofmt -l` prints nothing.
 
 The gate is scoped to the packages this task owns rather than to `go test ./...`, because
-the tree does not build between Task 1 and Task 5 — see "Task Ordering and Interactions"
+the tree does not build between Task 1 and Task 5a — see "Task Ordering and Interactions"
 above. Every package named on this line has been converted by this task or an earlier one,
 so the gate is achievable as written; a full-suite run would fail on readers a later task
 owns and say nothing about this one.
@@ -2677,7 +2679,7 @@ Run: `go test ./internal/container/... && gofmt -l internal/container`
 Expected: the container package PASSes and `gofmt -l` prints nothing.
 
 The gate is scoped to the packages this task owns rather than to `go test ./...`, because
-the tree does not build between Task 1 and Task 5 — see "Task Ordering and Interactions"
+the tree does not build between Task 1 and Task 5a — see "Task Ordering and Interactions"
 above. Every package named on this line has been converted by this task or an earlier one,
 so the gate is achievable as written; a full-suite run would fail on readers a later task
 owns and say nothing about this one.
@@ -2695,41 +2697,33 @@ share one container instead of demanding N."
 
 ---
 
-### Task 5: Autostart iterates repositories, and the rest of the tree converges
+### Task 5a: The tree builds again — convert the last three packages' source readers
+
+This task and Task 5b were one task until the plan was reviewed for worker-sized units. They
+are split at the `go build ./...` gate below, which is the only point between here and Task 6
+where the tree is consistent: Task 5b's first step deletes `internal/controller/autostart_test.go`
+and its implementation does not arrive until eleven steps later, so no cut inside 5b leaves a
+committable tree.
+
+`internal/cli` is the first package whose *test binary* links `internal/container`,
+`internal/controller`, `internal/controller/fake`, `internal/doctor`, `internal/rebuild` and
+`internal/tmux` together (`go list -deps -test ./internal/cli/...`). That is why the last readers
+in `internal/doctor` and `internal/rebuild` convert here rather than in a task of their own: a
+Go test binary only links when every package it reaches compiles. This task converts source
+files only. No test file changes, and no behaviour changes except the one called out in Step 3,
+where `internal/cli/autostart.go`'s primacy filter has no field left to read.
 
 **Files:**
-- Modify: `internal/controller/autostart.go:13-66` (replace `StartWorkspaceContainer` with the repository-scoped form)
-- Modify: `internal/controller/observe.go:100,104-146` (`observeContainer` takes a binding, not a record)
-- Modify: `internal/controller/interfaces.go:23-33` (`Store` gains `Repositories`; `RecordContainerObservation` takes a repository ID)
-- Modify: `internal/controller/fake/fake.go:83-89,358-364` (record the repository ID, not the workspace ID)
-- Modify: `internal/controller/fake/fake.go:91-99` (the `Store` struct and `NewStore`), `:101-123` (`RegisterWorkspace` writes both rows), `:155-189` (`RecordContainerObservation` and `recordContainerLocked` key on the repository), `:209-234` (`CommitReconciliation`'s container branch), `:243,253,264-291` (`copyRecord` becomes `copyRecordLocked` and projects the binding), plus the new `Repositories` reader
-- Modify: `internal/cli/autostart.go:11-190` (including the primacy filter at `:97` and the record readers at `:107, 112, 135-143`, converted in Step 3 so the package compiles before Step 14's red run)
 - Modify: `internal/doctor/sessions.go:31` (registered-path map value)
 - Modify: `internal/rebuild/classify.go:151, 205` (identity-mismatch gate and its reason string)
 - Modify: `internal/rebuild/apply.go:326-334` (`registeredFor` and its doc comment), `:349` (the conflict message's workspace-side argument)
-- Modify: `internal/cli/config.go:136,138`, `internal/cli/open.go:86,88`, `internal/cli/attach.go:139,141`, `internal/cli/stop.go:121,123`, `internal/cli/status.go:178,180`, `internal/cli/list.go:117-118,134` (envelope construction; the JSON field names stay for Task 7)
-- Modify: `internal/controller/ensure_test.go:624, 692`, `internal/controller/stop_test.go:145, 188`, `internal/controller/observe_test.go:130, 226, 251`, `internal/controller/fake/fake_test.go:51, 54` (container observations re-keyed on the repository)
-- Modify: `internal/cli/cli.go:50-51` (usage line)
-- Modify: `docs/commands.md:344-363`
-- Test: `internal/controller/autostart_test.go` (rewritten in full)
-- Test: `internal/cli/autostart_test.go:16-161` (fixture and matrix rewritten)
-- Test: `internal/cli/lifecycle_test.go:439-523` (the `is_primary` regression test, rewritten), `:90, 123, 126` (converted in Step 4)
-- Test: `internal/cli/attach_test.go:27, 54, 76, 144`
-- Test: `internal/cli/open_test.go:110-114`
-- Test: `internal/cli/rebuild_test.go:100-105`
-- Test: `internal/cli/rebuild_check_test.go:28-30, 150-152`
-- Test: `internal/cli/doctor_test.go:285-287`
-- Test: `internal/cli/list_test.go:15-22, 34, 39`
-- Test: `internal/cli/status_test.go:70-72, 152, 157, 243`
-- Test: `internal/cli/stop_test.go:108, 136`
+- Modify: `internal/cli/config.go:136,138,163,166`, `internal/cli/open.go:86,88`, `internal/cli/attach.go:139,141`, `internal/cli/stop.go:121,123`, `internal/cli/status.go:178,180,257,259`, `internal/cli/list.go:117-118,134` (envelope construction; the JSON field names stay for Task 7)
+- Modify: `internal/cli/autostart.go:11-190` (the primacy filter at `:97` and the record readers at `:107, 112, 135-143`; the function is rewritten wholesale in Task 5b, but it has to compile first)
 
 **Interfaces:**
 - Consumes (Task 1): `resolve.Workspace{ID, RepositoryID, Slug, RepoRoot, Session, SessionName}`.
-- Consumes (Task 2): `state.Repository{ID, Slug, RepoRoot, RegisteredAt, UpdatedAt, Container *ContainerBinding}`; `Repositories() ([]state.Repository, error)` added to `controller.Store` (and so to `cli.stateStore`, which embeds it) and implemented by `*state.Store` and `*fake.Store`; `RecordContainerObservation(repositoryID string, obs state.ContainerObservation, now time.Time) error` — the first argument is now the repository ID, because `container_bindings` is keyed on `repository_id`; `fake.Store.RegisterWorkspace` upserts the repository row from `ws.RepositoryID/RepoRoot/Slug` alongside the workspace row.
-- Consumes (Task 3): `lock.Acquire(ctx, dir, key string, timeout time.Duration)`; container phases lock on the repository ID.
-- Produces: `controller.RepoDesired{Repository state.Repository; Config config.Config; Digest string}`; `func (c *Controller) StartRepositoryContainer(ctx context.Context, d RepoDesired, lockDir string, lockTimeout time.Duration) (ContainerStartOutcome, *ContainerObservation, error)` — no session and no `workspaces` row take part; `func (c *Controller) observeContainer(ctx context.Context, d Desired, binding *state.ContainerBinding) ContainerSnapshot`; the autostart JSON envelope's array is `repositories`, each entry keyed by repository ID and slug.
-
-Autostart's operation record is deliberately dropped: `last_operations` stays keyed on `workspace_id` (spec §5.2 — "an operation is performed by a session, not by a repository"), and autostart is performed by no session. It records the container binding on the repository and nothing else. The tests below assert the binding in place of the old `autostart` operation.
+- Consumes (Task 2): `state.Record` without `Worktree` or `IsPrimary`, carrying `RepositoryID` and `RepoRoot`, with `Container` a read-only projection of the repository's binding.
+- Produces: no new exported names. The deliverable is `go build ./...` exiting 0 for the first time since Task 1.
 
 - [ ] **Step 1: Convert the doctor orphan check**
 
@@ -2809,10 +2803,9 @@ func identityMismatchReason(s controller.LiveSession, row *state.Record) string 
 
 `internal/cli` is the widest consumer of both renamed types, and its test binary links
 `internal/container`, `internal/controller`, `internal/controller/fake`, `internal/doctor`,
-`internal/rebuild` and `internal/tmux` as well (`go list -deps -test ./internal/cli/...`). This task
-is the first to gate `./internal/cli/...`, so every one of those readers has to compile before the
-autostart steps below can run their own tests. The conversions are mechanical and each moves only a
-right-hand side.
+`internal/rebuild` and `internal/tmux` as well (`go list -deps -test ./internal/cli/...`). Task 5b
+is the first to gate `./internal/cli/...`, so every one of those readers has to compile before it
+can run a single test. The conversions are mechanical and each moves only a right-hand side.
 
 Two of the envelope fields have no source left. `worktree` keeps its name and now carries the
 repository root, which is what the tmux option `@dev_worktree` has carried since Task 1, so the
@@ -2871,7 +2864,7 @@ After:
 
 `internal/cli/autostart.go` needs three changes to compile, and the first is a real behaviour
 change rather than a rename: the primacy filter at line 97 has nothing left to test, because the
-records the store now returns are one per repository. Delete it. Steps 15 and 16 below replace this
+records the store now returns are one per repository. Delete it. Task 5b's Steps 12 and 13 replace this
 whole loop with an iteration over `Repositories()`, so this edit is deliberately the smallest one
 that compiles and keeps the current behaviour honest in the meantime. Before (lines 96-99):
 
@@ -3001,7 +2994,83 @@ Run: `go build ./...`
 Expected: exit 0 with no output. This is the point in the plan at which the whole tree compiles
 again; it has not since Task 1 removed the fields. `go test ./...` still fails, because
 `internal/doctor`'s own tests are not converted until Task 9.
-- [ ] **Step 4: Convert the CLI test readers**
+
+- [ ] **Step 4: Confirm this task changed no behaviour the existing tests can see**
+
+Run: `gofmt -l internal/cli internal/doctor internal/rebuild && go test ./internal/state/... ./internal/controller/... ./internal/container/...`
+
+Expected: no files listed by `gofmt`, all three packages PASS.
+
+These are the packages that were green at the end of Task 4 and must stay green: this task edits
+none of their files, so a failure here is a genuine regression rather than an expected red.
+
+`./internal/cli/...`, `./internal/doctor/...` and `./internal/rebuild/...` are deliberately *not*
+run. Their test files still read the dropped fields, or still assert the pre-split autostart
+behaviour, and they are converted in Task 5b and Task 9. `go build ./...` — which excludes
+`_test.go` files — is this task's real gate, and it is the claim the rest of the plan depends on.
+
+- [ ] **Step 5: Commit**
+
+```
+git commit -am "refactor: point the last field readers at the repository root
+
+internal/cli is the first package whose test binary links container,
+controller, doctor, rebuild and tmux together, so the last readers of
+the fields Task 1 and Task 2 removed convert here rather than in tasks
+of their own: the doctor orphan check, the rebuild classifier and
+registeredFor, and the CLI envelope construction.
+
+The one behaviour change is in internal/cli/autostart.go, whose primacy
+filter has no field left to read. Iterating repositories properly is
+Task 5b; this commit only gets the package compiling.
+
+The envelopes keep their worktree and is_primary field names and their
+schema_version 1 shape. worktree now carries the repository root, which
+is what @dev_worktree has carried since Task 1, and is_primary is the
+constant true, which is also true after the split. Task 7 owns removing
+both.
+
+go build ./... is green from here, for the first time since Task 1."
+```
+
+---
+
+### Task 5b: Autostart iterates repositories
+
+**Files:**
+- Modify: `internal/controller/autostart.go:13-66` (replace `StartWorkspaceContainer` with the repository-scoped form)
+- Modify: `internal/controller/observe.go:100,104-146` (`observeContainer` takes a binding, not a record)
+- Modify: `internal/controller/interfaces.go:23-33` (`Store` gains `Repositories`; `RecordContainerObservation` takes a repository ID)
+- Modify: `internal/controller/fake/fake.go:83-89,358-364` (record the repository ID, not the workspace ID)
+- Modify: `internal/controller/fake/fake.go:91-99` (the `Store` struct and `NewStore`), `:101-123` (`RegisterWorkspace` writes both rows), `:155-189` (`RecordContainerObservation` and `recordContainerLocked` key on the repository), `:209-234` (`CommitReconciliation`'s container branch), `:243,253,264-291` (`copyRecord` becomes `copyRecordLocked` and projects the binding), plus the new `Repositories` reader
+- Modify: `internal/cli/autostart.go:11-190` (rewritten over repositories; Task 5a converted its readers so the package compiles)
+- Modify: `internal/controller/ensure_test.go:624, 692`, `internal/controller/stop_test.go:145, 188`, `internal/controller/observe_test.go:130, 226, 251`, `internal/controller/fake/fake_test.go:51, 54` (container observations re-keyed on the repository)
+- Modify: `internal/cli/cli.go:50-51` (usage line)
+- Modify: `docs/commands.md:344-363`
+- Test: `internal/controller/autostart_test.go` (rewritten in full)
+- Test: `internal/cli/autostart_test.go:16-161` (fixture and matrix rewritten)
+- Test: `internal/cli/lifecycle_test.go:439-523` (the `is_primary` regression test, rewritten), `:90, 123, 126` (converted in Step 1)
+- Test: `internal/cli/attach_test.go:27, 54, 76, 144`
+- Test: `internal/cli/open_test.go:110-114`
+- Test: `internal/cli/rebuild_test.go:100-105`
+- Test: `internal/cli/rebuild_check_test.go:28-30, 150-152`
+- Test: `internal/cli/doctor_test.go:285-287`
+- Test: `internal/cli/list_test.go:15-22, 34, 39`
+- Test: `internal/cli/status_test.go:70-72, 152, 157, 243`
+- Test: `internal/cli/stop_test.go:108, 136`
+
+**Interfaces:**
+- Consumes (Task 1): `resolve.Workspace{ID, RepositoryID, Slug, RepoRoot, Session, SessionName}`.
+- Consumes (Task 2): `state.Repository{ID, Slug, RepoRoot, RegisteredAt, UpdatedAt, Container *ContainerBinding}`; `Repositories() ([]state.Repository, error)` added to `controller.Store` (and so to `cli.stateStore`, which embeds it) and implemented by `*state.Store` and `*fake.Store`; `RecordContainerObservation(repositoryID string, obs state.ContainerObservation, now time.Time) error` — the first argument is now the repository ID, because `container_bindings` is keyed on `repository_id`; `fake.Store.RegisterWorkspace` upserts the repository row from `ws.RepositoryID/RepoRoot/Slug` alongside the workspace row.
+- Consumes (Task 3): `lock.Acquire(ctx, dir, key string, timeout time.Duration)`; container phases lock on the repository ID.
+- Consumes (Task 5a): every non-test file in the tree compiles; `go build ./...` exits 0.
+- Produces: `controller.RepoDesired{Repository state.Repository; Config config.Config; Digest string}`; `func (c *Controller) StartRepositoryContainer(ctx context.Context, d RepoDesired, lockDir string, lockTimeout time.Duration) (ContainerStartOutcome, *ContainerObservation, error)` — no session and no `workspaces` row take part; `func (c *Controller) observeContainer(ctx context.Context, d Desired, binding *state.ContainerBinding) ContainerSnapshot`; the autostart JSON envelope's array is `repositories`, each entry keyed by repository ID and slug.
+
+Autostart's operation record is deliberately dropped: `last_operations` stays keyed on `workspace_id` (spec §5.2 — "an operation is performed by a session, not by a repository"), and autostart is performed by no session. It records the container binding on the repository and nothing else. The tests below assert the binding in place of the old `autostart` operation.
+
+**This task's tree is red from Step 2 to Step 13.** Step 2 rewrites `internal/controller/autostart_test.go` in full against a `StartRepositoryContainer` that does not exist yet, and Step 8 removes the `StartWorkspaceContainer` that `internal/cli/autostart.go` still calls, which takes `go build ./...` back down until Step 13 rewrites the loop body. That window is why this task is not split further. Do not commit inside it.
+
+- [ ] **Step 1: Convert the CLI test readers**
 
 A sweep of the tree found eight CLI test files that read `Workspace.Worktree`, `Record.IsPrimary`,
 or build a `resolve.Workspace` literal in the dropped shape, and no earlier task's Files block
@@ -3109,7 +3178,7 @@ the sharing this plan introduces.
 `RecordContainerObservation(ws.ID, ...)` calls (`:152`, `:157`, `:243`) become
 `RecordContainerObservation(ws.RepositoryID, ...)`.
 
-`internal/cli/lifecycle_test.go` has three reads outside the block Step 18 rewrites. Line 90 asserts
+`internal/cli/lifecycle_test.go` has three reads outside the block Step 15 rewrites. Line 90 asserts
 the tmux-side value, so the comparison keeps `live[0].Worktree` on the left and moves only the right:
 
 ```go
@@ -3128,7 +3197,7 @@ second through the unchanged `@dev_worktree` option:
 		{"set-option", "-t", "bash-era", controller.KeyWorktree, ws.RepoRoot},
 ```
 
-- [ ] **Step 5: Write the failing test — rewrite `internal/controller/autostart_test.go` in full**
+- [ ] **Step 2: Write the failing test — rewrite `internal/controller/autostart_test.go` in full**
 
 ```go
 package controller_test
@@ -3306,12 +3375,12 @@ func TestStartRepositoryContainerUnobservableFails(t *testing.T) {
 }
 ```
 
-- [ ] **Step 6: Run the test to verify it fails**
+- [ ] **Step 3: Run the test to verify it fails**
 
 Run: `go test ./internal/controller/ -run TestStartRepositoryContainer -v`
 Expected: FAIL to build with `undefined: controller.RepoDesired` and `r.ctrl.StartRepositoryContainer undefined (type *controller.Controller has no field or method StartRepositoryContainer)`.
 
-- [ ] **Step 7: Record the repository ID in the container fakes**
+- [ ] **Step 4: Record the repository ID in the container fakes**
 
 Replace the two `ws.ID` appends in `internal/controller/fake/fake.go` (lines 84 and 359).
 
@@ -3337,9 +3406,9 @@ func (a *ContainerActuator) StartContainer(_ context.Context, ws resolve.Workspa
 }
 ```
 
-- [ ] **Step 8: Give the fake store repositories and move its binding onto them**
+- [ ] **Step 5: Give the fake store repositories and move its binding onto them**
 
-Steps 1 and 8 call `s.Repositories()` on `*fake.Store` and read `repo.Container`, and `fake` today
+Steps 2 and 13 call `s.Repositories()` on `*fake.Store` and read `repo.Container`, and `fake` today
 exposes only `Workspace` and `Workspaces` (`internal/controller/fake/fake.go:236-262`) with the
 binding living on the record. The fake is a non-test file standing in for the SQLite store across
 the controller, CLI, doctor, and rebuild tests, so it has to mirror the split the real store just
@@ -3581,9 +3650,9 @@ func (s *Store) Repositories() ([]state.Repository, error) {
 }
 ```
 
-- [ ] **Step 9: Re-key every container-observation call site on the repository**
+- [ ] **Step 6: Re-key every container-observation call site on the repository**
 
-Step 8 changed what the fake's first argument *means* without changing its type, so nothing the
+Step 5 changed what the fake's first argument *means* without changing its type, so nothing the
 compiler can see moves. Every existing caller still passes a workspace ID, which now writes a
 binding under a key no repository will ever read back, and the symptom is a passing compile with
 tests that see an empty `Container` projection. Each site below takes the repository ID of the
@@ -3624,7 +3693,7 @@ register `"w1"`, so both become:
 	if err := s.RecordContainerObservation("r-w1", obs, testTime); err != nil {
 ```
 
-`internal/controller/autostart_test.go:53` needs no edit: Step 5 of this task rewrote that file in
+`internal/controller/autostart_test.go:53` needs no edit: Step 2 of this task rewrote that file in
 full, and the rewritten fixtures already key on the repository.
 
 `internal/cli/wiring_test.go:44` declares the method on `guardedStore` with unnamed parameters, so
@@ -3644,7 +3713,7 @@ After:
 ```
 
 `internal/cli/list_test.go:34,39` and `internal/cli/status_test.go:152,157,243` are converted by
-Step 4 above, which owns those two files.
+Step 1 above, which owns those two files.
 
 `internal/doctor/doctor_test.go:505` calls the *real* store, whose key changed in Task 2. It is
 converted in Task 9, which is the first task to gate `./internal/doctor/...`.
@@ -3652,7 +3721,7 @@ converted in Task 9, which is the first task to gate `./internal/doctor/...`.
 `RecordContainerObservation("w1", ...)` calls (`:215`, `:238`, `:243`, `:265`, `:268`, `:272`,
 `:291`, `:302`, `:307`) are part of the Step 2 rewrite there, where `"w1"` becomes the registered
 repository ID and the `"absent"` case at `:302` becomes an unregistered *repository*.
-- [ ] **Step 10: Narrow `observeContainer` to the binding it actually reads**
+- [ ] **Step 7: Narrow `observeContainer` to the binding it actually reads**
 
 In `internal/controller/observe.go`, change the parameter and the one stored-binding branch, then the single call site at line 100.
 
@@ -3685,7 +3754,7 @@ func (c *Controller) observeContainer(ctx context.Context, d Desired, binding *s
 	return snap, nil
 ```
 
-- [ ] **Step 11: Replace `StartWorkspaceContainer` with `StartRepositoryContainer`**
+- [ ] **Step 8: Replace `StartWorkspaceContainer` with `StartRepositoryContainer`**
 
 Replace `internal/controller/autostart.go:22-66` (the doc comment and the function) with the following; the `errors` import is no longer used and comes out.
 
@@ -3802,12 +3871,12 @@ import (
 )
 ```
 
-- [ ] **Step 12: Run the controller tests to verify they pass**
+- [ ] **Step 9: Run the controller tests to verify they pass**
 
 Run: `go test ./internal/controller/... -v`
 Expected: PASS, including the four `TestStartRepositoryContainer*` cases.
 
-- [ ] **Step 13: Write the failing CLI test — rewrite the autostart fixture and matrix**
+- [ ] **Step 10: Write the failing CLI test — rewrite the autostart fixture and matrix**
 
 Replace `internal/cli/autostart_test.go:16-161`. The old "secondary" row (a non-primary worktree) becomes a second *session* on the eligible repository: the successor to the case `is_primary` used to filter.
 
@@ -3979,12 +4048,12 @@ func TestAutostartAllHealthyExitsZero(t *testing.T) {
 }
 ```
 
-- [ ] **Step 14: Run the CLI test to verify it fails**
+- [ ] **Step 11: Run the CLI test to verify it fails**
 
 Run: `go test ./internal/cli/ -run TestAutostart -v`
-Expected: FAIL to build with `env.Repositories undefined (type autostartEnvelope has no field or method Repositories)`. `fake.Store.Repositories` is *not* part of this failure — Step 8 already defined it.
+Expected: FAIL to build with `env.Repositories undefined (type autostartEnvelope has no field or method Repositories)`. `fake.Store.Repositories` is *not* part of this failure — Step 5 already defined it.
 
-- [ ] **Step 15: Rewrite `runAutostart` over repositories**
+- [ ] **Step 12: Rewrite `runAutostart` over repositories**
 
 Replace `internal/cli/autostart.go:18-42` (help text and envelope types):
 
@@ -4019,7 +4088,7 @@ type autostartEntry struct {
 }
 ```
 
-- [ ] **Step 16: Rewrite the loop body**
+- [ ] **Step 13: Rewrite the loop body**
 
 Replace `internal/cli/autostart.go:76-189` (the store read through the tail) with:
 
@@ -4132,12 +4201,12 @@ Replace `internal/cli/autostart.go:76-189` (the store read through the tail) wit
 
 Drop `"github.com/gambtho/projectmux/internal/resolve"` from the import block: nothing in the file builds a workspace any more.
 
-- [ ] **Step 17: Run the CLI autostart tests**
+- [ ] **Step 14: Run the CLI autostart tests**
 
 Run: `go test ./internal/cli/ -run TestAutostart -v`
 Expected: PASS.
 
-- [ ] **Step 18: Rewrite the `is_primary` regression test**
+- [ ] **Step 15: Rewrite the `is_primary` regression test**
 
 Replace `internal/cli/lifecycle_test.go:439-523` in full. The behavior it protects — that a recovered installation still starts this container, exactly once — is asserted against the repository row and a real autostart run.
 
@@ -4265,12 +4334,12 @@ func TestLifecycleRebuildThenAutostart(t *testing.T) {
 }
 ```
 
-- [ ] **Step 19: Run the lifecycle test**
+- [ ] **Step 16: Run the lifecycle test**
 
 Run: `go test ./internal/cli/ -run TestLifecycleRebuildThenAutostart -v`
 Expected: PASS (skips if tmux is not installed).
 
-- [ ] **Step 20: Update the usage line and the command documentation**
+- [ ] **Step 17: Update the usage line and the command documentation**
 
 `internal/cli/cli.go:50-51`:
 
@@ -4296,15 +4365,20 @@ repository however many sessions it has. Autostart starts containers; it does
 not create tmux sessions.
 ```
 
-- [ ] **Step 21: Format, run the owned packages, and commit**
+- [ ] **Step 18: Format, run the owned packages, and commit**
 
 Run: `gofmt -l internal/controller internal/cli && go test ./internal/controller/... ./internal/cli/...`
 Expected: no files listed by `gofmt`, both packages PASS.
 
 The gate is scoped rather than run as `go test ./...` because `internal/doctor`'s own tests
 still read the dropped fields until Task 9 — see "Task Ordering and Interactions" above.
-Everything else in the tree builds and passes from the end of Task 5, so this line covers
-every package whose behaviour this task can change.
+Everything else in the tree builds from the end of Task 5a and passes from the end of this
+task, so this line covers every package whose behaviour this task can change.
+
+Confirm the build came back up as well, since Step 8 took it down:
+
+Run: `go build ./...`
+Expected: exit 0 with no output.
 
 ```
 git commit -am "feat(autostart): start one container per repository
@@ -4327,14 +4401,11 @@ repositories map, a repository-keyed containers map, and a record whose
 Container is a copied-out projection of its repository's binding, which
 is the join the real store performs.
 
-This is also where the rest of the tree converges. internal/cli is the
-first package whose test binary links container, controller, doctor,
-rebuild and tmux together, so the last readers of the renamed fields
-convert here rather than in a later task: the doctor orphan check, the
-rebuild classifier and registeredFor, the CLI envelope construction, and
-the CLI test files that build workspaces by hand. The envelopes keep
-their worktree and is_primary field names and their schema_version 1
-shape; Task 7 owns removing them. go build ./... is green from here."
+The CLI test files that build workspaces by hand convert here too: this
+is the first task to gate ./internal/cli/..., and a Go test binary only
+links when every file in the package compiles. The envelopes keep their
+worktree and is_primary field names and their schema_version 1 shape;
+Task 7 owns removing them."
 ```
 
 ### Task 6: `stop --container` refuses while a sibling session is live
@@ -4351,7 +4422,7 @@ shape; Task 7 owns removing them. go build ./... is green from here."
 - Consumes (Task 1): `resolve.Workspace{ID, RepositoryID, ...}`.
 - Consumes (Task 2): `state.Record` carries `RepositoryID`; `Store.Workspaces()` returns every session row.
 - Consumes (Task 3): `lock.Acquire(ctx, dir, key string, timeout time.Duration) (*Lock, error)`, `lock.ErrLockHeld{Key string}`, and the global ordering — repository lock first, then workspace, released in reverse.
-- Consumes (Task 5): `RecordContainerObservation` keyed on the repository ID.
+- Consumes (Task 5b): `RecordContainerObservation` keyed on the repository ID.
 - Consumes (existing): `cli.exitCode` (`internal/cli/cli.go:167-189`) maps `*controller.RefusalError` to `ExitRefused` (= 6). That is the mechanism — the refusal is a typed error returned up, never a hand-written exit code.
 - Produces: `controller.StopOptions{Container, Force bool}`; `func (c *Controller) Stop(ctx context.Context, d Desired, opts StopOptions, lockDir string, lockTimeout time.Duration) (StopResult, error)`; `stop --force`.
 
@@ -4806,7 +4877,7 @@ Expected: no files listed by `gofmt`, both packages PASS.
 
 The gate is scoped rather than run as `go test ./...` because `internal/doctor`'s own tests
 still read the dropped fields until Task 9 — see "Task Ordering and Interactions" above.
-Everything else in the tree builds and passes from the end of Task 5, so this line covers
+Everything else in the tree builds from the end of Task 5a and passes from the end of Task 5b, so this line covers
 every package whose behaviour this task can change.
 
 ```
@@ -4848,18 +4919,18 @@ the hold by probing the lock from inside StopContainer."
 Two things about this task's starting point. Its Step 1 converts the `internal/rebuild` tests, which
 belong to no earlier task's Files block and which this task is the first to gate — `go test
 ./internal/rebuild/...` at Step 14 cannot run while `apply_test.go` builds workspaces in the dropped
-shape. And the carriers this task reshapes were already made to *compile* in Task 5: every
+shape. And the carriers this task reshapes were already made to *compile* in Task 5a: every
 `Worktree:` line below now reads `ws.RepoRoot` or `rec.RepoRoot` on the right and every `IsPrimary:`
 line reads the constant `true`. The field names, the JSON tags and the line structure are untouched,
 which is what this task removes; where a "before" fence below still shows `ws.Worktree`, read it as
-the same line with Task 5's right-hand side.
+the same line with Task 5a's right-hand side.
 
 Nine envelopes read `OutputSchemaVersion` (`doctor.go:113`, `validate.go:75`, `autostart.go:94` besides the seven here), so the single bump moves all of them. Only the seven in the table carry `worktree`/`is_primary`; `autostart`'s own per-repository fields are the autostart task's, and inherit this constant rather than a second one.
 
 - [ ] **Step 1: Convert the rebuild tests**
 
 `internal/rebuild`'s test files build `state.Record` and `resolve.Workspace` literals in the dropped
-shape. Task 5 converted the package's non-test files so that `internal/cli` could link it, but a
+shape. Task 5a converted the package's non-test files so that `internal/cli` could link it, but a
 test file only has to compile when its own package is tested, and this task is the first to do that.
 
 `internal/rebuild/classify_test.go:26-33` before:
@@ -4888,7 +4959,7 @@ func stored(id, slug, repoRoot, actual string) state.Record {
 ```
 
 The `live()` helper above it builds a `controller.LiveSession` and keeps `Worktree`, as do the
-message assertions quoting `worktree "/w/slab"` — Task 5's classifier conversion left the reason string's wording intact
+message assertions quoting `worktree "/w/slab"` — Task 5a's classifier conversion left the reason string's wording intact
 precisely so these keep passing.
 
 `internal/rebuild/apply_test.go:169-177` before:
@@ -5485,7 +5556,7 @@ Expected: PASS. The `rebuild` and `list` package tests that construct `Registere
 
 The gate is scoped rather than run as `go test ./...` because `internal/doctor`'s own tests
 still read the dropped fields until Task 9 — see "Task Ordering and Interactions" above.
-Everything else in the tree builds and passes from the end of Task 5, so this line covers
+Everything else in the tree builds from the end of Task 5a and passes from the end of Task 5b, so this line covers
 every package whose behaviour this task can change.
 
 Those two packages are exactly this task's Files block: every carrier it edits lives in
@@ -6778,7 +6849,7 @@ Expected: PASS.
 
 The gate is scoped rather than run as `go test ./...` because `internal/doctor`'s own tests
 still read the dropped fields until Task 9 — see "Task Ordering and Interactions" above.
-Everything else in the tree builds and passes from the end of Task 5, so this line covers
+Everything else in the tree builds from the end of Task 5a and passes from the end of Task 5b, so this line covers
 every package whose behaviour this task can change.
 
 
@@ -6848,11 +6919,11 @@ needing this run, since nothing else can tell the operator."
 - Produces: no new exported names. This task only rewires existing readers.
 
 `internal/doctor` is the last package holding readers of the dropped fields, and it holds them only
-in its tests: Task 5 converted `sessions.go` because `internal/cli`'s test binary links the package,
+in its tests: Task 5a converted `sessions.go` because `internal/cli`'s test binary links the package,
 but a test file has to compile only when its own package is tested, and no gate before this one
 does that. So this task is small, and it is the point at which `go test ./...` becomes a meaningful
 gate again rather than the point at which the tree starts building — that happened at the end of
-Task 5.
+Task 5a.
 
 The rule for these edits is the same as everywhere else in the plan. Where the code reads a
 *workspace or record* field the name changes to `RepoRoot`; where it reads a *tmux-derived* field on
@@ -6864,7 +6935,7 @@ which is the tmux option name `@dev_worktree` and does not change.
 
 Run: `go build ./...`
 
-Expected: exit 0 with no output. The build first went green at the end of Task 5; this re-checks it
+Expected: exit 0 with no output. The build first went green at the end of Task 5a; this re-checks it
 before the full test gate, because Tasks 6 through 8 all changed non-test code under scoped gates.
 If it fails, the failure belongs to whichever task last touched the package — fix it there rather
 than absorbing it here.
@@ -6902,9 +6973,9 @@ func register(t *testing.T, store *fake.Store, slug, repoRoot string) {
 from `worktree` to `repoRoot` keeps the two helpers reading alike. The test name
 `TestOrphanedSessionsReportsUnregisteredAndMissingWorktree` and the `"worktree no longer exists"`
 assertion at line 413 stay as they are: that string is `orphanItem`'s operator-facing detail, which
-Task 5's doctor conversion deliberately left unchanged.
+Task 5a's doctor conversion deliberately left unchanged.
 
-`register` also needs a repository ID, because Task 5 re-keyed the fake store's container bindings
+`register` also needs a repository ID, because Task 5b re-keyed the fake store's container bindings
 on the repository and a fixture that leaves the field empty files every binding under the empty
 string. Add it to the literal above:
 
@@ -7359,12 +7430,12 @@ Expected: `git commit` reports 6 files changed with a rename detected, and `git 
 
 **Files:**
 - Create: `internal/controller/concurrent_container_test.go`
-- Inspect (only if Step 3 fails — see the failure signature there): `internal/controller/fake/fake.go`, whose repository-keyed binding map and `copyRecordLocked` projection Task 5 already landed
+- Inspect (only if Step 3 fails — see the failure signature there): `internal/controller/fake/fake.go`, whose repository-keyed binding map and `copyRecordLocked` projection Task 5b already landed
 - Test: `internal/controller/concurrent_container_test.go`
 
 **Interfaces:**
 - Consumes: `resolve.Workspace{ID, RepositoryID, Slug, RepoRoot, Session, SessionName}` (Task 1); `fake.NewStore() *fake.Store` and `(*Store).Workspace(id string) (state.Record, error)` (Task 2); `lockPhases(ctx, dir, repositoryID, workspaceID string, timeout time.Duration) (func(), error)` indirectly, through `Ensure` (Task 3); `controller.ContainerObserver` / `controller.ContainerActuator` (`internal/controller/interfaces.go:52-73`); the existing `scriptedSessions`, `absentStep`, `liveStep`, `ensureTime` helpers in `internal/controller/ensure_test.go:26-58,21`.
-- Produces: no new exported names. One regression test. The repository-keyed binding map inside the unexported `fake.Store` is Task 5's, not this task's; Steps 4 and 5 only verify it survived.
+- Produces: no new exported names. One regression test. The repository-keyed binding map inside the unexported `fake.Store` is Task 5b's, not this task's; Steps 4 and 5 only verify it survived.
 
 **What the code already says, before writing anything**
 
@@ -7629,12 +7700,12 @@ Run: `go test ./internal/controller/ -run TestConcurrentOpensIssueOneContainerSt
 
 This step decides whether Task 11 is test-only. Two outcomes are possible, and only the run distinguishes them:
 
-- **PASS** — the repository lock plus the repository-keyed binding Task 5 landed already compose. This is the expected outcome; skip Steps 4 and 5 and go straight to Step 6.
-- **FAIL** with `devcontainer up invocations = 2, want exactly 1` — the second goroutine's `Observe` found no stored binding on its own record, fell to `DiscoverContainer`, saw the label shape (present, no workdir), and planned `acquire`, which runs a second `up` (`internal/controller/ensure.go:197-210`). The binding is written under the repository ID but is not readable through a sibling session's record; Steps 4 and 5 locate which half of Task 5's fake-store change went missing.
+- **PASS** — the repository lock plus the repository-keyed binding Task 5b landed already compose. This is the expected outcome; skip Steps 4 and 5 and go straight to Step 6.
+- **FAIL** with `devcontainer up invocations = 2, want exactly 1` — the second goroutine's `Observe` found no stored binding on its own record, fell to `DiscoverContainer`, saw the label shape (present, no workdir), and planned `acquire`, which runs a second `up` (`internal/controller/ensure.go:197-210`). The binding is written under the repository ID but is not readable through a sibling session's record; Steps 4 and 5 locate which half of Task 5b's fake-store change went missing.
 
 - [ ] **Step 4 (only on the Step 3 failure): Confirm the fake keys its bindings on the repository**
 
-Task 5 already moved the fake's container bindings off the record and into a repository-keyed map,
+Task 5b already moved the fake's container bindings off the record and into a repository-keyed map,
 because autostart records a binding for a repository that has no session at all. If Step 3 failed,
 the first thing to rule out is that this change is missing or was written back.
 
@@ -7642,13 +7713,13 @@ Run: `grep -n 'containers\[' internal/controller/fake/fake.go`
 
 Expected: `recordContainerLocked` writes `s.containers[repositoryID]` and reads it back for the
 degraded-health branch, and nothing assigns to `rec.Container`. If instead the binding is stored on
-the record, restore the Task 5 form — a fake that keeps the binding on the workspace row contradicts
+the record, restore the Task 5b form — a fake that keeps the binding on the workspace row contradicts
 the repository-keyed `container_bindings` table (design §5.2) and would let this test pass or fail
 for reasons the production store does not share.
 
 - [ ] **Step 5 (only on the Step 3 failure): Confirm every record read projects the repository binding**
 
-The second half of the composition is `copyRecordLocked`, which Task 5 introduced so that a record
+The second half of the composition is `copyRecordLocked`, which Task 5b introduced so that a record
 carries whatever container its repository is bound to — including one a sibling session started.
 That projection is exactly what `Observe` needs to take the probe branch instead of rediscovering.
 
@@ -7657,7 +7728,7 @@ Run: `grep -n 'copyRecord' internal/controller/fake/fake.go`
 Expected: `copyRecordLocked` is a method on `*Store`, it sets `out.Container` from
 `s.containers[rec.RepositoryID]`, and both `Workspace` and `Workspaces` call it. If the free
 function `copyRecord` is still there, the sibling never sees the binding and Step 3's failure is
-explained; restore the Task 5 form.
+explained; restore the Task 5b form.
 
 - [ ] **Step 6 (only on the Step 3 failure): Re-run the target test**
 
@@ -7711,7 +7782,7 @@ Every verification case the spec names, and the task that carries it. A case wit
 | Two sessions on one repository register successfully — unrepresentable before `0002`, and fails against a column rename | Task 2 |
 | Concurrent `open` of two sessions issues exactly one `devcontainer up` | Task 11, over Task 3's serialization |
 | `stop --container` refuses while a sibling is live with exit 6, and proceeds under `--force` | Task 6 |
-| Autostart over a repository with several sessions starts its container once, replacing `lifecycle_test.go:495` | Task 5 |
+| Autostart over a repository with several sessions starts its container once, replacing `lifecycle_test.go:495` | Task 5b |
 | Every `--json` envelope reports `schema_version: 2` and omits `is_primary`, asserted per command | Task 7 |
 | Socket-isolated integration: `0002` succeeds with the filesystem absent, and a following `rebuild` collapses a linked-worktree row | Task 2 (migration) and Task 8 (collapse) |
 | Every remaining `Worktree`/`IsPrimary` reader converts and the tree builds again | Tasks 3-5 (build), Task 9 (full suite) |
@@ -7722,7 +7793,7 @@ Every verification case the spec names, and the task that carries it. A case wit
 
 After Task 11, before calling the plan done:
 
-- [ ] `go build ./...` — still green. It first goes green at the end of Task 5; Tasks 6 through 11 must not take it back down.
+- [ ] `go build ./...` — still green. It first goes green at the end of Task 5a; Tasks 6 through 11 must not take it back down.
 - [ ] `go test ./...` — every package passes.
 - [ ] `gofmt -l .` — no output.
 - [ ] `git log --oneline` shows one commit per task, in order.
