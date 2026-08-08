@@ -9,7 +9,12 @@ import (
 	"github.com/gambtho/projectmux/internal/controller/fake"
 )
 
-// assertSchemaV2 checks the two properties every migrated envelope shares.
+// assertSchemaV2 checks the two properties every migrated envelope shares:
+// schema_version and the absence of is_primary. It says nothing about the
+// session field on purpose — session decodes to a different shape, and in
+// several carriers to a decoy key entirely, so it needs its own per-carrier
+// assertion. See assertWorkspaceHasSession and assertEnvelopeHasSessionField
+// below, and their call sites in each test.
 //
 // The version is compared against the literal 2, not against
 // OutputSchemaVersion: every existing envelope test asserts equality with
@@ -35,12 +40,52 @@ func assertSchemaV2(t *testing.T, stdout string) {
 	if strings.Contains(stdout, "is_primary") {
 		t.Errorf("envelope still carries is_primary:\n%s", stdout)
 	}
-	// The key is matched quote-and-colon delimited, not as a bare substring:
-	// "proposed_session", "actual_session", "live_session", and
-	// "session_name" all contain "session" but none of them end their key
-	// in a closing quote immediately followed by a colon the way "session"
-	// itself does, so this cannot pass on the strength of a neighboring
-	// field.
+}
+
+// assertWorkspaceHasSession decodes the top-level "workspace" object and
+// asserts it carries the key "session". Use it for the five commands whose
+// envelope embeds workspaceInfo: config, open, attach, stop, status.
+//
+// Those five commands each ALSO render their own, unrelated top-level
+// "session" key — openEnvelope.Session (open.go:39), attachEnvelope.Session
+// (attach.go:30), stopEnvelope.Session (stop.go:36), and
+// statusEnvelope.Session (status.go:32) all exist independently of
+// workspace.session. A substring search over the whole document is
+// satisfied by one of those decoys even if workspaceInfo.Session is
+// removed entirely, which is exactly the false pass the review caught.
+// Decoding to the "workspace" object specifically and checking its own key
+// set rules that out: only workspaceInfo's own session field can satisfy
+// this assertion.
+func assertWorkspaceHasSession(t *testing.T, stdout string) {
+	t.Helper()
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(stdout), &top); err != nil {
+		t.Fatalf("decoding the envelope: %v\n%s", err, stdout)
+	}
+	wsRaw, ok := top["workspace"]
+	if !ok {
+		t.Fatalf("envelope has no workspace object:\n%s", stdout)
+	}
+	var ws map[string]json.RawMessage
+	if err := json.Unmarshal(wsRaw, &ws); err != nil {
+		t.Fatalf("decoding workspace: %v\n%s", err, stdout)
+	}
+	if _, ok := ws["session"]; !ok {
+		t.Errorf("workspace object has no session key:\n%s", stdout)
+	}
+}
+
+// assertEnvelopeHasSessionField checks, by quote-and-colon-delimited
+// substring, that the rendered document contains a "session" key. It is
+// safe for list and rebuild only: neither embeds workspaceInfo, and in
+// both, listRow.Session (list.go:39) / rebuildRegistered.Session
+// (rebuild.go:55) is the only field whose key is exactly "session" —
+// "proposed_session", "actual_session", "session_state", and
+// "live_session" all fail the delimiter, since none of them ends its key
+// in a closing quote immediately followed by a colon the way "session"
+// itself does.
+func assertEnvelopeHasSessionField(t *testing.T, stdout string) {
+	t.Helper()
 	if !strings.Contains(stdout, `"session":`) {
 		t.Errorf("envelope has no session field:\n%s", stdout)
 	}
@@ -58,6 +103,7 @@ func TestConfigEnvelopeIsSchemaV2(t *testing.T) {
 		t.Fatalf("exit %d, stderr: %s", code, stderr)
 	}
 	assertSchemaV2(t, stdout)
+	assertWorkspaceHasSession(t, stdout)
 	if !strings.Contains(stdout, `"repo_root"`) {
 		t.Errorf("config envelope has no repo_root:\n%s", stdout)
 	}
@@ -75,6 +121,7 @@ func TestOpenEnvelopeIsSchemaV2(t *testing.T) {
 		t.Fatalf("exit %d, stderr: %s", code, stderr)
 	}
 	assertSchemaV2(t, stdout)
+	assertWorkspaceHasSession(t, stdout)
 	if !strings.Contains(stdout, `"repo_root"`) {
 		t.Errorf("open envelope has no repo_root:\n%s", stdout)
 	}
@@ -93,6 +140,7 @@ func TestAttachEnvelopeIsSchemaV2(t *testing.T) {
 		t.Fatalf("exit %d, stderr: %s", code, stderr)
 	}
 	assertSchemaV2(t, stdout)
+	assertWorkspaceHasSession(t, stdout)
 	if !strings.Contains(stdout, `"repo_root"`) {
 		t.Errorf("attach envelope has no repo_root:\n%s", stdout)
 	}
@@ -108,6 +156,7 @@ func TestStopEnvelopeIsSchemaV2(t *testing.T) {
 		t.Fatalf("exit %d, stderr: %s", code, stderr)
 	}
 	assertSchemaV2(t, stdout)
+	assertWorkspaceHasSession(t, stdout)
 	if !strings.Contains(stdout, `"repo_root"`) {
 		t.Errorf("stop envelope has no repo_root:\n%s", stdout)
 	}
@@ -123,6 +172,7 @@ func TestStatusEnvelopeIsSchemaV2(t *testing.T) {
 		t.Fatalf("exit %d, stderr: %s", code, stderr)
 	}
 	assertSchemaV2(t, stdout)
+	assertWorkspaceHasSession(t, stdout)
 	if !strings.Contains(stdout, `"repo_root"`) {
 		t.Errorf("status envelope has no repo_root:\n%s", stdout)
 	}
@@ -137,6 +187,7 @@ func TestListEnvelopeIsSchemaV2(t *testing.T) {
 		t.Fatalf("exit %d, stderr: %s", code, stderr)
 	}
 	assertSchemaV2(t, stdout)
+	assertEnvelopeHasSessionField(t, stdout)
 	if !strings.Contains(stdout, `"repo_root"`) {
 		t.Errorf("list rows have no repo_root:\n%s", stdout)
 	}
@@ -153,6 +204,7 @@ func TestRebuildEnvelopeIsSchemaV2(t *testing.T) {
 		t.Fatalf("exit %d, stderr: %s", code, stderr)
 	}
 	assertSchemaV2(t, stdout)
+	assertEnvelopeHasSessionField(t, stdout)
 	// The fixture seeds one live session, so the registered array is
 	// guaranteed non-empty here; the repo_root check below therefore lands
 	// on an actual rebuildRegistered entry rather than passing vacuously
