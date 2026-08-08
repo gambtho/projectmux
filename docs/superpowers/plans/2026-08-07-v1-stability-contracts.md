@@ -463,8 +463,8 @@ moved, so the ambiguity is untested. This is the part of the envelope promise
 most likely to fail first, and it has no decided rule.
 
 **The exit codes were different, and were withdrawn anyway.** They are
-genuinely enforced — 101 test lines across `internal/cli` reference the seven
-constants (102 occurrences; `wiring_test.go:222` carries two) and all seven are
+genuinely enforced — 100 test lines across `internal/cli` reference the seven
+constants (101 occurrences; `wiring_test.go:222` carries two) and all seven are
 exercised. They go for consistency of
 message alone: a README saying "nothing is frozen below 1.0, except this one
 thing" invites exactly the selective reading the retraction exists to prevent.
