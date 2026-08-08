@@ -22,7 +22,8 @@ const DefaultStartTimeout = 5 * time.Minute
 
 // Config is the normalized, validated configuration for one workspace. Its
 // JSON encoding is the digested document and the `config` member of the
-// versioned CLI envelope, so field order and names are a public contract.
+// versioned CLI envelope, so field order and names are load-bearing in two
+// places at once. Neither is frozen below 1.0, but changing one changes both.
 type Config struct {
 	Version      int               `json:"version"`
 	Autostart    bool              `json:"autostart"`

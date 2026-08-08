@@ -16,9 +16,10 @@ import (
 	"github.com/gambtho/projectmux/internal/resolve"
 )
 
-// OutputSchemaVersion versions the JSON envelope. Human output is not a
-// compatibility contract; this is. Bump it only for a breaking change to the
-// structure below.
+// OutputSchemaVersion versions the JSON envelope. Below 1.0 nothing
+// ProjectMux emits is a compatibility contract, this included; the field
+// exists so that a break is expressible when there is something to break.
+// Bump it only for a breaking change to the structure below.
 const OutputSchemaVersion = 1
 
 const configHelp = `usage: projectmux config [--validate] [--json] [--compact] [<workspace>]
@@ -154,8 +155,8 @@ func writeJSON(w io.Writer, v any, compact bool) error {
 	return nil
 }
 
-// writeHuman renders a readable summary. This layout is explicitly not a
-// compatibility contract; automation should use --json.
+// writeHuman renders a readable summary. This layout
+// may change in any release; automation should use --json.
 func writeHuman(w io.Writer, env envelope) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 

@@ -139,8 +139,8 @@ func rebuildEnvelopeFrom(report rebuild.Report) rebuildEnvelope {
 }
 
 // writeRebuildHuman renders one line per registration and one per
-// conflict. This layout is not a compatibility contract; automation
-// should use --json.
+// conflict. This layout may change in any release; automation should
+// use --json.
 func writeRebuildHuman(w io.Writer, env rebuildEnvelope) error {
 	if len(env.Registered) == 0 && len(env.Conflicts) == 0 {
 		fmt.Fprintln(w, "nothing to rebuild: every live session is already recorded")

@@ -165,8 +165,8 @@ func buildList(ctx context.Context) (listEnvelope, error) {
 	return env, nil
 }
 
-// writeListHuman renders the summary table. This layout is explicitly
-// not a compatibility contract; automation should use --json.
+// writeListHuman renders the summary table. This layout
+// may change in any release; automation should use --json.
 func writeListHuman(w io.Writer, env listEnvelope) error {
 	if len(env.Workspaces) == 0 {
 		_, err := fmt.Fprintln(w,
