@@ -96,6 +96,86 @@ func TestRebuildCollapsesAMigratedLinkedWorktreeRow(t *testing.T) {
 	}
 }
 
+// TestRebuildDiscardsTheCollapsedRowsContainerBinding pins the cascade
+// the collapse relies on, against the real schema. Both rows carry a
+// binding, which is what 0002 leaves when a worktree and its parent were
+// each opened with --container. The stale row's binding goes with the row
+// (container_bindings.repository_id is ON DELETE CASCADE), the parent's
+// survives, and the container the stale row named keeps running with
+// nothing referring to it — so the report has to name it.
+func TestRebuildDiscardsTheCollapsedRowsContainerBinding(t *testing.T) {
+	ws := openWorkspace(t)
+	worktree := linkedWorktree(t, "1529")
+
+	root, err := state.Root()
+	if err != nil {
+		t.Fatalf("state.Root: %v", err)
+	}
+	st, err := state.Open(root)
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	stale := resolve.Workspace{
+		ID:           "stale-workspace-id",
+		RepositoryID: "stale-repository-id",
+		Slug:         ws.Slug,
+		RepoRoot:     worktree,
+		SessionName:  ws.Slug + "--1529",
+	}
+	for _, seed := range []struct {
+		ws          resolve.Workspace
+		containerID string
+	}{{ws, "cid-parent"}, {stale, "cid-stale"}} {
+		if err := st.RegisterWorkspace(seed.ws, "sha256:seed", cliTestTime); err != nil {
+			t.Fatalf("register %s: %v", seed.ws.RepoRoot, err)
+		}
+		obs := state.ContainerObservation{
+			Kind: "devcontainer", ContainerID: seed.containerID,
+			ContainerUser: "vscode", Workdir: "/workspaces/x",
+			Health: state.HealthPresent,
+		}
+		if err := st.RecordContainerObservation(seed.ws.RepositoryID, obs, cliTestTime); err != nil {
+			t.Fatalf("record container for %s: %v", seed.ws.RepoRoot, err)
+		}
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	installLiveSessions(t, nil, nil)
+	installScriptedSessions(t)
+
+	code, stdout, stderr := run(t, "rebuild", "--json")
+	if code != ExitOK {
+		t.Fatalf("exit %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, `"binding-discarded"`) ||
+		!strings.Contains(stdout, `"cid-stale"`) {
+		t.Errorf("report does not name the discarded binding:\n%s", stdout)
+	}
+	// cid-parent must not be reported as discarded: naming the surviving
+	// binding would send the operator after the wrong container.
+	if strings.Contains(stdout, `"cid-parent"`) {
+		t.Errorf("report names the surviving binding as discarded:\n%s", stdout)
+	}
+
+	st, err = state.Open(root)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	repos, err := st.Repositories()
+	if err != nil {
+		t.Fatalf("Repositories: %v", err)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("repositories = %+v, want one", repos)
+	}
+	if repos[0].Container == nil || repos[0].Container.ContainerID != "cid-parent" {
+		t.Errorf("binding = %+v, want the parent's cid-parent to survive", repos[0].Container)
+	}
+}
+
 // TestRebuildRetagsALiveSessionOntoItsRepository drives the retag against
 // a real tmux server on its own socket, the isolation the override exists
 // for (socket_integration_test.go). The session carries the keys a

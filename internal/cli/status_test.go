@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -294,6 +296,80 @@ func TestStatusReportsAStaleRepositoryRootAsNeedingRebuild(t *testing.T) {
 	}
 	if !strings.Contains(env.NeedsRebuildReason, worktree) {
 		t.Errorf("reason %q does not name the stale root", env.NeedsRebuildReason)
+	}
+}
+
+// The state a rebuild leaves when its collapse succeeds and its retag
+// fails (exit 6): no row is stale any more, but a live session still
+// carries the identity keys a pre-change projectmux wrote, and `open`
+// refuses it as a foreign occupant. Reporting on rows alone would call
+// this installation clean.
+func TestStatusReportsAStaleLiveSessionAsNeedingRebuild(t *testing.T) {
+	ws := statusWorkspace(t)
+	s := fake.NewStore()
+	// The collapse already ran: the only repository row is the real one.
+	if err := s.RegisterWorkspace(ws, "sha256:seed", cliTestTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	installFakeStore(t, s)
+	installSessionObserver(t, controller.SessionObservation{
+		ByName: []controller.LiveSession{{
+			Name:        ws.SessionName,
+			WorkspaceID: "pre-change-workspace-id",
+			Slug:        ws.Slug,
+			Worktree:    ws.RepoRoot,
+		}},
+	}, nil)
+
+	code, stdout, stderr := run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	env := decodeStatus(t, stdout)
+	if !env.NeedsRebuild {
+		t.Fatalf("needs_rebuild = false; the live session still carries stale keys")
+	}
+	if !strings.Contains(env.NeedsRebuildReason, ws.SessionName) {
+		t.Errorf("reason %q does not name the stale session", env.NeedsRebuildReason)
+	}
+}
+
+// A session of the same name belonging to a different repository is a
+// genuine collision, not a migration leftover: rebuild will not retag it,
+// so status must not send the operator there.
+func TestStatusDoesNotBlameRebuildForAForeignSession(t *testing.T) {
+	ws := statusWorkspace(t)
+	// A real repository, not just a directory: resolving it has to
+	// succeed and disagree, so the exclusion is the root comparison
+	// rather than a resolver error.
+	other := t.TempDir()
+	if out, err := exec.Command("git", "-C", other, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	other, err := filepath.EvalSymlinks(other)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	s := fake.NewStore()
+	if err := s.RegisterWorkspace(ws, "sha256:seed", cliTestTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	installFakeStore(t, s)
+	installSessionObserver(t, controller.SessionObservation{
+		ByName: []controller.LiveSession{{
+			Name:        ws.SessionName,
+			WorkspaceID: "some-other-workspace",
+			Slug:        ws.Slug,
+			Worktree:    other,
+		}},
+	}, nil)
+
+	code, stdout, stderr := run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	if env := decodeStatus(t, stdout); env.NeedsRebuild {
+		t.Errorf("needs_rebuild = true for a foreign session: %s", env.NeedsRebuildReason)
 	}
 }
 

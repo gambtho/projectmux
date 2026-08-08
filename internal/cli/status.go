@@ -175,14 +175,60 @@ func buildStatus(ctx context.Context, name string) (statusEnvelope, error) {
 		return statusEnvelope{}, err
 	}
 	env := statusEnvelopeFrom(ws, effective, snap, controller.BuildPlan(snap))
-	if len(stale) > 0 {
+	if reasons := rebuildReasons(stale, snap, ws); len(reasons) > 0 {
 		env.NeedsRebuild = true
-		env.NeedsRebuildReason = fmt.Sprintf(
-			"%s is still recorded as a repository root but is a linked worktree of %s; "+
-				"run `projectmux rebuild` to collapse it",
-			strings.Join(stale, ", "), ws.RepoRoot)
+		env.NeedsRebuildReason = strings.Join(reasons, "; ") +
+			"; run `projectmux rebuild` to correct it"
 	}
 	return env, nil
+}
+
+// rebuildReasons names everything about this workspace that only rebuild
+// can fix. It covers both halves of the upgrade pass, because they fail
+// independently: a run whose collapse succeeds and whose retag fails
+// (exit 6) leaves no stale row at all, and reporting on rows alone would
+// call that installation clean while `open` still refuses the session it
+// could not retag.
+func rebuildReasons(stale []string, snap controller.Snapshot, ws resolve.Workspace) []string {
+	var reasons []string
+	if len(stale) > 0 {
+		reasons = append(reasons, fmt.Sprintf(
+			"%s is still recorded as a repository root but is a linked worktree of %s",
+			strings.Join(stale, ", "), ws.RepoRoot))
+	}
+	for _, name := range staleSessions(snap, ws) {
+		reasons = append(reasons, fmt.Sprintf(
+			"the live session %q is running on this repository under identity "+
+				"keys a pre-change projectmux wrote, so `projectmux open` "+
+				"refuses it as a foreign occupant", name))
+	}
+	return reasons
+}
+
+// staleSessions names sessions occupying this workspace's session name
+// whose identity keys disagree with it but whose @dev_worktree still
+// resolves to this repository — the state rebuild's retag corrects.
+//
+// The @dev_worktree test is what separates a stale session from a real
+// foreign occupant, and it has to go through the resolver rather than
+// compare against ws.RepoRoot: a pre-change session records the linked
+// worktree it was opened in, which is never equal to the repository root
+// and is exactly the value the retag rewrites. A session pointing at some
+// other repository is a genuine name collision that rebuild will not fix,
+// so it is left out.
+func staleSessions(snap controller.Snapshot, ws resolve.Workspace) []string {
+	var names []string
+	for _, s := range snap.Session.ByName {
+		if controller.SessionBelongsTo(s, ws) || s.Worktree == "" {
+			continue
+		}
+		resolved, err := resolve.Resolve("", nil, s.Worktree)
+		if err != nil || resolved.RepoRoot != ws.RepoRoot {
+			continue
+		}
+		names = append(names, s.Name)
+	}
+	return names
 }
 
 // staleRepositoryRoots names repository rows recorded at a path that is

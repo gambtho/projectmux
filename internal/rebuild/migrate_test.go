@@ -136,6 +136,122 @@ func TestMigrateCollapsesALinkedWorktreeRow(t *testing.T) {
 	}
 }
 
+// Every row is folded into the parent *it* resolves to, not into
+// whichever parent the pass happened to look up first. With one
+// repository on the machine the two are indistinguishable, so this puts
+// a second, unrelated repository in the table: /b is already a main
+// worktree and must be left alone, while /a/.worktrees/x collapses into
+// /a. Resolving the wrong row would drop /b into /a's registration.
+func TestMigrateCollapsesEachRowIntoItsOwnParent(t *testing.T) {
+	a1 := repoWorkspace("/a")
+	b := resolve.Workspace{
+		ID: "ws-/b", RepositoryID: "repo-/b", Slug: "quarrycam",
+		RepoRoot: "/b", SessionName: "quarrycam",
+	}
+	store := &migrateStore{repos: []state.Repository{
+		{ID: "repo-/a", Slug: "slabledger", RepoRoot: "/a"},
+		{ID: "repo-/a/.worktrees/x", Slug: "slabledger", RepoRoot: "/a/.worktrees/x"},
+		{ID: "repo-/b", Slug: "quarrycam", RepoRoot: "/b"},
+	}}
+	registrar := &registerRecorder{}
+	a := &Applier{
+		Store:  registrar,
+		Repos:  store,
+		Config: fixedDigest{},
+		Locker: nopLocker{},
+		Clock:  fixedClock{},
+		Resolver: migrateResolver{
+			roots: map[string]resolve.Workspace{
+				"/a":              a1,
+				"/a/.worktrees/x": a1,
+				"/b":              b,
+			},
+			exists: map[string]bool{"/a": true, "/a/.worktrees/x": true, "/b": true},
+		},
+	}
+
+	res := a.Migrate(context.Background(), nil)
+
+	if len(res.Conflicts) != 0 {
+		t.Fatalf("conflicts = %+v, want none", res.Conflicts)
+	}
+	// Exactly one collapse, and it names both ends: /a/.worktrees/x into
+	// /a. Asserting only the count would pass if /b had collapsed instead.
+	if len(res.Migrated) != 1 {
+		t.Fatalf("migrated = %+v, want one collapse", res.Migrated)
+	}
+	if got := res.Migrated[0]; got.Subject != "/a/.worktrees/x" ||
+		got.Action != "collapsed" || got.Into != "/a" {
+		t.Errorf("migrated[0] = %+v, want /a/.worktrees/x collapsed into /a", got)
+	}
+	if len(store.dropped) != 1 || store.dropped[0] != "repo-/a/.worktrees/x" {
+		t.Errorf("dropped = %v, want only the linked-worktree row of /a", store.dropped)
+	}
+	if len(registrar.registered) != 1 || registrar.registered[0].RepoRoot != "/a" {
+		t.Errorf("registered = %+v, want one registration at /a", registrar.registered)
+	}
+}
+
+// Both rows carry a container binding, which is the state an operator
+// reaches by running `open --container` in a worktree and in its parent
+// before the change. Dropping the stale row cascades its binding away, so
+// the parent's binding is the one that survives — and the container the
+// stale row named is still running with nothing referring to it. The pass
+// must say so, and must say which container.
+func TestMigrateReportsTheContainerBindingACollapseDiscards(t *testing.T) {
+	parent := repoWorkspace("/repo")
+	store := &migrateStore{repos: []state.Repository{
+		{
+			ID: "repo-/repo", Slug: "slabledger", RepoRoot: "/repo",
+			Container: &state.ContainerBinding{Kind: "devcontainer", ContainerID: "cid-parent"},
+		},
+		{
+			ID: "repo-/repo/.worktrees/1529", Slug: "slabledger",
+			RepoRoot:  "/repo/.worktrees/1529",
+			Container: &state.ContainerBinding{Kind: "devcontainer", ContainerID: "cid-stale"},
+		},
+	}}
+	a := &Applier{
+		Store:  &registerRecorder{},
+		Repos:  store,
+		Config: fixedDigest{},
+		Locker: nopLocker{},
+		Clock:  fixedClock{},
+		Resolver: migrateResolver{
+			roots: map[string]resolve.Workspace{
+				"/repo":                 parent,
+				"/repo/.worktrees/1529": parent,
+			},
+			exists: map[string]bool{"/repo": true, "/repo/.worktrees/1529": true},
+		},
+	}
+
+	res := a.Migrate(context.Background(), nil)
+
+	if len(res.Conflicts) != 0 {
+		t.Fatalf("conflicts = %+v, want none", res.Conflicts)
+	}
+	var discarded []Migrated
+	for _, m := range res.Migrated {
+		if m.Action == "binding-discarded" {
+			discarded = append(discarded, m)
+		}
+	}
+	if len(discarded) != 1 {
+		t.Fatalf("binding-discarded entries = %+v, want exactly one", discarded)
+	}
+	// cid-parent, not cid-stale, would mean the pass named the binding
+	// that survived rather than the one it destroyed.
+	if got := discarded[0]; got.Detail != "cid-stale" || got.Subject != "/repo/.worktrees/1529" {
+		t.Errorf("discarded = %+v, want cid-stale on the linked-worktree row", got)
+	}
+	// Parent wins: only the stale row is dropped, so only its binding
+	// cascades away.
+	if len(store.dropped) != 1 || store.dropped[0] != "repo-/repo/.worktrees/1529" {
+		t.Errorf("dropped = %v, want only the linked-worktree row", store.dropped)
+	}
+}
+
 // A row whose recorded path is gone is dropped rather than carried
 // forward. Nothing resolves it, so nothing can correct it.
 func TestMigrateDropsAVanishedRow(t *testing.T) {

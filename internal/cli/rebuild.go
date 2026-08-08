@@ -56,6 +56,10 @@ type rebuildMigrated struct {
 	Subject string `json:"subject"`
 	Action  string `json:"action"`
 	Into    string `json:"into,omitempty"`
+	// Detail is what the operator must act on by hand. For
+	// binding-discarded it is the ID of the container left running with
+	// nothing in the database referring to it.
+	Detail string `json:"detail,omitempty"`
 }
 
 type rebuildRegistered struct {
@@ -132,7 +136,7 @@ func rebuildEnvelopeFrom(report rebuild.Report) rebuildEnvelope {
 	}
 	for _, m := range report.Migrated {
 		env.Migrated = append(env.Migrated, rebuildMigrated{
-			Subject: m.Subject, Action: m.Action, Into: m.Into,
+			Subject: m.Subject, Action: m.Action, Into: m.Into, Detail: m.Detail,
 		})
 	}
 	for _, r := range report.Registered {
@@ -168,7 +172,14 @@ func writeRebuildHuman(w io.Writer, env rebuildEnvelope) error {
 	// Migrations print before registrations, since a collapse explains the
 	// registration that follows it.
 	for _, m := range env.Migrated {
-		fmt.Fprintln(tw, cells(m.Action, m.Subject, m.Into))
+		trailer := m.Into
+		if m.Detail != "" {
+			if trailer != "" {
+				trailer += " "
+			}
+			trailer += "container " + m.Detail
+		}
+		fmt.Fprintln(tw, cells(m.Action, m.Subject, trailer))
 	}
 	for _, r := range env.Registered {
 		fmt.Fprintln(tw, cells(registered, r.Slug, r.Session))

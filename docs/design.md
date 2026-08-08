@@ -301,11 +301,13 @@ metadata, and adapter observations to produce a plan.
 
 Workspace-mutating commands take a filesystem lock before the final
 observation and hold it through external mutations and the resulting state
-commit. Two locks are taken in a fixed order — the repository first, then the
-workspace — because a repository's container is shared by every tree of the
-project, so concurrent commands in two worktrees must serialize on it. They do
-not hold a SQLite transaction while a subprocess runs. Observation-only
-commands do not take the operation lock.
+commit. The workspace lock is always taken; a command with a container phase
+takes the repository lock ahead of it, in that fixed order, because a
+repository's container is shared by every tree of the project, so concurrent
+commands in two worktrees must serialize on it. A command with no container
+phase — `stop` without `--container`, say — takes the workspace lock alone.
+They do not hold a SQLite transaction while a subprocess runs.
+Observation-only commands do not take the operation lock.
 
 External resource changes and SQLite cannot be one transaction. The design
 therefore provides convergence rather than pretending to provide atomicity:

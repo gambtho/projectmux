@@ -22,12 +22,15 @@ type Retagger interface {
 }
 
 // Migrated is one correction the upgrade pass made. Action is
-// "collapsed", "dropped", or "retagged"; Into is the repository root the
-// subject now belongs to, and is empty for a drop.
+// "collapsed", "dropped", "retagged", or "binding-discarded"; Into is the
+// repository root the subject now belongs to, and is empty for a drop.
+// Detail carries what an operator needs to finish the correction by hand
+// and is empty unless the action leaves something behind.
 type Migrated struct {
 	Subject string
 	Action  string
 	Into    string
+	Detail  string
 }
 
 // MigrationResult is the pass's output. Live carries the sessions
@@ -85,6 +88,7 @@ func (a *Applier) collapseRows(ctx context.Context, res *MigrationResult) {
 			res.Migrated = append(res.Migrated, Migrated{
 				Subject: repo.RepoRoot, Action: "dropped",
 			})
+			res.Migrated = appendDiscardedBinding(res.Migrated, repo, "")
 			if a.DryRun {
 				continue
 			}
@@ -108,10 +112,22 @@ func (a *Applier) collapseRows(ctx context.Context, res *MigrationResult) {
 // row that resolves to the same repository — the over-counted state this
 // pass already knows how to merge — where the other order would lose the
 // registration outright.
+//
+// Parent wins on the container binding. Dropping the stale row cascades
+// its container_bindings row away (0002_repositories.sql), so if both
+// rows carried a binding the parent's survives and the stale one is
+// discarded — and any container it named keeps running, unreferenced.
+// The rule is deliberate rather than incidental: the parent is the row
+// every session on the repository will key on after this pass, so
+// overwriting its binding with the stale row's would move a live
+// repository onto a container chosen for one worktree. The discard is
+// reported instead, with the container ID, because reattaching or
+// removing that container is a decision only the operator can make.
 func (a *Applier) collapseInto(ctx context.Context, repo state.Repository, ws resolve.Workspace, res *MigrationResult) {
 	res.Migrated = append(res.Migrated, Migrated{
 		Subject: repo.RepoRoot, Action: "collapsed", Into: ws.RepoRoot,
 	})
+	res.Migrated = appendDiscardedBinding(res.Migrated, repo, ws.RepoRoot)
 	if a.DryRun {
 		return
 	}
@@ -203,6 +219,22 @@ func (a *Applier) retagSessions(ctx context.Context, res *MigrationResult) {
 		res.Live[i].WorkspaceID = ws.ID
 		res.Live[i].Worktree = ws.RepoRoot
 	}
+}
+
+// appendDiscardedBinding records that removing a repository row takes its
+// container binding with it. Losing the row is correct; losing it in
+// silence is not, because the container itself survives the cascade and
+// nothing left in the database names it.
+func appendDiscardedBinding(migrated []Migrated, repo state.Repository, into string) []Migrated {
+	if repo.Container == nil || repo.Container.ContainerID == "" {
+		return migrated
+	}
+	return append(migrated, Migrated{
+		Subject: repo.RepoRoot,
+		Action:  "binding-discarded",
+		Into:    into,
+		Detail:  repo.Container.ContainerID,
+	})
 }
 
 func conflictAt(subject, format string, args ...any) Conflict {

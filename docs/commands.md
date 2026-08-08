@@ -429,6 +429,15 @@ with no live session stays unregistered until the next `open` — and it does no
 restore container bindings, which the next `open` reacquires. The name is
 broader than the command.
 
+Collapsing a row goes further than not restoring a binding: it *discards* the
+binding that row held. The container binding hangs off the repository row, so
+dropping a linked-worktree row deletes its binding outright, and any container
+it named keeps running with nothing in the database referring to it. Where the
+worktree and its parent both had a binding, the parent's is the one that
+survives. The report names each discarded binding and the container ID, so
+`docker rm` on an orphan — or a fresh `open --container` — is the operator's
+call to make.
+
 **It completes the repository-scoped upgrade.** The schema migration that
 introduced repositories moves every stored row verbatim, treating each
 recorded path as a repository root, because telling a main worktree from a
@@ -452,10 +461,15 @@ exits 0.
 
 `--dry-run` performs every read-only step — classification, resolution,
 identity verification, configuration loading — and stops before the writes. It
-is a preview rather than a partial pass: a dry run that reports a conflict is
-the conflict the real run would report, and it exits on that conflict with the
-same code, because the exit code describes the state of the world rather than
-whether anything was written.
+is a preview rather than a partial pass, and it exits on a conflict with the
+same code the real run would, because the exit code describes the state of the
+world rather than whether anything was written.
+
+A dry run classifies the state as it stands *before* the migration pass, so a
+conflict it reports may be one the real run clears by retagging first: a
+session carrying pre-change identity keys reads as a conflict in the preview
+and is simply retagged in the real run. The preview is a lower bound on what a
+real run resolves, not an exact rehearsal of it.
 
 | Situation | Exit |
 | --- | --- |
