@@ -278,8 +278,9 @@ The first release retains the useful command vocabulary under the public
   explicit rather than an automatic response to corruption.
 
 Nothing ProjectMux emits is a compatibility contract below 1.0. Human output
-is the least stable of it: commands offering JSON at least carry a top-level
-schema version and a documented, versioned structure.
+is the least stable of the three: human text, `--json`, and the exit codes.
+Commands offering JSON at least carry a top-level schema version and a
+documented, versioned structure.
 
 `projectmux list` and `projectmux status` render container health as the primary
 fact. A retained ID with `health=missing` or `health=unknown` must never read as

@@ -104,12 +104,15 @@ and `v0.x` builds are published as prereleases.
 
 Releases up to `v0.4.0` named the JSON output and the exit codes as contracts
 that held even during the alpha. That claim is withdrawn. It was made before
-anything pinned those shapes, and only `config --json` is checked against a
-fixed set of keys today; a field in any of the other nine envelopes could be
+anything pinned those shapes, and only the `config --json` envelope is
+checked against a fixed set of keys today. ProjectMux emits ten envelope
+shapes across nine commands — `config` emits two, one for its digest report
+and one for `--validate` — so a field in any of the other nine could be
 renamed by accident without a test noticing.
 
-Human-readable output remains the least stable of the three, so parse `--json`
-if you automate against ProjectMux — but pin the version you tested against.
+Human-readable output remains the least stable of the three outputs: human
+text, `--json`, and the exit codes. Parse `--json` if you automate against
+ProjectMux — but pin the version you tested against.
 
 ## Platform support
 

@@ -9,8 +9,9 @@
 // This build is an alpha. Nothing it emits is a compatibility contract below
 // 1.0 — not the configuration schema, the command surface, the JSON
 // envelopes, or the exit codes. The envelopes carry a schema_version so a
-// break is expressible, and human-readable output remains the least stable of
-// them; automation should parse --json.
+// break is expressible, and human-readable output remains the least stable
+// of the three: human text, --json, and the exit codes; automation should
+// parse --json.
 package main
 
 import (

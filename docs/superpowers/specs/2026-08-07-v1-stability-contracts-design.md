@@ -25,12 +25,13 @@ It is the opposite: with no users, the project has the *least* evidence about
 which contracts are the right shape. Freezing is a commitment made at the
 moment of minimum information, and every wrong guess becomes a 2.0.
 
-**The advertised contract is enforced for one command out of ten.** There is no
-`testdata/` under `internal/` and no golden file anywhere in the repository.
-`TestConfigJSONEnvelopeIsVersionedAndComplete`
+**The advertised contract is enforced for one of the ten `--json` shapes.**
+There is no `testdata/` under `internal/` and no golden file anywhere in the
+repository. `TestConfigJSONEnvelopeIsVersionedAndComplete`
 (`internal/cli/cli_test.go:192-210`) is the exception: it asserts `config
 --json`'s exact top-level key set *and its count*, so a field added, removed,
-or renamed there fails a test. Nothing equivalent exists for the other nine.
+or renamed there fails a test. Nothing equivalent exists for the other nine
+shapes.
 
 The gap is narrower than "no tests" but real. The remaining commands are
 covered by tests that read the fields they care about, which catches a field
@@ -92,7 +93,7 @@ contracts were not ready to be frozen, and most become work items when 1.0 is
 actually approached.
 
 **3.1 One `schema_version` spans ten independent shapes.**
-`cli.OutputSchemaVersion = 1` (`internal/cli/config.go:22`) is embedded in ten
+`cli.OutputSchemaVersion = 1` (`internal/cli/config.go:23`) is embedded in ten
 unrelated envelopes: `open`, `attach`, `stop`, `autostart`, `config`,
 `config --validate`, `list`, `status`, `doctor`, `rebuild`.
 `internal/cli/validate.go:24-25` states the convention — "each owns its own
@@ -108,12 +109,12 @@ cannot be enforced by a rule that nine of its ten subjects can violate
 undetected.
 
 **3.3 `config --json` embeds `config.Config` whole**
-(`internal/cli/config.go:48`). The type's own doc comment already says its
-JSON encoding "is the digested document and the `config` member of the
-versioned CLI envelope, so field order and names are a public contract"
-(`internal/config/config.go:23-25`). The coupling this creates runs from
-`config.Config` to *two* consumers at once — the CLI envelope and the digest —
-so neither can be changed without deciding for the other.
+(`internal/cli/config.go:49`). The type's own doc comment said, before this
+change, that its JSON encoding "is the digested document and the `config`
+member of the versioned CLI envelope, so field order and names are a public
+contract" (`internal/config/config.go:23-25`). The coupling this creates runs
+from `config.Config` to *two* consumers at once — the CLI envelope and the
+digest — so neither can be changed without deciding for the other.
 
 It does **not** weld the YAML input schema to the JSON output. Those are
 separate structs with separate tag sets: `Layer` carries the `yaml` tags
@@ -153,13 +154,14 @@ indistinguishable from an I/O failure. Automation would reasonably treat
 ## 4. The exit codes are a deliberate, asymmetric cost
 
 The exit codes are not in the same position as `--json`, and the spec should
-not imply they failed for the same reason. They are genuinely enforced: **101 lines
-across `internal/cli`'s tests reference the seven exit-code constants, and all
+not imply they failed for the same reason. They are genuinely enforced: **100
+lines across `internal/cli`'s tests reference the seven exit-code constants
+(101 occurrences; `wiring_test.go:222` carries two), and all
 seven are exercised** (`ExitOK` through `ExitRefused`, the least-referenced
 being `ExitAmbiguous`). `internal/cli/exit_test.go` covers
 the subtle case directly — a reporting wrapper classifies on its wrapped
-cause, not on which command produced it. `internal/cli/cli.go:22-23` calls
-them "part of the command contract."
+cause, not on which command produced it. `internal/cli/cli.go:22-23` said,
+before this change, that they were "part of the command contract."
 
 They are withdrawn anyway, **for consistency of message alone**: a README that
 says "nothing is frozen below 1.0, except this one thing" invites exactly the
