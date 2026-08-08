@@ -28,7 +28,11 @@ workspace name and exits 4, not 2 — a documented trade for the shorthand.
 
 **`--json` and `--compact`.** Every command that produces a report accepts
 `--json`, which emits a versioned envelope carrying `schema_version`, and
-`--compact`, which puts that envelope on one line and implies `--json`.
+`--compact`, which puts that envelope on one line and implies `--json`. The
+current version is **2**: it renamed the workspace's path field from
+`worktree` to `repo_root`, dropped `is_primary`, and added `session`. A
+consumer of version 1 breaks loudly on the missing field, which is the point
+— a repository root read as a worktree path would be silently wrong.
 
 **What is a contract.** The JSON envelopes and the exit codes are
 compatibility contracts. Human-readable output is not — its layout may change
@@ -83,10 +87,9 @@ Prints the normalized, merged configuration for a workspace, or with
 ```text
 $ projectmux config
 workspace     slabledger
-worktree      /home/you/src/slabledger
+repository    /home/you/src/slabledger
 id            d7142c2621eba1b47024261c980871d9e70d982e0e9fab5e0924100dcc300493
 session       slabledger
-primary       true
 digest        sha256:40dd44f74953a6333ea57bbb1fae15be218847229858600cfdc6a763348f7318
 autostart     false
 devcontainer  enabled=auto start_timeout=5m0s
@@ -98,8 +101,8 @@ logs    command tail -f /dev/null  -         .    -
 ```
 
 Alongside the configuration it reports the derived identity: a stable ID for
-the worktree path, the repository slug, the proposed session name, whether the
-tree is the repository's primary one, and a `sha256:` digest of the normalized
+the repository root, the repository slug, the session name (empty for the
+repository's default session), and a `sha256:` digest of the normalized
 configuration. The digest ignores cosmetic YAML edits and map ordering, which
 is how `status` distinguishes real drift from reformatting.
 
@@ -192,9 +195,8 @@ nothing.
 ```text
 $ projectmux status
 workspace         slabledger
-worktree          /home/you/src/slabledger
+repository        /home/you/src/slabledger
 id                d7142c2621eba1b47024261c980871d9e70d982e0e9fab5e0924100dcc300493
-primary           true
 recorded session  slabledger
 registered        2026-08-06T05:53:54.037942782Z
 updated           2026-08-06T05:53:54.181608075Z

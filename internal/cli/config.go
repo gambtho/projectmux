@@ -19,7 +19,12 @@ import (
 // OutputSchemaVersion versions the JSON envelope. Human output is not a
 // compatibility contract; this is. Bump it only for a breaking change to the
 // structure below.
-const OutputSchemaVersion = 1
+//
+// Version 2 renamed the workspace's path field from "worktree" to
+// "repo_root", dropped "is_primary", and added "session". The rename is
+// deliberate: a consumer that breaks loudly on a missing field is better
+// than one that silently reads a repository root as a worktree path.
+const OutputSchemaVersion = 2
 
 const configHelp = `usage: projectmux config [--validate] [--json] [--compact] [<workspace>]
 
@@ -48,12 +53,16 @@ type envelope struct {
 	Config          config.Config `json:"config"`
 }
 
+// workspaceInfo is the resolved identity shared by config, open, attach,
+// stop, and status. Session is the empty string for a repository's default
+// session, and is always emitted: a consumer cannot tell an absent field
+// from a default one.
 type workspaceInfo struct {
 	ID          string `json:"id"`
 	Slug        string `json:"slug"`
-	Worktree    string `json:"worktree"`
+	RepoRoot    string `json:"repo_root"`
+	Session     string `json:"session"`
 	SessionName string `json:"session_name"`
-	IsPrimary   bool   `json:"is_primary"`
 }
 
 func runConfig(args []string, stdout io.Writer) error {
@@ -133,9 +142,9 @@ func buildEnvelope(name string) (envelope, error) {
 		Workspace: workspaceInfo{
 			ID:          ws.ID,
 			Slug:        ws.Slug,
-			Worktree:    ws.RepoRoot,
+			RepoRoot:    ws.RepoRoot,
+			Session:     ws.Session,
 			SessionName: ws.SessionName,
-			IsPrimary:   true,
 		},
 		RepositoryRoots: roots,
 		Digest:          effective.Digest,
@@ -160,10 +169,9 @@ func writeHuman(w io.Writer, env envelope) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 
 	fmt.Fprintf(tw, "workspace\t%s\n", env.Workspace.Slug)
-	fmt.Fprintf(tw, "worktree\t%s\n", env.Workspace.Worktree)
+	fmt.Fprintf(tw, "repository\t%s\n", env.Workspace.RepoRoot)
 	fmt.Fprintf(tw, "id\t%s\n", env.Workspace.ID)
 	fmt.Fprintf(tw, "session\t%s\n", env.Workspace.SessionName)
-	fmt.Fprintf(tw, "primary\t%t\n", env.Workspace.IsPrimary)
 	fmt.Fprintf(tw, "digest\t%s\n", env.Digest)
 	fmt.Fprintf(tw, "autostart\t%t\n", env.Config.Autostart)
 

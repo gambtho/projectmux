@@ -44,11 +44,10 @@ type Locker interface {
 
 // Registered is one workspace rebuild recovered.
 type Registered struct {
-	ID        string
-	Slug      string
-	Worktree  string
-	IsPrimary bool
-	Session   string
+	ID       string
+	Slug     string
+	RepoRoot string
+	Session  string
 }
 
 // Report is what one rebuild run did and declined to do. Both slices are
@@ -256,7 +255,7 @@ func (a *Applier) finalize(ctx context.Context, ws resolve.Workspace, cand Candi
 		}
 	case CaseAdopt:
 		// Never RegisterWorkspace here. It is an upsert whose conflict
-		// branch overwrites slug, worktree, is_primary, proposed_session,
+		// branch overwrites slug, repository root, proposed_session,
 		// and desired_digest (internal/state/store.go:43-49), which is the
 		// exact opposite of the fill-only guarantee. Fill-only is a
 		// property of which primitive each case calls, not of the
@@ -318,18 +317,16 @@ func (a *Applier) observeLive(ctx context.Context, ws resolve.Workspace, sess co
 	return &live, nil
 }
 
-// registeredFor reports the resolver's identity for ws, not the stored
-// row's, by design. Slug and the repository root are provably equal to
-// the row's — the identity gate above requires it — so the two views can
-// no longer diverge at all; the function stays as the single place the
-// report is built, rather than being inlined at both call sites.
+// registeredFor reports the resolver's identity for ws rather than the
+// stored row's. The identity gate above requires the two to agree on slug
+// and repository root, so the only field that can differ is the session
+// name, which is what this run just recorded.
 func registeredFor(ws resolve.Workspace, session string) *Registered {
 	return &Registered{
-		ID:        ws.ID,
-		Slug:      ws.Slug,
-		Worktree:  ws.RepoRoot,
-		IsPrimary: true,
-		Session:   session,
+		ID:       ws.ID,
+		Slug:     ws.Slug,
+		RepoRoot: ws.RepoRoot,
+		Session:  session,
 	}
 }
 

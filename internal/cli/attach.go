@@ -136,9 +136,9 @@ func buildAttach(ctx context.Context, name string) (attachEnvelope, string, erro
 		Workspace: workspaceInfo{
 			ID:          ws.ID,
 			Slug:        ws.Slug,
-			Worktree:    ws.RepoRoot,
+			RepoRoot:    ws.RepoRoot,
+			Session:     ws.Session,
 			SessionName: ws.SessionName,
-			IsPrimary:   true,
 		},
 		Session: sessionInfo{
 			State:    string(snap.Session.State),

@@ -150,7 +150,7 @@ func newHarness() *harness {
 // know teaches the resolver and the configuration loader about one
 // workspace, the way a real git tree and a real defaults.yaml would.
 func (h *harness) know(ws resolve.Workspace, digest string) {
-	h.resolver.byWorktree[ws.Worktree] = ws
+	h.resolver.byWorktree[ws.RepoRoot] = ws
 	h.config.digests[ws.Slug] = digest
 }
 
@@ -166,20 +166,19 @@ func (h *harness) applier() *Applier {
 	}
 }
 
-func workspace(id, slug, worktree, sessionName string, primary bool) resolve.Workspace {
+func workspace(id, slug, repoRoot, sessionName string) resolve.Workspace {
 	return resolve.Workspace{
 		ID:          id,
 		Slug:        slug,
-		Worktree:    worktree,
+		RepoRoot:    repoRoot,
 		SessionName: sessionName,
-		IsPrimary:   primary,
 	}
 }
 
 func projectmux() resolve.Workspace {
 	return workspace(
 		"1111111111111111111111111111111111111111111111111111111111111111",
-		"projectmux", "/src/projectmux", "projectmux", true)
+		"projectmux", "/src/projectmux", "projectmux")
 }
 
 // liveSession is a session carrying identity keys that agree with the
@@ -190,7 +189,7 @@ func liveSession(ws resolve.Workspace, name string) controller.LiveSession {
 		Name:        name,
 		WorkspaceID: ws.ID,
 		Slug:        ws.Slug,
-		Worktree:    ws.Worktree,
+		Worktree:    ws.RepoRoot,
 	}
 }
 
@@ -213,11 +212,10 @@ func TestApplyRegistersAndAdoptsAWorkspaceWithNoRow(t *testing.T) {
 		t.Fatalf("Conflicts = %+v, want none", report.Conflicts)
 	}
 	want := []Registered{{
-		ID:        ws.ID,
-		Slug:      "projectmux",
-		Worktree:  "/src/projectmux",
-		IsPrimary: true,
-		Session:   "projectmux",
+		ID:       ws.ID,
+		Slug:     "projectmux",
+		RepoRoot: "/src/projectmux",
+		Session:  "projectmux",
 	}}
 	if !reflect.DeepEqual(report.Registered, want) {
 		t.Fatalf("Registered = %+v, want %+v", report.Registered, want)
@@ -230,8 +228,9 @@ func TestApplyRegistersAndAdoptsAWorkspaceWithNoRow(t *testing.T) {
 	if rec.ActualSession == nil || *rec.ActualSession != "projectmux" {
 		t.Errorf("ActualSession = %v, want %q", rec.ActualSession, "projectmux")
 	}
-	if !rec.IsPrimary {
-		t.Errorf("IsPrimary = false, want true — it comes from the resolver, not the session keys")
+	if rec.RepoRoot != "/src/projectmux" {
+		t.Errorf("RepoRoot = %q, want %q — it comes from the resolver, not the session keys",
+			rec.RepoRoot, "/src/projectmux")
 	}
 	if rec.ProposedSession != "projectmux" {
 		t.Errorf("ProposedSession = %q, want %q", rec.ProposedSession, "projectmux")
@@ -290,7 +289,7 @@ func TestApplyConfigFailureIsOneWorkspacesConflictNotTheBatchs(t *testing.T) {
 	ws := projectmux()
 	other := workspace(
 		"3333333333333333333333333333333333333333333333333333333333333333",
-		"other", "/src/other", "other", true)
+		"other", "/src/other", "other")
 	h := newHarness()
 	h.know(ws, "sha256:desired")
 	h.know(other, "sha256:other")
@@ -327,13 +326,13 @@ func TestApplyConfigFailureIsOneWorkspacesConflictNotTheBatchs(t *testing.T) {
 func TestApplyOrdersRegistrationsBySlugThenSessionAndPassesPlanConflictsThrough(t *testing.T) {
 	alpha := workspace(
 		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		"alpha", "/src/alpha", "alpha", true)
+		"alpha", "/src/alpha", "alpha")
 	alphaWT := workspace(
 		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		"alpha", "/src/alpha/.worktrees/wt", "alpha--wt", false)
+		"alpha", "/src/alpha/.worktrees/wt", "alpha--wt")
 	zulu := workspace(
 		"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-		"zulu", "/src/zulu", "zulu", true)
+		"zulu", "/src/zulu", "zulu")
 
 	h := newHarness()
 	h.know(alpha, "sha256:a")
@@ -483,17 +482,17 @@ func TestApplyDryRunMatchesTheRealRunAndWritesNothing(t *testing.T) {
 
 // seedRecorded registers a row whose every overwritable field disagrees
 // with what the resolver and the configuration loader would supply.
-// RegisterWorkspace's conflict branch overwrites slug, worktree,
-// is_primary, proposed_session, and desired_digest
-// (internal/state/store.go:43-49), so any of these changing proves the
-// applier re-registered a workspace it should only have adopted.
+// RegisterWorkspace's conflict branch overwrites slug, repository root,
+// proposed_session, and desired_digest (internal/state/store.go:43-49),
+// so any of these changing proves the applier re-registered a workspace
+// it should only have adopted.
 //
-// Slug and worktree deliberately match: a row disagreeing on those is an
-// identity mismatch, which classification refuses before it ever reaches
-// application.
+// Slug and repository root deliberately match: a row disagreeing on those
+// is an identity mismatch, which classification refuses before it ever
+// reaches application.
 func seedRecorded(t *testing.T, store *fake.Store, ws resolve.Workspace) {
 	t.Helper()
-	recorded := workspace(ws.ID, ws.Slug, ws.Worktree, "recorded-proposed", false)
+	recorded := workspace(ws.ID, ws.Slug, ws.RepoRoot, "recorded-proposed")
 	if err := store.RegisterWorkspace(recorded, "sha256:recorded", testTime); err != nil {
 		t.Fatalf("seeding the recorded row: %v", err)
 	}
@@ -501,11 +500,9 @@ func seedRecorded(t *testing.T, store *fake.Store, ws resolve.Workspace) {
 
 func assertRecordedFieldsUntouched(t *testing.T, rec state.Record, ws resolve.Workspace) {
 	t.Helper()
-	if rec.IsPrimary {
-		t.Errorf("IsPrimary = true, want the recorded false: adoption must not re-register")
-	}
 	if rec.ProposedSession != "recorded-proposed" {
-		t.Errorf("ProposedSession = %q, want %q", rec.ProposedSession, "recorded-proposed")
+		t.Errorf("ProposedSession = %q, want %q: adoption must not re-register",
+			rec.ProposedSession, "recorded-proposed")
 	}
 	if rec.DesiredDigest == nil || *rec.DesiredDigest != "sha256:recorded" {
 		t.Errorf("DesiredDigest = %v, want %q", rec.DesiredDigest, "sha256:recorded")
@@ -513,8 +510,8 @@ func assertRecordedFieldsUntouched(t *testing.T, rec state.Record, ws resolve.Wo
 	if rec.Slug != ws.Slug {
 		t.Errorf("Slug = %q, want %q", rec.Slug, ws.Slug)
 	}
-	if rec.Worktree != ws.Worktree {
-		t.Errorf("Worktree = %q, want %q", rec.Worktree, ws.Worktree)
+	if rec.RepoRoot != ws.RepoRoot {
+		t.Errorf("RepoRoot = %q, want %q", rec.RepoRoot, ws.RepoRoot)
 	}
 }
 

@@ -175,9 +175,9 @@ func statusEnvelopeFrom(ws resolve.Workspace, effective config.Effective, snap c
 		Workspace: workspaceInfo{
 			ID:          ws.ID,
 			Slug:        ws.Slug,
-			Worktree:    ws.RepoRoot,
+			RepoRoot:    ws.RepoRoot,
+			Session:     ws.Session,
 			SessionName: ws.SessionName,
-			IsPrimary:   true,
 		},
 		Session: sessionInfo{State: string(snap.Session.State)},
 		Config:  configInfo{DesiredDigest: effective.Digest},
@@ -254,9 +254,8 @@ func writeStatusHuman(w io.Writer, env statusEnvelope) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 
 	fmt.Fprintf(tw, "workspace\t%s\n", env.Workspace.Slug)
-	fmt.Fprintf(tw, "worktree\t%s\n", env.Workspace.Worktree)
+	fmt.Fprintf(tw, "repository\t%s\n", env.Workspace.RepoRoot)
 	fmt.Fprintf(tw, "id\t%s\n", env.Workspace.ID)
-	fmt.Fprintf(tw, "primary\t%t\n", env.Workspace.IsPrimary)
 
 	if env.Registered {
 		recorded := env.Stored.ProposedSession + " (proposed, unassigned)"

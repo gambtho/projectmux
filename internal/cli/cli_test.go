@@ -184,8 +184,8 @@ func TestConfigResolvesByWorkspaceName(t *testing.T) {
 	if env.Workspace.Slug != slug {
 		t.Errorf("slug = %q", env.Workspace.Slug)
 	}
-	if env.Workspace.Worktree != repo {
-		t.Errorf("worktree = %q, want %q", env.Workspace.Worktree, repo)
+	if env.Workspace.RepoRoot != repo {
+		t.Errorf("repo_root = %q, want %q", env.Workspace.RepoRoot, repo)
 	}
 }
 
@@ -222,9 +222,6 @@ func TestConfigJSONEnvelopeIsVersionedAndComplete(t *testing.T) {
 	}
 	if len(env.Workspace.ID) != 64 {
 		t.Errorf("workspace id = %q", env.Workspace.ID)
-	}
-	if !env.Workspace.IsPrimary {
-		t.Error("the repository is its own primary tree")
 	}
 	if len(env.Config.Windows) != 3 {
 		t.Errorf("windows = %d, want 3", len(env.Config.Windows))

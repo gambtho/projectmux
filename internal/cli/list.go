@@ -35,8 +35,8 @@ type listEnvelope struct {
 type listRow struct {
 	ID               string               `json:"id"`
 	Slug             string               `json:"slug"`
-	Worktree         string               `json:"worktree"`
-	IsPrimary        bool                 `json:"is_primary"`
+	RepoRoot         string               `json:"repo_root"`
+	Session          string               `json:"session"`
 	ProposedSession  string               `json:"proposed_session,omitempty"`
 	ActualSession    *string              `json:"actual_session,omitempty"`
 	SessionState     string               `json:"session_state"`
@@ -114,8 +114,8 @@ func buildList(ctx context.Context) (listEnvelope, error) {
 		row := listRow{
 			ID:              rec.ID,
 			Slug:            rec.Slug,
-			Worktree:        rec.RepoRoot,
-			IsPrimary:       true,
+			RepoRoot:        rec.RepoRoot,
+			Session:         rec.Session,
 			ProposedSession: rec.ProposedSession,
 			ActualSession:   rec.ActualSession,
 			Container:       storedContainer(rec.Container),
@@ -155,7 +155,7 @@ func buildList(ctx context.Context) (listEnvelope, error) {
 		env.Workspaces = append(env.Workspaces, listRow{
 			ID:               s.WorkspaceID,
 			Slug:             s.Slug,
-			Worktree:         s.Worktree,
+			RepoRoot:         s.Worktree,
 			SessionState:     "live",
 			LiveSession:      &name,
 			Recorded:         false,

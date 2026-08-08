@@ -480,11 +480,11 @@ func TestLifecycleRebuildThenAutostart(t *testing.T) {
 	if len(env.Registered) != 1 {
 		t.Fatalf("registered = %+v, want exactly one workspace", env.Registered)
 	}
-	// The envelope still names the field worktree; Task 7 owns renaming
-	// it. The value it carries is the repository root.
+	// The envelope names the field repo_root as of Task 7 (schema_version
+	// 2); the value it carries is the repository root.
 	if got := env.Registered[0]; got.ID != ws.ID || got.Slug != ws.Slug ||
-		got.Worktree != ws.RepoRoot {
-		t.Fatalf("registered = %+v, want %s at %s", got, ws.Slug, ws.RepoRoot)
+		got.RepoRoot != ws.RepoRoot || got.Session != ws.SessionName {
+		t.Fatalf("registered = %+v, want %s at %s, session %s", got, ws.Slug, ws.RepoRoot, ws.SessionName)
 	}
 
 	// Exactly one repository row, carrying the root autostart will use.

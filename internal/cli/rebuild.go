@@ -49,11 +49,10 @@ type rebuildEnvelope struct {
 }
 
 type rebuildRegistered struct {
-	ID        string `json:"id"`
-	Slug      string `json:"slug"`
-	Worktree  string `json:"worktree"`
-	IsPrimary bool   `json:"is_primary"`
-	Session   string `json:"session"`
+	ID       string `json:"id"`
+	Slug     string `json:"slug"`
+	RepoRoot string `json:"repo_root"`
+	Session  string `json:"session"`
 }
 
 type rebuildConflict struct {
@@ -122,11 +121,10 @@ func rebuildEnvelopeFrom(report rebuild.Report) rebuildEnvelope {
 	}
 	for _, r := range report.Registered {
 		env.Registered = append(env.Registered, rebuildRegistered{
-			ID:        r.ID,
-			Slug:      r.Slug,
-			Worktree:  r.Worktree,
-			IsPrimary: r.IsPrimary,
-			Session:   r.Session,
+			ID:       r.ID,
+			Slug:     r.Slug,
+			RepoRoot: r.RepoRoot,
+			Session:  r.Session,
 		})
 	}
 	for _, c := range report.Conflicts {
@@ -223,9 +221,8 @@ func buildRebuild(ctx context.Context, dryRun bool) (rebuild.Report, error) {
 
 // worktreeResolver re-derives a workspace's identity the way every other
 // command does: from the directory, never from the tmux keys. That is
-// what recovers IsPrimary and the proposed session name, neither of
-// which tmux carries (spec §3), and it is what lets rebuild verify the
-// keys it was handed.
+// what recovers the proposed session name, which tmux does not carry
+// (spec §3), and it is what lets rebuild verify the keys it was handed.
 type worktreeResolver struct{}
 
 func (worktreeResolver) Resolve(worktree string) (resolve.Workspace, error) {
