@@ -16,11 +16,11 @@ var testTime = time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 
 func testWorkspace(id, session string) resolve.Workspace {
 	return resolve.Workspace{
-		ID:          id,
-		Slug:        "slabledger",
-		Worktree:    "/w/" + id,
-		SessionName: session,
-		IsPrimary:   true,
+		ID:           id,
+		RepositoryID: "r-" + id,
+		Slug:         "slabledger",
+		RepoRoot:     "/w/" + id,
+		SessionName:  session,
 	}
 }
 
@@ -69,16 +69,16 @@ func TestFakeStoreMirrorsAllocationAndRetention(t *testing.T) {
 	}
 }
 
-// TestFakeStoreWorkspacesOrdersBySlugThenWorktree mirrors the real store's
-// ORDER BY w.slug, w.worktree (internal/state/store.go): the fake iterates a
+// TestFakeStoreWorkspacesOrdersBySlugThenRepoRoot mirrors the real store's
+// ORDER BY w.slug, w.repo_root (internal/state/store.go): the fake iterates a
 // map, so without an explicit sort the order would be nondeterministic.
-func TestFakeStoreWorkspacesOrdersBySlugThenWorktree(t *testing.T) {
+func TestFakeStoreWorkspacesOrdersBySlugThenRepoRoot(t *testing.T) {
 	s := NewStore()
-	register := func(id, slug, worktree string) {
+	register := func(id, slug, repoRoot string) {
 		t.Helper()
 		ws := resolve.Workspace{
-			ID: id, Slug: slug, Worktree: worktree,
-			SessionName: id, IsPrimary: true,
+			ID: id, RepositoryID: id, Slug: slug, RepoRoot: repoRoot,
+			SessionName: id,
 		}
 		if err := s.RegisterWorkspace(ws, "sha256:a", testTime); err != nil {
 			t.Fatalf("register %s: %v", id, err)
@@ -103,7 +103,7 @@ func TestFakeStoreWorkspacesOrdersBySlugThenWorktree(t *testing.T) {
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Errorf("workspaces = %v, want %v ordered by (slug, worktree)", got, want)
+			t.Errorf("workspaces = %v, want %v ordered by (slug, repo root)", got, want)
 			break
 		}
 	}

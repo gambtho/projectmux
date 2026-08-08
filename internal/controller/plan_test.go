@@ -29,7 +29,7 @@ func storedRecord(actual, applied *string) *state.Record {
 	return &state.Record{
 		ID:              "w1",
 		Slug:            "slabledger",
-		Worktree:        "/w/slabledger",
+		RepoRoot:        "/w/slabledger",
 		ProposedSession: "slabledger",
 		ActualSession:   actual,
 		AppliedDigest:   applied,
@@ -310,7 +310,7 @@ func TestRefusalNamesTheOccupiedSession(t *testing.T) {
 func TestContainerActionAcquireOnIncompleteBinding(t *testing.T) {
 	snap := controller.Snapshot{
 		Desired: controller.Desired{
-			Workspace: resolve.Workspace{ID: "w1", Slug: "s", Worktree: "/w"},
+			Workspace: resolve.Workspace{ID: "w1", Slug: "s", RepoRoot: "/w"},
 		},
 		Session: controller.SessionSnapshot{State: controller.SessionAbsent},
 		Container: controller.ContainerSnapshot{Observed: &controller.ContainerObservation{

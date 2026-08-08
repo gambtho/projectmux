@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/gambtho/projectmux/internal/lock"
 	"github.com/gambtho/projectmux/internal/state"
 )
 
@@ -27,11 +26,20 @@ type StopResult struct {
 // operations only for workspaces that already have a record.
 func (c *Controller) Stop(ctx context.Context, d Desired, stopContainer bool, lockDir string, lockTimeout time.Duration) (StopResult, error) {
 	const opName = "stop"
-	lk, err := lock.Acquire(ctx, lockDir, d.Workspace.ID, lockTimeout)
+	// Only a stop that touches the shared container needs the repository
+	// lock, and it must hold it across the sibling check and the stop
+	// that follows (design §6.1). A session-only stop takes the
+	// workspace lock alone rather than waiting on a sibling's container
+	// work.
+	repositoryID := ""
+	if stopContainer {
+		repositoryID = d.Workspace.RepositoryID
+	}
+	release, err := lockPhases(ctx, lockDir, repositoryID, d.Workspace.ID, lockTimeout)
 	if err != nil {
 		return StopResult{}, err
 	}
-	defer func() { _ = lk.Release() }()
+	defer release()
 
 	var stored *state.Record
 	rec, err := c.Store.Workspace(d.Workspace.ID)

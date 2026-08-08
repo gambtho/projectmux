@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/gambtho/projectmux/internal/lock"
 	"github.com/gambtho/projectmux/internal/state"
 )
 
@@ -78,11 +77,12 @@ var ErrContainerActionUnsupported = errors.New(
 // typed refusals and never mutates on uncertainty.
 func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowIntent, lockDir string, lockTimeout time.Duration) (EnsureResult, error) {
 	const opName = "open"
-	lk, err := lock.Acquire(ctx, lockDir, d.Workspace.ID, lockTimeout)
+	release, err := lockPhases(ctx, lockDir,
+		d.Workspace.RepositoryID, d.Workspace.ID, lockTimeout)
 	if err != nil {
 		return EnsureResult{}, err
 	}
-	defer func() { _ = lk.Release() }()
+	defer release()
 
 	if err := c.Store.RegisterWorkspace(d.Workspace, d.Digest, c.Clock.Now()); err != nil {
 		return EnsureResult{}, fmt.Errorf("registering the workspace: %w", err)
@@ -253,8 +253,8 @@ func renderWindows(intents []WindowIntent, d Desired, container *ContainerObserv
 			for _, p := range in.Panes {
 				// A pane inherits the window's directory unless it sets
 				// its own; inside the container that is the exec relDir,
-				// while the host-side -c stays the worktree, matching the
-				// window itself.
+				// while the host-side -c stays the repository root,
+				// matching the window itself.
 				relDir := in.RelDir
 				if p.RelDir != "" {
 					relDir = p.RelDir
@@ -262,28 +262,28 @@ func renderWindows(intents []WindowIntent, d Desired, container *ContainerObserv
 				panes = append(panes, PaneSpec{
 					Name:    p.Name,
 					Command: act.ExecCommand(binding, p.Command, relDir, d.Config.Environment),
-					Dir:     d.Workspace.Worktree,
+					Dir:     d.Workspace.RepoRoot,
 					Focus:   p.Focus,
 				})
 			}
 			specs = append(specs, WindowSpec{
 				Name:    in.Name,
 				Command: act.ExecCommand(binding, in.Command, in.RelDir, d.Config.Environment),
-				Dir:     d.Workspace.Worktree,
+				Dir:     d.Workspace.RepoRoot,
 				Focus:   in.Focus,
 				Panes:   panes,
 			})
 			continue
 		}
-		dir := d.Workspace.Worktree
+		dir := d.Workspace.RepoRoot
 		if in.RelDir != "" {
-			dir = filepath.Join(d.Workspace.Worktree, in.RelDir)
+			dir = filepath.Join(d.Workspace.RepoRoot, in.RelDir)
 		}
 		panes := make([]PaneSpec, 0, len(in.Panes))
 		for _, p := range in.Panes {
 			paneDir := dir
 			if p.RelDir != "" {
-				paneDir = filepath.Join(d.Workspace.Worktree, p.RelDir)
+				paneDir = filepath.Join(d.Workspace.RepoRoot, p.RelDir)
 			}
 			panes = append(panes, PaneSpec{
 				Name: p.Name, Command: p.Command, Dir: paneDir, Focus: p.Focus,
@@ -389,7 +389,7 @@ func (c *Controller) createSession(ctx context.Context, d Desired, windows []Win
 		Name:        name,
 		WorkspaceID: id,
 		Slug:        d.Workspace.Slug,
-		Worktree:    d.Workspace.Worktree,
+		Worktree:    d.Workspace.RepoRoot,
 		Env:         d.Config.Environment,
 		Windows:     windows,
 	}
@@ -438,7 +438,7 @@ func confirmCreation(snap Snapshot, d Desired, allocated string) string {
 		return "no identity-matched session was observed after creation"
 	}
 	if live.WorkspaceID != d.Workspace.ID || live.Slug != d.Workspace.Slug ||
-		live.Worktree != d.Workspace.Worktree {
+		live.Worktree != d.Workspace.RepoRoot {
 		return fmt.Sprintf("session %q carries contradictory identity keys after creation", live.Name)
 	}
 	if live.Name != allocated {

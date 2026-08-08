@@ -18,11 +18,11 @@ var testTime = time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 func testDesired(enabled string) controller.Desired {
 	return controller.Desired{
 		Workspace: resolve.Workspace{
-			ID:          "w1",
-			Slug:        "slabledger",
-			Worktree:    "/w/slabledger",
-			SessionName: "slabledger",
-			IsPrimary:   true,
+			ID:           "w1",
+			RepositoryID: "r1",
+			Slug:         "slabledger",
+			RepoRoot:     "/w/slabledger",
+			SessionName:  "slabledger",
 		},
 		Config: config.Config{
 			Version:      1,
@@ -83,7 +83,7 @@ func TestObserveQueriesTheAssignedNameToo(t *testing.T) {
 	// Occupy "slabledger" with another workspace so w1 gets a suffixed name.
 	other := ws
 	other.ID = "w0"
-	other.Worktree = "/w/other"
+	other.RepoRoot = "/w/other"
 	if err := d.store.RegisterWorkspace(other, "sha256:x", testTime); err != nil {
 		t.Fatalf("register other: %v", err)
 	}

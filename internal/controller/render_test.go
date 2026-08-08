@@ -28,7 +28,7 @@ func (renderPaneActuator) StopContainer(context.Context, string) error {
 }
 
 func TestRenderWindowsHostPanes(t *testing.T) {
-	d := Desired{Workspace: resolve.Workspace{Worktree: "/w/slab"}}
+	d := Desired{Workspace: resolve.Workspace{RepoRoot: "/w/slab"}}
 	intents := []WindowIntent{{
 		Name:    "dev",
 		Command: "claude",
@@ -54,7 +54,7 @@ func TestRenderWindowsHostPanes(t *testing.T) {
 }
 
 func TestRenderWindowsPaneInheritsWindowDir(t *testing.T) {
-	d := Desired{Workspace: resolve.Workspace{Worktree: "/w/slab"}}
+	d := Desired{Workspace: resolve.Workspace{RepoRoot: "/w/slab"}}
 	intents := []WindowIntent{{
 		Name:   "api",
 		RelDir: "services/api",
@@ -70,7 +70,7 @@ func TestRenderWindowsPaneInheritsWindowDir(t *testing.T) {
 }
 
 func TestRenderWindowsContainerPanes(t *testing.T) {
-	d := Desired{Workspace: resolve.Workspace{Worktree: "/w/slab"},
+	d := Desired{Workspace: resolve.Workspace{RepoRoot: "/w/slab"},
 		Config: config.Config{Environment: map[string]string{"K": "v"}}}
 	obs := &ContainerObservation{Kind: "devcontainer", ContainerID: "abc",
 		ContainerUser: "dev", Workdir: "/workspaces/slab"}

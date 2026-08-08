@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/gambtho/projectmux/internal/lock"
 	"github.com/gambtho/projectmux/internal/state"
 )
 
@@ -26,11 +25,15 @@ const (
 // start (spec §3). Callers pass registered workspaces only.
 func (c *Controller) StartWorkspaceContainer(ctx context.Context, d Desired, lockDir string, lockTimeout time.Duration) (ContainerStartOutcome, *ContainerObservation, error) {
 	const opName = "autostart"
-	lk, err := lock.Acquire(ctx, lockDir, d.Workspace.ID, lockTimeout)
+	// Autostart is the container phase, so the repository lock is the one
+	// that matters; it still takes the workspace lock because the commit
+	// below writes this session's record.
+	release, err := lockPhases(ctx, lockDir,
+		d.Workspace.RepositoryID, d.Workspace.ID, lockTimeout)
 	if err != nil {
 		return "", nil, err
 	}
-	defer func() { _ = lk.Release() }()
+	defer release()
 
 	var stored *state.Record
 	rec, err := c.Store.Workspace(d.Workspace.ID)

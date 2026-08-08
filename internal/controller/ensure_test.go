@@ -109,11 +109,11 @@ func discoverOK(obs *controller.ContainerObservation) func(resolve.Workspace, co
 
 func ensureWorkspace() resolve.Workspace {
 	return resolve.Workspace{
-		ID:          "w1",
-		Slug:        "slab",
-		Worktree:    "/w/slab",
-		SessionName: "slab",
-		IsPrimary:   true,
+		ID:           "w1",
+		RepositoryID: "r1",
+		Slug:         "slab",
+		RepoRoot:     "/w/slab",
+		SessionName:  "slab",
 	}
 }
 
@@ -266,7 +266,7 @@ func TestEnsureAdoptsAndRecordsTheLiveName(t *testing.T) {
 func TestEnsureAdoptConflictRefuses(t *testing.T) {
 	r := newEnsureRig(t, liveStep(ownSession("slab")))
 	other := resolve.Workspace{
-		ID: "w2", Slug: "other", Worktree: "/w/other", SessionName: "other",
+		ID: "w2", Slug: "other", RepoRoot: "/w/other", SessionName: "other",
 	}
 	if err := r.store.RegisterWorkspace(other, "sha256:x", ensureTime); err != nil {
 		t.Fatalf("register: %v", err)

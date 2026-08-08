@@ -104,8 +104,8 @@ func (s *Store) RegisterWorkspace(ws resolve.Workspace, desiredDigest string, no
 	digest := desiredDigest
 	if rec, ok := s.records[ws.ID]; ok {
 		rec.Slug = ws.Slug
-		rec.Worktree = ws.Worktree
-		rec.IsPrimary = ws.IsPrimary
+		rec.RepositoryID = ws.RepositoryID
+		rec.RepoRoot = ws.RepoRoot
 		rec.ProposedSession = ws.SessionName
 		rec.DesiredDigest = &digest
 		rec.UpdatedAt = now
@@ -113,9 +113,9 @@ func (s *Store) RegisterWorkspace(ws resolve.Workspace, desiredDigest string, no
 	}
 	s.records[ws.ID] = &state.Record{
 		ID:              ws.ID,
+		RepositoryID:    ws.RepositoryID,
 		Slug:            ws.Slug,
-		Worktree:        ws.Worktree,
-		IsPrimary:       ws.IsPrimary,
+		RepoRoot:        ws.RepoRoot,
 		ProposedSession: ws.SessionName,
 		DesiredDigest:   &digest,
 		RegisteredAt:    now,
@@ -244,7 +244,8 @@ func (s *Store) Workspace(id string) (state.Record, error) {
 }
 
 // Workspaces returns every registered workspace ordered by slug, then
-// worktree, mirroring the real store's ORDER BY (internal/state/store.go).
+// repository root, mirroring the real store's ORDER BY
+// (internal/state/store.go).
 func (s *Store) Workspaces() ([]state.Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -256,7 +257,7 @@ func (s *Store) Workspaces() ([]state.Record, error) {
 		if out[i].Slug != out[j].Slug {
 			return out[i].Slug < out[j].Slug
 		}
-		return out[i].Worktree < out[j].Worktree
+		return out[i].RepoRoot < out[j].RepoRoot
 	})
 	return out, nil
 }
