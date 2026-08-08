@@ -524,9 +524,7 @@ The section above closed the two named pre-1.0 gates without saying what 1.0
 would commit to. The answer is now recorded: **nothing ProjectMux emits is a
 compatibility contract below 1.0**, and the two that were advertised — the
 versioned JSON envelope and the exit codes — are withdrawn rather than
-extended. The full reasoning is in
-`docs/superpowers/specs/2026-08-07-v1-stability-contracts-design.md`; the
-durable parts are these.
+extended. The durable parts of the reasoning are these.
 
 **The promise was not backed.** One of the ten `--json` shapes is pinned
 against a fixed key set (`config`, by
