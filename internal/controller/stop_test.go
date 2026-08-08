@@ -328,6 +328,14 @@ func TestStopContainerRefusesWhenSiblingsCannotBeObserved(t *testing.T) {
 	if len(r.actuatorC.Stopped) != 0 {
 		t.Error("uncertainty reached the container actuator")
 	}
+	// The sibling query must name the sibling workspace, not the one
+	// being stopped: liveStep ignores its argument, so without this the
+	// query construction at stop.go's liveSiblings could name the wrong
+	// workspace (or the wrong session, when ActualSession diverges from
+	// ProposedSession) and no test would catch it.
+	if len(r.sessions.queries) != 1 || r.sessions.queries[0].WorkspaceID != "w2" {
+		t.Errorf("queries = %+v, want one query naming the sibling workspace w2", r.sessions.queries)
+	}
 }
 
 // lockProbingStopper tries to take the repository lock from inside

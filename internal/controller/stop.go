@@ -74,7 +74,13 @@ func (c *Controller) Stop(ctx context.Context, d Desired, opts StopOptions, lock
 	if opts.Container && !opts.Force && stored != nil && stored.Container != nil {
 		siblings, sibErr := c.liveSiblings(ctx, d.Workspace)
 		if sibErr != nil {
-			reason := "tmux could not be observed; refusing to stop a shared container on an unknown session state"
+			// liveSiblings can fail on either a store read or a tmux
+			// observation; the reason preserves whichever it was rather
+			// than assuming tmux, so a corrupt state DB is not misreported
+			// as a tmux failure.
+			reason := fmt.Sprintf(
+				"sibling sessions could not be observed (%v); refusing to stop a shared container on an unknown session state",
+				sibErr)
 			if registered {
 				c.recordFailure(d.Workspace.ID, opName, reason)
 			}
