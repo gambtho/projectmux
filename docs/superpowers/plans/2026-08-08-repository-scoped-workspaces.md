@@ -3982,7 +3982,7 @@ func TestAutostartAllHealthyExitsZero(t *testing.T) {
 - [ ] **Step 14: Run the CLI test to verify it fails**
 
 Run: `go test ./internal/cli/ -run TestAutostart -v`
-Expected: FAIL to build with `env.Repositories undefined (type autostartEnvelope has no field or method Repositories)` and `undefined: fake.Store.Repositories` usage in `runAutostart`'s old body still calling `st.Workspaces()`.
+Expected: FAIL to build with `env.Repositories undefined (type autostartEnvelope has no field or method Repositories)`. `fake.Store.Repositories` is *not* part of this failure — Step 8 already defined it.
 
 - [ ] **Step 15: Rewrite `runAutostart` over repositories**
 
@@ -5541,6 +5541,7 @@ missed one fails rather than passing by inheritance from workspaceInfo."
 - Modify: `internal/rebuild/apply.go:16-21` (`Resolver`), `internal/rebuild/apply.go:38-43` (`Locker`), `internal/rebuild/apply.go:54-60` (`Report`), `internal/rebuild/apply.go:62-73` (`Applier`)
 - Modify: `internal/state/store.go` (add `DropRepository` after `RegisterWorkspace`, `:29-56`)
 - Modify: `internal/tmux/actuate.go` (add `RetagSession` after `KillSession`, `:161-177`)
+- Modify: `internal/tmux/actuate_test.go` (add `TestRetagSessionRewritesTheIdentityKeys`, and `"path/filepath"` to the imports)
 - Modify: `internal/controller/fake/fake.go:92-99` (add `DropRepository`)
 - Modify: `internal/cli/wiring.go:24-46` (`stateStore`, session seams)
 - Modify: `internal/cli/wiring_test.go:24-58` (`guardedStore`)
@@ -6177,29 +6178,46 @@ func (s *Store) DropRepository(id string) error {
 
 - [ ] **Step 8: Write the failing test for `RetagSession`**
 
-In `internal/tmux/actuate_test.go`, add:
+In `internal/tmux/actuate_test.go`, add. Note the seam: this package has no injectable runner — `Client`'s only fields are `Socket` and `Timeout` (`internal/tmux/tmux.go:62-65`) — so every test here swaps the package-global `tmuxBinary` for a shell script through `fakeTmux` (`internal/tmux/client_test.go:14-23`), the way `TestKillSessionSuccessAndIdempotency` does (`actuate_test.go:375-391`). Recording argv therefore means having the script append it to a file. Add `"path/filepath"` to the import block; `context`, `fmt`, `os`, `strings`, `testing` and the `controller` import are already there.
 
 ```go
+// TestRetagSessionRewritesTheIdentityKeys asserts both calls and, more
+// importantly, their order. The script logs one line per invocation, so
+// the log doubles as a call count: a chained single command or a reversed
+// pair both fail here.
 func TestRetagSessionRewritesTheIdentityKeys(t *testing.T) {
-	var calls [][]string
-	c := &Client{Runner: recordingRunner(&calls)}
+	logPath := filepath.Join(t.TempDir(), "argv.log")
+	fakeTmux(t, fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %s\nexit 0\n", logPath))
 
-	if err := c.RetagSession(context.Background(), "slabledger--1529",
+	if err := (&Client{}).RetagSession(context.Background(), "slabledger--1529",
 		"new-id", "/repo"); err != nil {
 		t.Fatalf("RetagSession: %v", err)
 	}
+
+	body, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading the argv log: %v", err)
+	}
+	calls := strings.Split(strings.TrimSpace(string(body)), "\n")
 	if len(calls) != 2 {
-		t.Fatalf("calls = %v, want two set-option invocations", calls)
+		t.Fatalf("calls = %q, want two set-option invocations", calls)
 	}
 	// The worktree is written first. If the second call fails the session
 	// keeps its old workspace ID, so the next rebuild still matches it by
 	// @dev_worktree and retries; the other order leaves a session no
 	// lookup can find.
-	if got := calls[0]; got[len(got)-2] != controller.KeyWorktree || got[len(got)-1] != "/repo" {
-		t.Errorf("first call = %v, want @dev_worktree = /repo", got)
+	//
+	// Socket is empty here, so no -L argument precedes the subcommand.
+	// Every argument is space-free, so the script's `echo "$@"` is a
+	// faithful rendering of argv.
+	want := []string{
+		"set-option -t slabledger--1529 " + controller.KeyWorktree + " /repo",
+		"set-option -t slabledger--1529 " + controller.KeyWorkspaceID + " new-id",
 	}
-	if got := calls[1]; got[len(got)-2] != controller.KeyWorkspaceID || got[len(got)-1] != "new-id" {
-		t.Errorf("second call = %v, want @dev_workspace_id = new-id", got)
+	for i, w := range want {
+		if calls[i] != w {
+			t.Errorf("call %d = %q, want %q", i, calls[i], w)
+		}
 	}
 }
 ```
@@ -6208,7 +6226,7 @@ func TestRetagSessionRewritesTheIdentityKeys(t *testing.T) {
 
 Run: `go test ./internal/tmux/ -run TestRetagSession -v`
 
-Expected: build FAILS with `c.RetagSession undefined (type *Client has no field or method RetagSession)`. If the package's runner seam is not named `Runner`, mirror whatever `TestKillSession*` in `actuate_test.go` uses for the same purpose.
+Expected: build FAILS with `(&Client{}).RetagSession undefined (type *Client has no field or method RetagSession)`.
 
 - [ ] **Step 10: Implement `RetagSession`**
 
@@ -7284,17 +7302,18 @@ git status --short
 git diff -- core/git/gitconfig.symlink bin/relink tools/projectmux/README.md
 ```
 
-Expected from `git status --short`, exactly these five entries:
+Expected from `git status --short`: exactly six paths, no more. Five modifications and the rename:
 
 ```
-R  bin/dev -> bin/pm
- M bin/pm
- M bin/relink
- M core/git/gitconfig.symlink
- M tests/git_identity.bats
- M tests/repository_hygiene.bats
- M tools/projectmux/README.md
+bin/relink
+core/git/gitconfig.symlink
+tests/git_identity.bats
+tests/repository_hygiene.bats
+tools/projectmux/README.md
+bin/dev -> bin/pm
 ```
+
+Do not pin the two-letter status codes. The rename's codes depend on whether Step 3's comment-block edit landed before or after `git add`: staged-then-edited shows `RM bin/dev -> bin/pm` as a *single* entry, staged-after-editing shows `R  bin/dev -> bin/pm`. Both are correct here. What matters is that the rename appears as one entry rather than a delete plus an add — if `git status` shows `D bin/dev` and `?? bin/pm` instead, the rename was not staged and git did not detect it, so `git add -A bin/pm` in Step 14 would commit the new file while leaving `bin/dev` in the tree.
 
 The `/usr/bin/diff` output must show only the comment-block change from Step 3 (lines 2-3 replaced), with `exec projectmux "$@"` identical on both sides. Nothing under `tools/projectmux/migrate-from-dev.sh` or `tests/projectmux_migrate.bats` may appear — those carry the unrelated `dev-event` / `dev-autostart.service` strings.
 
