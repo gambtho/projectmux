@@ -4,7 +4,7 @@
 
 **Goal:** Withdraw the claim that the JSON envelopes and exit codes are compatibility contracts, from every place the project asserts it, so that nothing is promised below 1.0.
 
-**Architecture:** Four surfaces assert or rely on the retracted claim — `README.md`, `docs/commands.md`, eleven Go doc comments, and `docs/design.md` (§8 and a new §12 amendment). Documentation lands first, then the comments that point at it, then the design amendment that records the decision, then a repository-wide grep that proves nothing was missed. No executable line changes anywhere in this plan.
+**Architecture:** Four surfaces assert or rely on the retracted claim — `README.md`, `docs/commands.md`, twelve Go doc comments, and `docs/design.md` (§8 and a new §12 amendment). Documentation lands first, then the comments that point at it, then the design amendment that records the decision, then a repository-wide grep that proves nothing was missed. No executable line changes anywhere in this plan.
 
 **Tech Stack:** Go 1.x (comment-only edits), Markdown. Verification is `go build ./...`, `go test ./...`, and `grep`.
 
@@ -104,8 +104,8 @@ This is spec finding 3.5, in scope as documentation only. Immediately after the 
 
 ```markdown
 A mistyped *bare* command resolves as a workspace name rather than a usage
-error — `projectmux opne` exits 4, not 2. Flag-shaped tokens and bad arguments
-to real commands still exit 2.
+error — `projectmux opne` exits 4 when no worktree matches that name, not 2.
+Flag-shaped tokens and bad arguments to real commands still exit 2.
 ```
 
 - [ ] **Step 4: Verify no surviving contract *claim* in the README**
@@ -199,10 +199,10 @@ it does the most damage."
 
 ---
 
-### Task 3: Correct the eleven Go doc comments
+### Task 3: Correct the twelve Go doc comments
 
 **Files:**
-- Modify: `internal/cli/config.go:19-21` and `:157-158`, `internal/cli/cli.go:22-23`, `internal/cli/validate.go:13` and `:228-229`, `internal/cli/list.go:168-169`, `internal/cli/doctor.go:133-135`, `internal/cli/rebuild.go:141-143`, `internal/cli/status.go:251-252`, `internal/config/config.go:23-25`, `cmd/projectmux/main.go:9-11`
+- Modify: `internal/cli/config.go:19-21` and `:157-158`, `internal/cli/cli.go:22-23`, `internal/cli/validate.go:13` and `:228-229`, `internal/cli/list.go:168-169`, `internal/cli/doctor.go:133-135`, `internal/cli/rebuild.go:141-143`, `internal/cli/status.go:251-252`, `internal/config/config.go:23-25`, `internal/rebuild/classify.go:45`, `cmd/projectmux/main.go:9-11`
 - Test: none created. `go build ./...` and `go test ./...` are the verification.
 
 **Interfaces:**
@@ -596,7 +596,7 @@ Expected: build succeeds, all 12 packages pass.
 
 Run: `git diff main --stat`
 
-Expected files: `README.md`, `docs/commands.md`, `docs/design.md`, `internal/cli/cli.go`, `internal/cli/config.go`, `internal/cli/doctor.go`, `internal/cli/list.go`, `internal/cli/rebuild.go`, `internal/cli/status.go`, `internal/cli/validate.go`, `internal/config/config.go`, and the spec and plan under `docs/superpowers/`. Anything else is scope creep — investigate before proceeding.
+Expected files: `README.md`, `docs/commands.md`, `docs/design.md`, `cmd/projectmux/main.go`, `internal/cli/cli.go`, `internal/cli/config.go`, `internal/cli/doctor.go`, `internal/cli/list.go`, `internal/cli/rebuild.go`, `internal/cli/status.go`, `internal/cli/validate.go`, `internal/config/config.go`, `internal/rebuild/classify.go`, and the spec and plan under `docs/superpowers/`. Anything else is scope creep — investigate before proceeding.
 
 Run: `git diff main -- '*.go' | grep -E '^[+-]' | grep -vE '^[+-]{3}' | grep -v '^[+-]\s*//'`
 

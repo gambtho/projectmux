@@ -203,7 +203,7 @@ is less stable, parse `--json` — is kept; only the contract language goes.
 reasoning, and the findings in §3, superseding the "two things are contracts"
 framing and closing the question the section left open.
 
-**5.4 No functional code changes — but ten doc comments assert or rely on the
+**5.4 No functional code changes — but twelve doc comments assert or rely on the
 retracted contract, and become false the moment the README changes.** This was
 missed when the change was first scoped as "two documentation files," and it is
 the reason the diff is larger than it looks:
@@ -219,8 +219,12 @@ the reason the diff is larger than it looks:
   `config.go:158`, `doctor.go:134`, `rebuild.go:142`, `list.go:169`,
   `validate.go:229`, `status.go:252`. These are the more damaging ones: they
   point automation at a guarantee that no longer exists.
-- One names a narrower contract. `internal/cli/validate.go:13` calls the
-  validation status strings "the JSON contract."
+- Two name a narrower contract. `internal/cli/validate.go:13` calls the
+  validation status strings "the JSON contract"; `internal/rebuild/classify.go:45`
+  says a conflict reason is not "any output contract."
+- One is the package doc. `cmd/projectmux/main.go:9-11` carries the alpha
+  notice, which says human-readable output "is deliberately not a
+  compatibility contract" — the same claim in the binary's own documentation.
 
 These are corrected as comment-only edits. No statement, expression, or test
 changes; `go build` and `go test` are expected to be unaffected, which §9
@@ -321,8 +325,8 @@ moves — so verification is correspondingly narrow:
   document *about* stating things accurately would be its own defect.
 - `grep -rn "contract"` over `README.md`, `docs/commands.md`, and the Go
   sources confirms no remaining assertion of a compatibility contract. The
-  §5.4 list is that search's current result — `README.md:91`, `:95`, `:104`,
-  `:110` and `docs/commands.md:33-34` on the documentation side — so re-running
+  §5.4 list is that search's current result — `README.md:89`, `:100`, `:105`
+  and `docs/commands.md:35` on the documentation side — so re-running
   the same search at the end is the completeness check. `docs/commands.md` was
   missed by the original scoping and surfaced by independent review; the grep
   is what makes a third such miss detectable instead of hoped-against.

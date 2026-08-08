@@ -24,8 +24,9 @@ the conventional `.worktrees/` and `.claude/worktrees/` directories.
 
 `projectmux <workspace>` with no command is shorthand for
 `projectmux open <workspace>`. A mistyped *bare* command therefore resolves as
-a workspace name and exits 4, not 2 — a documented trade for the shorthand.
-Flag-shaped tokens and bad arguments to real commands still exit 2.
+a workspace name and exits 4 when no worktree matches it, not 2 — a documented
+trade for the shorthand. Flag-shaped tokens and bad arguments to real commands
+still exit 2.
 
 **`--json` and `--compact`.** Every command that produces a report accepts
 `--json`, which emits a versioned envelope carrying `schema_version`, and
