@@ -30,9 +30,10 @@ workspace name and exits 4, not 2 — a documented trade for the shorthand.
 `--json`, which emits a versioned envelope carrying `schema_version`, and
 `--compact`, which puts that envelope on one line and implies `--json`.
 
-**What is a contract.** The JSON envelopes and the exit codes are
-compatibility contracts. Human-readable output is not — its layout may change
-in any release. Parse `--json`.
+**What is not frozen.** Nothing here is a compatibility contract below 1.0 —
+the JSON envelopes, the exit codes, and the command surface may all change.
+Human-readable output is the least stable of them: its layout may change in
+any release. Parse `--json`, and pin the version you tested against.
 
 **Environment.** Three variables move the resources every command touches:
 
