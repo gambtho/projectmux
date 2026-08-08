@@ -123,12 +123,7 @@ func TestStartRepositoryContainerAlreadyRunning(t *testing.T) {
 			ContainerUser: "vscode", Workdir: "/workspaces/slab",
 		},
 	}
-	// The caller reads repositories out of the store, so the binding
-	// arrives attached to the repository rather than fetched again.
-	d := repoDesired()
-	d.Repository.Container = repoBinding(t, r.store, "r1")
-
-	outcome, obs, err := r.start(t, d)
+	outcome, obs, err := r.start(t, repoDesired())
 	if err != nil {
 		t.Fatalf("StartRepositoryContainer: %v", err)
 	}
@@ -173,5 +168,72 @@ func TestStartRepositoryContainerUnobservableFails(t *testing.T) {
 	}
 	if b := repoBinding(t, r.store, "r1"); b != nil {
 		t.Errorf("binding = %+v, want none recorded on a failed observation", b)
+	}
+}
+
+// TestStartRepositoryContainerRereadsBindingUnderLock is the staleness
+// guard. The caller's RepoDesired carries no binding — the shape autostart
+// produces when it read every repository before the first lock was taken —
+// while the store has been bound since. Acting on the caller's copy would
+// discover and start a container that is already running; the re-read
+// under the lock probes the real binding instead. Discovery and probing
+// deliberately disagree so that only one of the two can produce this
+// outcome.
+func TestStartRepositoryContainerRereadsBindingUnderLock(t *testing.T) {
+	r := newRepoRig(t)
+	if err := r.store.RecordContainerObservation("r1", state.ContainerObservation{
+		Kind: "devcontainer", ContainerID: "cid-1", ContainerUser: "vscode",
+		Workdir: "/workspaces/slab", Health: state.HealthPresent,
+	}, ensureTime); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	r.ctrl.Containers = &fake.ContainerObserver{
+		AppliesResult: true,
+		// The path taken only when the stale nil binding is believed.
+		DiscoverResult: &controller.ContainerObservation{
+			Health: state.HealthMissing, Kind: "devcontainer",
+		},
+		ProbeResult: controller.ContainerObservation{
+			Health: state.HealthPresent, Kind: "devcontainer", ContainerID: "cid-1",
+			ContainerUser: "vscode", Workdir: "/workspaces/slab",
+		},
+	}
+
+	// Deliberately left nil, as autostart's hoisted read would leave it.
+	d := repoDesired()
+	if d.Repository.Container != nil {
+		t.Fatal("the fixture must carry no binding for this test to mean anything")
+	}
+
+	outcome, _, err := r.start(t, d)
+	if err != nil {
+		t.Fatalf("StartRepositoryContainer: %v", err)
+	}
+	if outcome != controller.ContainerAlreadyRunning {
+		t.Errorf("outcome = %v, want already-running from the re-read binding", outcome)
+	}
+	if len(r.actuatorC.Started) != 0 {
+		t.Errorf("Started = %v; a stale binding started a running container", r.actuatorC.Started)
+	}
+	if len(r.ctrl.Containers.(*fake.ContainerObserver).Discovered) != 0 {
+		t.Error("discovery ran, so the caller's stale nil binding was believed")
+	}
+}
+
+// TestStartRepositoryContainerVanishedRepositoryFails covers the row
+// deregistered between the caller's read and the lock. Nothing may be
+// started for a repository that is no longer registered, and the failure
+// has to reach the caller so autostart can report it.
+func TestStartRepositoryContainerVanishedRepositoryFails(t *testing.T) {
+	r := newRepoRig(t)
+	d := repoDesired()
+	d.Repository.ID = "r-deregistered"
+
+	_, _, err := r.start(t, d)
+	if !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("err = %v, want state.ErrNotFound", err)
+	}
+	if len(r.actuatorC.Started) != 0 {
+		t.Errorf("Started = %v, want none for an unregistered repository", r.actuatorC.Started)
 	}
 }

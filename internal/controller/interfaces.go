@@ -36,6 +36,7 @@ type Store interface {
 	CommitReconciliation(workspaceID string, r state.ReconciliationResult, now time.Time) error
 	Workspace(id string) (state.Record, error)
 	Workspaces() ([]state.Record, error)
+	Repository(id string) (state.Repository, error)
 	Repositories() ([]state.Repository, error)
 }
 

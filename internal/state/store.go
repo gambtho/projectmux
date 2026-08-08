@@ -207,10 +207,26 @@ SELECT
 FROM repositories r
 LEFT JOIN container_bindings b ON b.repository_id = r.id`
 
+// Repository returns the joined row for one repository, or ErrNotFound. It
+// mirrors Workspace: callers that hold the repository lock re-read through
+// it, because a binding read before the lock may already be stale.
+func (s *Store) Repository(id string) (Repository, error) { return queryRepository(s.db, id) }
+
 // Repositories returns every registered repository ordered by slug, then
 // repository root. Autostart iterates this rather than filtering sessions, so
 // a shared container is started once per repository by construction.
 func (s *Store) Repositories() ([]Repository, error) { return queryRepositories(s.db) }
+
+func queryRepository(db *sql.DB, id string) (Repository, error) {
+	repo, err := scanRepository(db.QueryRow(selectRepository+" WHERE r.id = ?", id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Repository{}, fmt.Errorf("repository %s: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return Repository{}, fmt.Errorf("reading repository %s: %w", id, err)
+	}
+	return repo, nil
+}
 
 func queryRepositories(db *sql.DB) ([]Repository, error) {
 	rows, err := db.Query(selectRepository + " ORDER BY r.slug, r.repo_root")

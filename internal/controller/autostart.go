@@ -55,6 +55,21 @@ func (c *Controller) StartRepositoryContainer(ctx context.Context, d RepoDesired
 	}
 	defer func() { _ = lk.Release() }()
 
+	// Re-read the repository under the lock. The caller's snapshot was
+	// taken before the lock existed — autostart reads every repository up
+	// front, so by the Nth one a sibling may already have started the
+	// container this row describes. Acting on the stale copy would narrow
+	// the lock's guarantee to the actuation alone; the binding the
+	// decision rests on has to be read inside it too. A row that vanished
+	// between the two reads is a repository deregistered mid-run, and the
+	// error propagates: autostart reports it and moves on rather than
+	// starting a container for something no longer registered.
+	repo, err := c.Store.Repository(d.Repository.ID)
+	if err != nil {
+		return "", nil, fmt.Errorf("re-reading the repository under its lock: %w", err)
+	}
+	d.Repository = repo
+
 	desired := Desired{Workspace: d.containerIdentity(), Config: d.Config, Digest: d.Digest}
 	snap := Snapshot{Desired: desired}
 	snap.Container = c.observeContainer(ctx, desired, d.Repository.Container)

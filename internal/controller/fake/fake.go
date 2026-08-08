@@ -333,6 +333,19 @@ func (s *Store) copyRecordLocked(rec *state.Record) state.Record {
 	return out
 }
 
+// Repository returns one repository with its binding attached, or
+// ErrNotFound. It mirrors the real store's single-row read, which the
+// container phase uses to refresh a binding under the repository lock.
+func (s *Store) Repository(id string) (state.Repository, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	repo, ok := s.repositories[id]
+	if !ok {
+		return state.Repository{}, fmt.Errorf("repository %s: %w", id, state.ErrNotFound)
+	}
+	return s.copyRepositoryLocked(repo), nil
+}
+
 // Repositories returns every registered repository ordered by slug, then
 // repository root, mirroring the real store's ORDER BY
 // (internal/state/store.go). Container is the repository's binding, copied
@@ -342,13 +355,7 @@ func (s *Store) Repositories() ([]state.Repository, error) {
 	defer s.mu.Unlock()
 	out := make([]state.Repository, 0, len(s.repositories))
 	for _, repo := range s.repositories {
-		copied := *repo
-		copied.Container = nil
-		if b, ok := s.containers[repo.ID]; ok {
-			c := *b
-			copied.Container = &c
-		}
-		out = append(out, copied)
+		out = append(out, s.copyRepositoryLocked(repo))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Slug != out[j].Slug {
@@ -357,6 +364,19 @@ func (s *Store) Repositories() ([]state.Repository, error) {
 		return out[i].RepoRoot < out[j].RepoRoot
 	})
 	return out, nil
+}
+
+// copyRepositoryLocked copies a repository and attaches its binding, which
+// is the LEFT JOIN the real store performs. The copy is what keeps a
+// caller from mutating stored state through the result.
+func (s *Store) copyRepositoryLocked(repo *state.Repository) state.Repository {
+	out := *repo
+	out.Container = nil
+	if b, ok := s.containers[repo.ID]; ok {
+		c := *b
+		out.Container = &c
+	}
+	return out
 }
 
 // SessionActuator records the session specs it was asked to create and
