@@ -107,11 +107,25 @@ func (c *Controller) Observe(ctx context.Context, d Desired) (Snapshot, error) {
 	// been opened from reporting a container its siblings are using as
 	// absent. Ensure never reaches that branch — it registers first — so this
 	// is the inspection path.
+	//
+	// The three-way switch is the same one the workspace lookup above uses,
+	// and for the same reason: only ErrNotFound means "no binding". Any
+	// other failure leaves it unknown whether one exists, and falling
+	// through to discovery on that would let a store outage rebind a
+	// repository that is already bound.
 	var binding *state.ContainerBinding
 	if snap.Stored != nil {
 		binding = snap.Stored.Container
-	} else if repo, err := c.Store.Repository(d.Workspace.RepositoryID); err == nil {
-		binding = repo.Container
+	} else {
+		repo, err := c.Store.Repository(d.Workspace.RepositoryID)
+		switch {
+		case errors.Is(err, state.ErrNotFound):
+			// No repository row: no binding, which is the zero value.
+		case err != nil:
+			return Snapshot{}, fmt.Errorf("reading the repository's container binding: %w", err)
+		default:
+			binding = repo.Container
+		}
 	}
 	snap.Container = c.observeContainer(ctx, d, binding)
 	return snap, nil

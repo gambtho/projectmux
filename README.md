@@ -318,7 +318,7 @@ its parent repository rather than being a workspace of its own.
 | 6 | the plan refused: a conflict or uncertainty; do not blindly retry |
 
 A mistyped *bare* command resolves as a workspace name rather than a usage
-error — `projectmux opne` exits 4 when no worktree matches that name, not 2.
+error — `projectmux opne` exits 4 when no repository matches that name, not 2.
 Flag-shaped tokens and bad arguments to real commands still exit 2.
 
 ## Relationship to tmux and Dev Containers
