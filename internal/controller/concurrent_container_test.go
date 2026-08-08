@@ -205,8 +205,17 @@ func TestConcurrentOpensIssueOneContainerStart(t *testing.T) {
 				Actuator:     &fake.SessionActuator{},
 				ContainerAct: containers,
 			}
-			// Both goroutines block here and are released together, so the
-			// lock is contended rather than merely exercised in sequence.
+			// A start gate, not a barrier: close(release) runs as soon as
+			// the spawn loop finishes, so a goroutine arriving late finds
+			// the channel already closed and never blocks. It widens the
+			// window in which the two Ensure calls overlap; it does not
+			// release them together.
+			//
+			// Nothing below depends on true simultaneity. The single
+			// container start is the shared binding's doing, not the
+			// lock's: stubbing the repository lock out entirely leaves
+			// this test green. lock_ordering_test.go owns the lock
+			// guarantee, and fails when it is stubbed.
 			<-release
 			results[i], errs[i] = ctrl.Ensure(context.Background(), concurrentRepoDesired(ws),
 				[]controller.WindowIntent{{Name: "shell"}}, lockDir, 5*time.Second)
