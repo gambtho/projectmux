@@ -25,7 +25,7 @@ const (
 	ExitOK               = 0
 	ExitError            = 1 // unexpected or I/O failure
 	ExitUsage            = 2
-	ExitAmbiguous        = 3 // a workspace name matched more than one worktree
+	ExitAmbiguous        = 3 // a workspace name matched more than one repository
 	ExitUnknownWorkspace = 4
 	ExitInvalidConfig    = 5
 	ExitRefused          = 6 // the plan refused: conflict or uncertainty, do not blindly retry

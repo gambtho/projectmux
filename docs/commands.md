@@ -133,7 +133,7 @@ slabledger     ok
 broken:
   workspaces/broken.yaml:4: window "dev" sets location: container but devcontainer.enabled is false (also defaults.yaml:5)
   workspaces/broken.yaml:5: window "logs" must set exactly one of agent, command, or shell: true (it sets none)
-  workspaces/broken.yaml:6: window "logs" cwd must not escape the worktree, got "../escape"
+  workspaces/broken.yaml:6: window "logs" cwd must not escape the repository root, got "../escape"
 
 3 problems in 1 of 3 subjects
 ```

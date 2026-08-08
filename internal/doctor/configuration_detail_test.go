@@ -37,7 +37,7 @@ func TestConfigurationFailingWorkspaceCarriesPositionAndPointer(t *testing.T) {
 		}
 	}
 	// The full list belongs to the focused command, not to doctor.
-	if strings.Contains(item.Detail, "escape the worktree") {
+	if strings.Contains(item.Detail, "escape the repository root") {
 		t.Errorf("detail reproduced every problem instead of summarizing:\n%s", item.Detail)
 	}
 }

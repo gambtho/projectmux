@@ -107,9 +107,9 @@ func TestValidatePanes(t *testing.T) {
 		{"bad name", []Pane{{Name: "sp ace", Shell: true}},
 			`invalid name`},
 		{"absolute cwd", []Pane{{Name: "p1", Shell: true, Cwd: str("/etc")}},
-			`must be relative to the worktree`},
+			`must be relative to the repository root`},
 		{"escaping cwd", []Pane{{Name: "p1", Shell: true, Cwd: str("../out")}},
-			`must not escape the worktree`},
+			`must not escape the repository root`},
 		{"duplicate names", []Pane{{Name: "p1", Shell: true}, {Name: "p1", Shell: true}},
 			`pane "p1" of window "dev" is defined more than once`},
 		{"two focused", []Pane{

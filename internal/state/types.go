@@ -23,7 +23,10 @@ const (
 	OutcomeFailed Outcome = "failed"
 )
 
-// ErrNotFound reports a workspace that has never been registered.
+// ErrNotFound reports a workspace or repository that has never been
+// registered. The message names a workspace because that is the lookup a
+// user makes; requireRepository and queryRepository wrap it for the
+// repository rows a workspace hangs from.
 var ErrNotFound = errors.New("workspace not recorded")
 
 // MaxErrorSummaryBytes bounds stored error summaries.

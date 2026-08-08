@@ -51,7 +51,7 @@ func TestProblemCarriesTheFieldAndPositionThatSetIt(t *testing.T) {
 			"    cwd: ../outside\n",
 	})
 
-	p := find(t, problems, "escape the worktree")
+	p := find(t, problems, "escape the repository root")
 	if p.Field != "windows[dev].cwd" {
 		t.Errorf("Field = %q, want windows[dev].cwd", p.Field)
 	}
@@ -205,7 +205,7 @@ func TestInvalidConfigErrorRendersAWholeReport(t *testing.T) {
 func TestInvalidConfigErrorRendersPositions(t *testing.T) {
 	withOrigin := &InvalidConfigError{Problems: []Problem{{
 		Field:   "windows[dev].cwd",
-		Message: `window "dev" cwd must not escape the worktree`,
+		Message: `window "dev" cwd must not escape the repository root`,
 		Origins: []Origin{{File: "workspaces/dev.yaml", Line: 4}},
 	}}}
 	if got := withOrigin.Error(); !strings.Contains(got, "workspaces/dev.yaml:4:") {

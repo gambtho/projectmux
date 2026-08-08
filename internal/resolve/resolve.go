@@ -54,7 +54,7 @@ func (e *AmbiguousError) Error() string {
 	return b.String()
 }
 
-// UnknownWorkspaceError reports a name matching no worktree.
+// UnknownWorkspaceError reports a name matching no repository.
 type UnknownWorkspaceError struct {
 	Name  string
 	Roots []string
