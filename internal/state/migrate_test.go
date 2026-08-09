@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -407,5 +408,90 @@ func TestRegisterAfterMigrationRekeysTheMigratedSession(t *testing.T) {
 	if rec.Container == nil || rec.Container.ContainerID != "c-1" {
 		t.Errorf("container = %+v, want the repository's binding still "+
 			"projected onto the re-keyed session", rec.Container)
+	}
+}
+
+// columnsOf reads a table's column names through PRAGMA table_info, which is
+// how the schema is inspected here rather than by parsing sqlite_master.
+func columnsOf(t *testing.T, s *Store, table string) []string {
+	t.Helper()
+	// PRAGMA does not accept bound parameters; table is a literal in tests.
+	rows, err := s.db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		t.Fatalf("table_info(%s): %v", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var names []string
+	for rows.Next() {
+		var (
+			cid        int
+			name, typ  string
+			notNull    int
+			dflt       sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &primaryKey); err != nil {
+			t.Fatalf("scanning table_info(%s): %v", table, err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("table_info(%s): %v", table, err)
+	}
+	return names
+}
+
+func TestMigration0003AddsTheBindColumn(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	var version int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("user_version: %v", err)
+	}
+	if version != 3 {
+		t.Errorf("user_version = %d, want 3", version)
+	}
+
+	cols := columnsOf(t, s, "workspaces")
+	if !slices.Contains(cols, "bind") {
+		t.Errorf("workspaces columns = %v, want a bind column", cols)
+	}
+}
+
+// TestMigration0003UpgradesWithoutDataLoss runs the whole ladder — 1 to 3 — on
+// a seeded pre-0002 database, because seedSchema1 is the only upgrade fixture
+// this file has and a bind column added by an ALTER must not disturb the rows
+// 0002 moved.
+func TestMigration0003UpgradesWithoutDataLoss(t *testing.T) {
+	root := seedSchema1(t)
+	s, err := Open(root)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	cols := columnsOf(t, s, "workspaces")
+	if !slices.Contains(cols, "bind") {
+		t.Errorf("workspaces columns = %v, want a bind column", cols)
+	}
+
+	rec, err := s.Workspace("w1")
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.Bind != nil {
+		t.Errorf("bind = %v, want nil: an upgraded session has never been bound", rec.Bind)
+	}
+	if rec.ActualSession == nil || *rec.ActualSession != "slabledger" ||
+		rec.AppliedDigest == nil || *rec.AppliedDigest != "sha256:bbbb" {
+		t.Errorf("record = %+v, want the assignment and digests preserved across 0003", rec)
+	}
+	if rec.LastOperation == nil || rec.LastOperation.Name != "open" {
+		t.Errorf("last operation = %+v, want the row preserved across 0003", rec.LastOperation)
 	}
 }

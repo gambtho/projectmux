@@ -53,10 +53,16 @@ type Record struct {
 	ActualSession   *string
 	DesiredDigest   *string
 	AppliedDigest   *string
-	RegisteredAt    time.Time
-	UpdatedAt       time.Time
-	Container       *ContainerBinding
-	LastOperation   *Operation
+	// Bind is the session's base directory, stored relative to the
+	// repository root and slash-separated. It is nil when the session is
+	// unbound, in which case the repository root is the base. It is
+	// re-verified against the filesystem on every use rather than trusted
+	// (design §4); see internal/bindpath.
+	Bind          *string
+	RegisteredAt  time.Time
+	UpdatedAt     time.Time
+	Container     *ContainerBinding
+	LastOperation *Operation
 }
 
 // Repository is one project and the container every session on it shares.
