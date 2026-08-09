@@ -196,6 +196,59 @@ func TestListEnvelopeIsSchemaV2(t *testing.T) {
 	}
 }
 
+// The bind is an added field, not a schema break, so OutputSchemaVersion
+// stays 2. Both halves of that claim are pinned here: the version is
+// compared against the literal 2, and the complete pre-existing key set
+// of a list row is asserted present, so a rename, a removal, or a
+// retype fails here rather than reaching a consumer. An unbound row
+// carries no bind key at all, which is the local nullable convention
+// (list.go:41,43) and keeps the addition invisible to a v2 reader that
+// never asked about binds.
+func TestListRowsGainBindWithoutBreakingSchemaV2(t *testing.T) {
+	installFakeStore(t, boundListStore(t))
+	installLiveSessions(t, nil, nil)
+
+	code, stdout, stderr := run(t, "list", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	assertSchemaV2(t, stdout)
+
+	var env struct {
+		Workspaces []map[string]json.RawMessage `json:"workspaces"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &env); err != nil {
+		t.Fatalf("decoding the envelope: %v\n%s", err, stdout)
+	}
+	if len(env.Workspaces) != 2 {
+		t.Fatalf("%d rows, want 2:\n%s", len(env.Workspaces), stdout)
+	}
+	for _, key := range []string{
+		"id", "slug", "repo_root", "session", "session_state",
+		"recorded", "identity_conflict", "bind",
+	} {
+		if _, ok := env.Workspaces[0][key]; !ok {
+			t.Errorf("bound row has no %q key:\n%s", key, stdout)
+		}
+	}
+	var session, bind string
+	if err := json.Unmarshal(env.Workspaces[0]["session"], &session); err != nil {
+		t.Fatalf("session is not a string: %v", err)
+	}
+	if session != "feature-a" {
+		t.Errorf("session = %q, want feature-a", session)
+	}
+	if err := json.Unmarshal(env.Workspaces[0]["bind"], &bind); err != nil {
+		t.Fatalf("bind is not a string: %v", err)
+	}
+	if bind != "services/api" {
+		t.Errorf("bind = %q, want services/api", bind)
+	}
+	if _, ok := env.Workspaces[1]["bind"]; ok {
+		t.Errorf("unbound row carries a bind key:\n%s", stdout)
+	}
+}
+
 func TestRebuildEnvelopeIsSchemaV2(t *testing.T) {
 	ws := rebuildEnv(t, fake.NewStore(), nil)
 	live := ownLive(ws, ws.SessionName)

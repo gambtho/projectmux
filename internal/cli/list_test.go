@@ -243,6 +243,85 @@ func TestListRejectsArguments(t *testing.T) {
 	}
 }
 
+// boundListStore seeds a workspace carrying both a named session and a
+// bind beside a plain default-session one, so rendering can be checked
+// on each. It is separate from seededListStore because that fixture's
+// row count and order are asserted positionally by three tests.
+func boundListStore(t *testing.T) *fake.Store {
+	t.Helper()
+	s := fake.NewStore()
+	named := listWorkspace("w1", "alpha")
+	named.Session = "feature-a"
+	named.SessionName = "alpha--feature-a"
+	if err := s.RegisterWorkspace(named, "sha256:d", cliTestTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	bind := "services/api"
+	if err := s.SetBind("w1", &bind, cliTestTime); err != nil {
+		t.Fatalf("set bind: %v", err)
+	}
+	if err := s.RegisterWorkspace(listWorkspace("w2", "beta"), "sha256:d", cliTestTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	return s
+}
+
+// The workspace column renders the target a user would type: slug/session
+// for a named session, bare slug for the repository's default one. A
+// default session must never render with a trailing slash, which is what
+// the "beta/" check rules out.
+func TestListHumanRendersTheBindAndTheSessionTarget(t *testing.T) {
+	installFakeStore(t, boundListStore(t))
+	installLiveSessions(t, nil, nil)
+
+	code, stdout, stderr := run(t, "list")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "BIND") {
+		t.Errorf("table has no BIND column:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "alpha/feature-a") {
+		t.Errorf("named session does not render as slug/session:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "services/api") {
+		t.Errorf("bind is not rendered:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "beta/") {
+		t.Errorf("the default session renders with a slash:\n%s", stdout)
+	}
+	// The five pre-existing columns survive the insertion.
+	for _, column := range []string{"WORKSPACE", "SESSION", "TMUX", "CONTAINER", "NOTES"} {
+		if !strings.Contains(stdout, column) {
+			t.Errorf("table lost the %s column:\n%s", column, stdout)
+		}
+	}
+}
+
+func TestListUnrecordedRowCarriesItsSessionComponent(t *testing.T) {
+	installFakeStore(t, fake.NewStore())
+	installLiveSessions(t, []controller.LiveSession{{
+		Name:        "gamma--feature-b",
+		WorkspaceID: "w9",
+		Slug:        "gamma",
+		Worktree:    "/w/gamma",
+		Session:     "feature-b",
+	}}, nil)
+
+	code, stdout, stderr := run(t, "list", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	env := decodeList(t, stdout)
+	if len(env.Workspaces) != 1 {
+		t.Fatalf("%d rows, want 1: %+v", len(env.Workspaces), env.Workspaces)
+	}
+	if env.Workspaces[0].Session != "feature-b" {
+		t.Errorf("unrecorded row session = %q, want feature-b",
+			env.Workspaces[0].Session)
+	}
+}
+
 func TestListCompactImpliesJSON(t *testing.T) {
 	installFakeStore(t, fake.NewStore())
 	installLiveSessions(t, nil, nil)

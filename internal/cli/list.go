@@ -44,6 +44,11 @@ type listRow struct {
 	Container        *storedContainerInfo `json:"container,omitempty"`
 	Recorded         bool                 `json:"recorded"`
 	IdentityConflict bool                 `json:"identity_conflict"`
+	// Bind is the session's base directory, repository-relative, absent
+	// when the session opens at the repository root. list reports it
+	// verbatim and never resolves it: a broken bind is status's business
+	// (spec §5), and list resolves nothing.
+	Bind *string `json:"bind,omitempty"`
 }
 
 func runList(ctx context.Context, args []string, stdout io.Writer) error {
@@ -119,6 +124,7 @@ func buildList(ctx context.Context) (listEnvelope, error) {
 			ProposedSession: rec.ProposedSession,
 			ActualSession:   rec.ActualSession,
 			Container:       storedContainer(rec.Container),
+			Bind:            rec.Bind,
 			Recorded:        true,
 		}
 		switch claimants := byID[rec.ID]; {
