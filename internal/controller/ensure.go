@@ -126,7 +126,7 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowInte
 		return EnsureResult{}, err
 	}
 
-	base := resolveBindBase(d.Workspace.RepoRoot, snap.Stored)
+	base, bindWarning := resolveBindBase(d.Workspace.RepoRoot, snap.Stored)
 	windows, err := renderWindows(intents, d, base, containerObs, c.ContainerAct)
 	if err != nil {
 		c.recordFailure(d.Workspace.ID, opName, err.Error())
@@ -148,6 +148,7 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowInte
 			Drifted:               drifted,
 			Container:             containerObs,
 			ContainerWindowsStale: stale,
+			BindWarning:           bindWarning,
 		}, nil
 
 	case SessionActionAdopt:
@@ -172,6 +173,7 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowInte
 			Drifted:               drifted,
 			Container:             containerObs,
 			ContainerWindowsStale: stale,
+			BindWarning:           bindWarning,
 		}, nil
 
 	case SessionActionCreate:
@@ -180,6 +182,7 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowInte
 			return EnsureResult{}, err
 		}
 		res.Container = containerObs
+		res.BindWarning = bindWarning
 		return res, nil
 	}
 	return EnsureResult{}, fmt.Errorf("unexpected session action %q", plan.Session)
@@ -339,19 +342,24 @@ func (b bindBase) containerDir(relDir string) string {
 }
 
 // resolveBindBase turns the stored bind into the session's base
-// directory. Containment is re-verified here rather than trusted from
-// bind time: a stored in-repository path can later be replaced by a
-// symlink pointing outside the repository (spec §4).
-func resolveBindBase(repoRoot string, stored *state.Record) bindBase {
+// directory, and returns a non-empty warning when the bind was unusable
+// and the repository root was substituted. Containment is re-verified
+// here rather than trusted from bind time: a stored in-repository path
+// can later be replaced by a symlink pointing outside the repository
+// (spec §4). An unusable bind is reported, never followed and never
+// fatal.
+func resolveBindBase(repoRoot string, stored *state.Record) (bindBase, string) {
 	root := bindBase{Host: repoRoot}
 	if stored == nil || stored.Bind == nil || *stored.Bind == "" {
-		return root
+		return root, ""
 	}
 	abs, err := bindpath.Resolve(repoRoot, *stored.Bind)
 	if err != nil {
-		return root
+		return root, fmt.Sprintf(
+			"the bind %q is unusable, so this session opened at the repository root instead: %v",
+			*stored.Bind, err)
 	}
-	return bindBase{Host: abs, Rel: *stored.Bind}
+	return bindBase{Host: abs, Rel: *stored.Bind}, ""
 }
 
 // wantsContainerWindows reports whether any intent resolves to the

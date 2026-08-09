@@ -916,3 +916,60 @@ func TestEnsurePersistsTheBindAndPlansWindowsFromIt(t *testing.T) {
 		t.Errorf("SessionSpec.Worktree = %q, want the repository root %q", spec.Worktree, root)
 	}
 }
+
+func TestEnsureFallsBackWhenTheBindIsUnusable(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, root string) string
+	}{
+		{
+			name: "the directory is gone",
+			setup: func(t *testing.T, root string) string {
+				return "services/gone"
+			},
+		},
+		{
+			name: "the bind now resolves outside the repository",
+			setup: func(t *testing.T, root string) string {
+				outside := t.TempDir()
+				if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+				return "escape"
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := boundRepo(t)
+			bind := tc.setup(t, root)
+			live := controller.LiveSession{
+				Name: "slab", WorkspaceID: "w1", Slug: "slab", Worktree: root,
+			}
+			r := newEnsureRig(t, absentStep(), absentStep(), liveStep(live))
+
+			res, err := r.ensure(t, boundDesired(root, &bind))
+			if err != nil {
+				t.Fatalf("Ensure: %v; an unusable bind must not be fatal", err)
+			}
+			if res.BindWarning == "" {
+				t.Error("BindWarning is empty; the fallback was silent")
+			}
+			if !strings.Contains(res.BindWarning, bind) {
+				t.Errorf("BindWarning = %q, want it to name the bind %q", res.BindWarning, bind)
+			}
+			spec := r.actuator.Created[0]
+			if spec.Windows[0].Dir != root {
+				t.Errorf("window dir = %q, want the repository root %q", spec.Windows[0].Dir, root)
+			}
+			// The bind is not discarded: fixing the directory and
+			// reopening must work without re-binding.
+			rec, err := r.store.Workspace("w1")
+			if err != nil {
+				t.Fatalf("Workspace: %v", err)
+			}
+			if rec.Bind == nil || *rec.Bind != bind {
+				t.Errorf("stored Bind = %v, want it kept as %q", rec.Bind, bind)
+			}
+		})
+	}
+}
