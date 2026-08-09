@@ -513,8 +513,8 @@ normal:
 
 | How it was built | Reports |
 | --- | --- |
-| Release binary from a tagged build | the tag, e.g. `v0.4.0` |
-| `go install github.com/gambtho/projectmux/cmd/projectmux@v0.4.0` | `v0.4.0` |
+| Release binary from a tagged build | the tag, e.g. `v0.5.0` |
+| `go install github.com/gambtho/projectmux/cmd/projectmux@v0.5.0` | `v0.5.0` |
 | `go build` from a checkout | a pseudo-version, e.g. `v0.0.0-20260806051648-1ccf6afb9c41` |
 
 The pseudo-version encodes the commit timestamp and hash, so it identifies the
