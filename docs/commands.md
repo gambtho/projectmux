@@ -9,31 +9,57 @@ illustrative path so the examples stay readable.
 - Observation — [`config`](#projectmux-config), [`list`](#projectmux-list),
   [`status`](#projectmux-status), [`doctor`](#projectmux-doctor)
 - Lifecycle — [`open`](#projectmux-open), [`attach`](#projectmux-attach),
-  [`stop`](#projectmux-stop)
+  [`stop`](#projectmux-stop), [`bind`](#projectmux-bind)
 - Operations — [`autostart`](#projectmux-autostart),
   [systemd](#running-autostart-from-systemd), [`rebuild`](#projectmux-rebuild)
 - [`version`](#projectmux-version)
 
 ## Conventions
 
-**Naming a workspace.** Commands that accept `<workspace>` resolve it two
-ways. With no argument, the workspace is the one containing the current
-directory. With an argument, it is looked up by name under the
-`repository_roots` configured in `defaults.yaml`.
+**Naming a target.** Commands that accept `<target>` take either `<repo>` or
+`<repo>/<session>`. `<repo>` names the repository; `<session>` names one of
+the sessions on it. `/` is the separator because it cannot appear in a git
+repository directory name, so no bare repository name became ambiguous when
+the second form was added.
+
+Every repository has a default session, which is what a bare `<repo>` names.
+Further sessions come into existence by being named —
+`projectmux bind slabledger/feature-a .worktrees/feature-a`, or
+`projectmux open slabledger/feature-a` — and they sit on the same repository,
+share its container, and read the same `workspaces/<slug>.yaml`. The tmux
+session is `<slug>` for the default session and `<slug>--<session>` for a
+named one.
+
+The session component must match `^[A-Za-z0-9][A-Za-z0-9_-]*$` and be at most
+64 characters. That is deliberately stricter than tmux's own rules: it is what
+makes a mistyped path fail as a malformed target instead of being looked up as
+a repository name. `repo/` (no session), `/session` (no repository), `a/b/c`
+(more than one separator), a session component starting with `-` or `_`, and
+anything longer than 64 characters are all usage errors, and each message
+names the grammar.
+
+**Resolving a target.** With no argument, the repository is the one containing
+the current directory, and the session is the one whose bound directory
+contains that directory — the longest match wins, and the default session is
+used when none matches. With an argument, the repository is looked up by name
+under the `repository_roots` configured in `defaults.yaml`, and a bare
+`<repo>` always means the default session: an explicit target is exact, and
+the current directory gets no vote. That is also how you address the default
+session while standing inside another session's bound directory.
 
 Either way the answer is a *repository*, never one of its trees: a linked
 worktree — including the conventional `.worktrees/` and `.claude/worktrees/`
 directories, and any tree `git worktree add` placed elsewhere on the disk —
 is a separate working tree attached to the same repository, so working in one
 resolves to the repository it belongs to, and it cannot be named on its own.
-Every tree of a project therefore shares one workspace, one session, and one
-container.
+Every tree of a project therefore shares one workspace and one container. A
+session can still be pointed *at* a tree — see [`bind`](#projectmux-bind).
 
-`projectmux <workspace>` with no command is shorthand for
-`projectmux open <workspace>`. A mistyped *bare* command therefore resolves as
-a workspace name and exits 4 when no worktree matches it, not 2 — a documented
-trade for the shorthand. Flag-shaped tokens and bad arguments to real commands
-still exit 2.
+`projectmux <target>` with no command is shorthand for
+`projectmux open <target>`. A mistyped *bare* command that the grammar accepts
+therefore resolves as a repository name and exits 4 when no repository matches
+it, not 2 — a documented trade for the shorthand. Anything the grammar
+rejects, flag-shaped tokens, and bad arguments to real commands still exit 2.
 
 **`--json` and `--compact`.** Every command that produces a report accepts
 `--json`, which emits a versioned envelope carrying `schema_version`, and
@@ -68,8 +94,8 @@ identity keys.
 | 0 | success |
 | 1 | unexpected or I/O failure |
 | 2 | usage error |
-| 3 | the workspace name matched more than one repository |
-| 4 | the workspace name matched no repository |
+| 3 | the target matched more than one repository, or the current directory matched more than one session's bind |
+| 4 | the target matched no repository |
 | 5 | invalid configuration |
 | 6 | the plan refused: a conflict or uncertainty; do not blindly retry |
 
@@ -88,7 +114,7 @@ Those write the report to stdout and a one-line summary to stderr.
 ## projectmux config
 
 ```text
-projectmux config [--validate] [--json] [--compact] [<workspace>]
+projectmux config [--validate] [--json] [--compact] [<target>]
 ```
 
 Prints the normalized, merged configuration for a workspace, or with
@@ -177,9 +203,16 @@ Lists recorded workspaces and live identity-carrying tmux sessions.
 
 ```text
 $ projectmux list
-WORKSPACE   SESSION     TMUX  CONTAINER  NOTES
-slabledger  slabledger  live  -          -
+WORKSPACE             SESSION                BIND                  TMUX  CONTAINER  NOTES
+slabledger            slabledger             -                     live  -          -
+slabledger/feature-a  slabledger--feature-a  .worktrees/feature-a  live  -          -
 ```
+
+`WORKSPACE` is the target you would type: a bare slug for a repository's
+default session, `slug/session` for a named one. `SESSION` is the tmux session
+name, which is `<slug>--<session>` for a named session. `BIND` is the
+session's base directory relative to the repository root, or `-` when the
+session opens at the root.
 
 On a fresh installation it says so plainly rather than printing an empty
 table:
@@ -193,10 +226,14 @@ no workspaces recorded and no identity-carrying tmux sessions found
 could not be observed — it is not a synonym for absent, and the distinction is
 deliberate throughout ProjectMux.
 
+`--json` gains a `bind` field per row alongside the existing `session` field.
+`schema_version` stays **2**: every change here is an added field or an added
+column, and nothing was renamed, retyped, or removed.
+
 ## projectmux status
 
 ```text
-projectmux status [--json] [--compact] [<workspace>]
+projectmux status [--json] [--compact] [<target>]
 ```
 
 Observes one workspace and explains drift and dependency failures. It changes
@@ -206,19 +243,29 @@ nothing.
 $ projectmux status
 workspace         slabledger
 repository        /home/you/src/slabledger
-id                d7142c2621eba1b47024261c980871d9e70d982e0e9fab5e0924100dcc300493
-recorded session  slabledger
-registered        2026-08-06T05:53:54.037942782Z
-updated           2026-08-06T05:53:54.181608075Z
-tmux session      live (slabledger, identity match)
+id                4dfb26cbfdb16850de53ba7c2b62aa7bbea8487fd737e341f9332f15d6f656c5
+recorded session  slabledger--feature-a
+registered        2026-08-09T23:23:28.431883846Z
+updated           2026-08-09T23:23:33.284956395Z
+bind              .worktrees/feature-a
+tmux session      live (slabledger--feature-a, identity match)
 container         none
-config            in sync (desired sha256:40dd44f7…, applied sha256:40dd44f7…)
-last operation    open ok at 2026-08-06T05:53:54.181608075Z
+config            in sync (desired sha256:d5721bde…, applied sha256:d5721bde…)
+last operation    open ok at 2026-08-09T23:23:33.332003477Z
 plan              session=none container=none reapply=false record-name=false
 ```
 
+`workspace` is always the bare repository slug — never the `slug/session`
+target — because a workspace is the repository, not the session; `recorded
+session` is where the session name shows up, `slabledger--feature-a` here.
+
 `plan` is what `open` *would* do right now. `session=none` means the session
 already matches the desired state.
+
+`bind` is the session's base directory relative to the repository root, and is
+absent for a session that opens at the root. It is reported as recorded — a
+bind that no longer resolves inside the repository still shows here, and it is
+[`open`](#projectmux-open) that reports it as unusable and falls back.
 
 Before a workspace has ever been opened, the same command reports what is not
 yet true, and why it would refuse:
@@ -287,7 +334,7 @@ Findings are report content, exactly as drift is for `list` and `status`.
 ## projectmux open
 
 ```text
-projectmux open [--no-attach] [--json] [--compact] [<workspace>]
+projectmux open [--no-attach] [--cwd <path>] [--json] [--compact] [<target>]
 ```
 
 Observes, ensures, records, and attaches the workspace session. This is the
@@ -309,6 +356,39 @@ session slabledger (already-running)
 `--no-attach` does everything except hand over the terminal, which is what
 scripts and the systemd unit want. Without it, `open` attaches on success.
 
+`--cwd <path>` sets the session's bound directory as part of the same
+operation. It is not [`bind`](#projectmux-bind) followed by `open`: the bind
+is persisted inside the one critical section this command already holds, before
+the observation the windows are planned from, so the windows this call creates
+are the first ones built from the new bind and no second command can slip into
+the gap. The path is relative to the repository root and must exist inside it.
+
+```text
+$ projectmux open --no-attach --cwd .worktrees/feature-a slabledger/feature-a
+session slabledger--feature-a (created)
+bind .worktrees/feature-a
+```
+
+The bind survives an open that fails afterwards. It is a declaration about the
+session rather than a side effect of a successful open, so fixing whatever
+failed and running `open` again keeps it.
+
+If the bound directory is unusable when the session is opened — deleted,
+pruned along with its worktree, or no longer resolving to a path inside the
+repository — `open` falls back to the repository root and says so rather than
+failing:
+
+```text
+$ projectmux open --no-attach slabledger/feature-a
+session slabledger--feature-a (already-running)
+the bind ".worktrees/feature-a" is unusable, so this session opened at the repository root instead: no such directory: /home/you/src/slabledger/.worktrees/feature-a
+bind .worktrees/feature-a
+```
+
+The `bind` line still names the recorded bind — it is reported as-is, not
+cleared, so the same unusable path is retried on every open until you
+`bind --clear` it or `bind` it somewhere that resolves.
+
 Open takes a per-workspace lock, so two concurrent opens cannot both create a
 session. If the world cannot be observed clearly it refuses with exit 6 rather
 than guessing:
@@ -321,7 +401,7 @@ projectmux: tmux could not be observed; refusing to act on an unknown session st
 ## projectmux attach
 
 ```text
-projectmux attach [--json] [--compact] [<workspace>]
+projectmux attach [--json] [--compact] [<target>]
 ```
 
 Attaches to the live workspace session and **never creates one**. If no
@@ -342,7 +422,7 @@ honest report of an impossible operation. Detach first, or use
 ## projectmux stop
 
 ```text
-projectmux stop [--container] [--force] [--json] [--compact] [<workspace>]
+projectmux stop [--container] [--force] [--json] [--compact] [<target>]
 ```
 
 Ends the workspace session, and with `--container` its container too.
@@ -358,7 +438,8 @@ renamed or replaced between observation and action is not killed by mistake.
 
 A container belongs to a repository and is shared by every session on it, so
 `stop --container` refuses with exit 6 when another session on the same
-repository is live, and names them:
+repository is live, and names them. A repository gets siblings by having named
+sessions — see [target conventions](#conventions):
 
 ```text
 $ projectmux stop --container
@@ -372,6 +453,67 @@ into the gap between them.
 A partial failure — the session ended but the container did not — reports what
 succeeded and what did not on stdout, with a one-line summary on stderr and a
 non-zero exit.
+
+## projectmux bind
+
+```text
+projectmux bind [--clear] [--json] [--compact] <target> [<path>]
+```
+
+Points a session at a directory inside its repository, creating the session if
+it does not exist yet.
+
+```text
+$ projectmux bind slabledger/feature-a .worktrees/feature-a
+bound slabledger--feature-a to .worktrees/feature-a
+created session slabledger--feature-a; run `projectmux open` on it to start it
+```
+
+The bind is the session's **base directory**, not a one-off starting
+directory. Every window's and pane's `cwd` composes on top of it: a session
+bound to `services/api` with a window `cwd: cmd` opens `services/api/cmd`.
+The same composition happens under the container mount, giving
+`/workspaces/slabledger/services/api/cmd`, so a bind works the same for
+`location: container` windows as for host ones.
+
+`<path>` defaults to the current directory when omitted, is interpreted
+relative to the repository root, and is stored relative so that moving the
+repository does not invalidate it. It must exist when you bind it, and it must
+lie inside the repository once symlinks are resolved. Anything else is a usage
+error:
+
+```text
+$ projectmux bind slabledger/feature-a ../elsewhere
+projectmux: bind: the bind "../elsewhere" resolves to /home/you/src/elsewhere, which is outside the repository at /home/you/src/slabledger
+```
+
+Containment is re-checked at every *use*, not only when the bind is set: a
+path that was inside the repository can later be replaced by a symlink
+pointing out of it, and following that would put windows outside the
+repository. A bind that no longer resolves inside the repository is treated as
+missing rather than followed, which is the `unusable` fallback
+[`open`](#projectmux-open) reports.
+
+`--clear` removes the bind and keeps the session:
+
+```text
+$ projectmux bind --clear slabledger/feature-a
+cleared the bind on slabledger--feature-a
+```
+
+Binding is the natural way to declare a session before opening it. A session
+that is bound but has never been opened is recorded with no applied
+configuration, so the first `open` on it converges like any other drift.
+
+Standalone `bind` takes the session's lock and not the repository's — it has
+no container work to do — so binding one session never queues behind a
+sibling's container starting. Use [`open --cwd`](#projectmux-open) when you
+want the bind and the windows built from it in one operation.
+
+Configuration is keyed on the repository, not the session: every session on a
+repository reads the same `workspaces/<slug>.yaml`. Two sessions bound to
+different directories therefore run the same windows, each rooted at its own
+base.
 
 ## projectmux autostart
 
