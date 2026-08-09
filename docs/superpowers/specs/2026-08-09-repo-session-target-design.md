@@ -57,13 +57,24 @@ Sessions carry three tmux user options today: `@dev_workspace_id`, `@dev_slug`,
 `@dev_worktree`. None of them records the session component. That is a
 correctness bug the moment named sessions exist, and neither issue names it.
 
-`rebuild`'s `worktreeResolver.Resolve` (`internal/rebuild/apply.go:325-365`) and
-`status`'s `staleSessions` (`internal/cli/status.go:219-232`) both re-derive a
-live session's identity by calling `resolve.Resolve("", nil, <worktree>)`. With
-no session component recorded, a live `myrepo--feature-a` re-resolves to the
-*default* workspace ID. `rebuild` would report a false `identityConflict`;
-`status` would report a healthy sibling session as a stale pre-v0.5.0 session
-needing rebuild.
+`rebuild`'s `worktreeResolver.Resolve` (`internal/rebuild/apply.go:120-136`,
+`325-365`) re-derives a live session's identity by calling
+`resolve.Resolve("", nil, <worktree>)` *unconditionally*, before comparing
+identity. With no session component recorded, a live `myrepo--feature-a`
+re-resolves to the *default* workspace ID and `rebuild` reports a false
+`identityConflict`.
+
+`status`'s `staleSessions` (`internal/cli/status.go:219-232`) does **not** have
+this problem, for two independent reasons. It calls `resolve.Resolve` only after
+`SessionBelongsTo` has already rejected the session (`status.go:222`), so once
+the fourth key matches, a healthy named session leaves through the first guard
+and is never re-resolved. Independently, `snap.Session.ByName` holds only
+sessions occupying a *candidate name* for the queried workspace
+(`controller/types.go:41-55`), and `myrepo--feature-a` is never a candidate name
+for the default `myrepo` — a sibling never enters the loop at all. This is
+recorded because an earlier draft of this design asserted the opposite; no
+status change is required and no test should be written against a bug that
+cannot occur.
 
 Add `@dev_session` as a fourth key, written at session creation, carried on
 `LiveSession`, and compared in `SessionBelongsTo`
@@ -78,7 +89,8 @@ so it needs a test rather than being assumed correct.
 
 `staleRepositoryRoots` (`status.go:249-266`) also calls `resolve.Resolve` with an
 empty name, but compares only `RepoRoot` and never an ID, so it is unaffected.
-It is named here so it is not "fixed" alongside the two that do need changing.
+It is named here so it is not "fixed" alongside `rebuild`, which does need
+changing.
 
 ## 3. The target seam
 
@@ -97,17 +109,51 @@ Instead:
   `status` use it to reconstruct a live session's identity from `@dev_session`
   without a second git call.
 - A new `internal/target` package sits between the CLI and `resolve`. It parses
-  the argument, resolves the repository, and then chooses the session:
-  1. the session parsed from the argument, if the argument carried one; else
-  2. a bind lookup — open the state store read-only, find sessions on this
-     repository whose bind is a prefix of the cwd, and take the longest match;
-     else
-  3. the default session, `""`.
+  the argument, resolves the repository, and then chooses the session.
 
-The bind lookup uses `state.OpenReadOnly`. A missing or incomplete database is
-not an error: it falls back to the default session, so resolution never depends
-on the store existing. Two sessions bound to the same directory produce
-`resolve.AmbiguousError` (exit 3), listing both.
+Selection keys on **target presence**, not on whether a target happened to carry
+a session. `resolve.Resolve` already distinguishes the two — an empty name means
+"resolve the cwd", a non-empty name means "look this up by name"
+(`resolve.go:79-88`), and `docs/commands.md:19-28` documents that distinction as
+user-facing behavior. Collapsing them would make `open myrepo`, run from inside
+a bound directory, silently open a *named* session the user did not ask for.
+
+So there are exactly three cases:
+
+1. **`<repo>/<session>`** — use that session. Explicit and final.
+2. **`<repo>`** — use the default session, `""`. An explicit target names the
+   workspace exactly; the cwd does not get a vote. This is also how a user
+   addresses the default session while standing inside a bound directory, which
+   would otherwise be unreachable.
+3. **No target** — resolve the repository from the cwd, then run the bind
+   lookup: open the state store read-only, find sessions on this repository
+   whose bind contains the cwd, and take the longest match. Fall back to the
+   default session when nothing matches.
+
+The bind lookup matches on **path components, not string prefixes**. A raw
+string comparison would match a bind of `services/api` against a cwd of
+`services/apixyz`. Compare component-wise after canonicalizing both sides, the
+way `resolve.canonicalize` (`resolve.go:167-182`) already establishes stable
+paths.
+
+Two sessions bound to the same directory produce `resolve.AmbiguousError`
+(exit 3), listing both.
+
+The bind lookup uses `state.OpenReadOnly`, whose failures are typed and are
+deliberately *not* interchangeable (`readonly.go:14-73`). Collapsing them all to
+"fall back to the default session" would let a corrupt database silently open
+the wrong workspace. The rule is:
+
+- **Fall back to the default session**, silently: the database does not exist,
+  and the schema is older than this build (`PendingMigrationError` — a
+  diagnosis, and resolution is not the command that should act on it).
+- **Propagate the error**: integrity-check failure, a permission failure, and an
+  indeterminate WAL state. These are uncertainty about *which* session is
+  correct, and guessing is the one thing resolution must not do.
+
+The plan binds these two lists to the concrete types and sentinels in
+`readonly.go`; naming them here rather than in the spec keeps the rule from
+drifting as that file evolves.
 
 ## 4. `bind`
 
@@ -119,10 +165,41 @@ repository after `EvalSymlinks`, and must exist at bind time — otherwise exit 
 Storing it relative rather than absolute keeps it stable if the repository
 moves.
 
-`bind` creates the workspace record when the session is not yet known, so
-binding is the natural way to declare a new session. `bind --clear <target>`
-removes the bind and leaves the record. `open --cwd <path>` binds and opens in
-one step.
+Containment is re-checked at **every use**, not only at bind time. A stored
+in-repository path can later be replaced by a symlink pointing outside the
+repository, after which host window creation would follow the escaped path
+through `filepath.Join` (`ensure.go:278-286`). Every read of a bind
+canonicalizes it and re-verifies containment; a bind that no longer resolves
+inside the repository is treated as missing (see the fallback below) rather than
+followed.
+
+### Who writes the bind, and under which lock
+
+`Ensure` is `lock → RegisterWorkspace → observe → plan → mutate → commit` under
+one `defer release()` (`ensure.go:78-89`), with `lockPhases` taking the
+repository lock then the workspace lock (`locking.go:10-31`). The bind fits that
+structure rather than working around it:
+
+- **`open --cwd <path>` does not bind and then open.** The bind is a field on
+  `Desired`, and `Ensure` persists it in the same critical section that
+  registers the workspace — before the observation the windows are planned from.
+  One continuous, globally ordered operation: no window is ever built from a
+  bind that changed underneath it, and there is no two-command race.
+- **Standalone `bind` takes the workspace lock only.** It has no container
+  phase, and `lockPhases` documents an empty `repositoryID` as exactly that, so
+  a bind must not queue behind a sibling's `devcontainer up`.
+- **A new record initializes with the bind and no applied digest.** A
+  bound-but-never-opened session is already representable: `BuildPlan` treats
+  `snap.Stored.AppliedDigest == nil` as "reapply" (`plan.go:71-73`), so the
+  first `open` on a bound session converges normally with no special case.
+- **A bind persists when the open that carried it fails.** It is a declaration
+  about the session, not a side effect of a successful open — and
+  `RegisterWorkspace` already commits before planning, so this matches how the
+  record behaves today. Retrying `open` after fixing the failure keeps the bind.
+
+`bind --clear <target>` removes the bind and leaves the record. `bind` on a
+session that does not yet exist creates it, so binding is the natural way to
+declare a new session.
 
 **The bind is the session's base directory.** This is a deliberate departure
 from #38's wording, which reads as "the directory the session opens in." Making
@@ -148,9 +225,10 @@ Rather than prefixing at five call sites, the implementation should compute the
 base once — `Workspace.RepoRoot` joined with the bind — and thread it through,
 so a future site cannot forget the prefix.
 
-If a bind is missing at open time — the directory was deleted, or a linked
-worktree was pruned — `open` falls back to the repository root and says so
-rather than failing.
+If a bind is unusable at open time — the directory was deleted, a linked
+worktree was pruned, or it no longer canonicalizes to a path inside the
+repository — `open` falls back to the repository root and says so rather than
+failing.
 
 Configuration stays keyed on slug: `config.Load(root, defaults, ws.Slug)` is
 unchanged, so both sessions on a repository share `workspaces/<slug>.yaml`.
@@ -177,7 +255,8 @@ the bind-as-base-directory reading of #38, and the restrictive session grammar.
 ## 6. Errors
 
 No new exit codes. The existing set covers every case: 2 for a malformed target
-or an invalid bind path, 3 for an ambiguous bind, 4 for an unknown repository.
+or an invalid bind path, 3 for an ambiguous bind, 4 for an unknown repository,
+and 1 for a propagated state-store failure per §3.
 
 ## 7. Verification
 
@@ -188,12 +267,22 @@ derivation can silently change an existing user's stored IDs.
 Alongside it:
 
 - a table test over the target grammar, covering every exit-2 form in §1;
+- target presence: `<repo>` selecting the default session even when the cwd sits
+  inside a bound directory, and no-target selecting the bound one — the pair
+  that distinguishes the two cases finding this design's first draft collapsed;
 - bind lookup: nested binds resolving to the longest match, a tie producing
-  exit 3, and a missing database falling back to the default session;
+  exit 3, and `services/apixyz` **not** matching a bind of `services/api` — the
+  component-wise comparison, which a string prefix would fail;
+- read-only store outcomes: a missing database and a pending migration falling
+  back to the default session, and an integrity failure, a permission failure,
+  and an indeterminate WAL each propagating rather than falling back;
 - `SessionBelongsTo` matching a v0.5.0 session that has no `@dev_session`;
 - `rebuild` recovering a named session, with an unrecoverable bind reported
   rather than silently dropped;
-- `status` not flagging a sibling named session as stale;
+- `open --cwd` holding one critical section: the bind is visible to the window
+  planning in the same call, and it persists when the open fails afterward;
+- a bind that canonicalizes outside the repository at open time being refused
+  and falling back to the repository root, not followed;
 - ensure-level base-directory joining, verified on both the host and the
   container path, and including a pane that sets its own `dir:` — the case where
   the pane replaces rather than nests;
