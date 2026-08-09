@@ -100,7 +100,7 @@ func openWorkspace(t *testing.T) resolve.Workspace {
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
 	}
-	ws, err := resolve.Resolve("", nil, cwd)
+	ws, err := resolve.Resolve("", "", nil, cwd)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestOpenContainerWindowWithoutContainerFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
 	}
-	ws, err := resolve.Resolve("", nil, cwd)
+	ws, err := resolve.Resolve("", "", nil, cwd)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}

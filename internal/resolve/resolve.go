@@ -76,8 +76,12 @@ func (e *UnknownWorkspaceError) Error() string {
 	return b.String()
 }
 
-// Resolve finds the workspace for name, or for cwd when name is empty.
-func Resolve(name string, roots []string, cwd string) (Workspace, error) {
+// Resolve finds the workspace for name, or for cwd when name is empty, under
+// the given session component. An empty session is the repository's default
+// session. Selecting the session is a policy decision that needs the state
+// store, so it is made by the caller (internal/target) and this package stays
+// pure.
+func Resolve(name, session string, roots []string, cwd string) (Workspace, error) {
 	dir := cwd
 	if name != "" {
 		found, err := byName(name, roots)
@@ -92,28 +96,32 @@ func Resolve(name string, roots []string, cwd string) (Workspace, error) {
 		return Workspace{}, err
 	}
 	repoRoot := mainWorktree(canonical)
-
-	// The default session is the only one this slice can produce; the
-	// <repo>/<session> argument form arrives with target parsing. The
-	// derivation takes the session as an input now because adding it later
-	// would rewrite every stored ID a second time.
-	session := ""
-	slug := filepath.Base(repoRoot)
-	sessionName := slug
-	if session != "" {
-		sessionName = slug + "--" + session
-	}
 	repositorySum := sha256.Sum256([]byte(repoRoot))
-	workspaceSum := sha256.Sum256([]byte(repoRoot + "\x00" + session))
 
-	return Workspace{
-		ID:           hex.EncodeToString(workspaceSum[:]),
+	// The session-bearing fields are derived in exactly one place, so a
+	// workspace built here can never disagree with one WithSession rebuilds
+	// from a live session's recorded session component.
+	return WithSession(Workspace{
 		RepositoryID: hex.EncodeToString(repositorySum[:]),
-		Slug:         slug,
+		Slug:         filepath.Base(repoRoot),
 		RepoRoot:     repoRoot,
-		Session:      session,
-		SessionName:  sessionName,
-	}, nil
+	}, session), nil
+}
+
+// WithSession re-derives ID, Session and SessionName for a different session
+// component on the same repository. RepositoryID, Slug and RepoRoot are
+// properties of the repository and are carried over untouched, so no git
+// invocation and no filesystem access is needed: rebuild and status use it to
+// reconstruct a live session's identity from its recorded session component.
+func WithSession(ws Workspace, session string) Workspace {
+	ws.Session = session
+	ws.SessionName = ws.Slug
+	if session != "" {
+		ws.SessionName = ws.Slug + "--" + session
+	}
+	workspaceSum := sha256.Sum256([]byte(ws.RepoRoot + "\x00" + session))
+	ws.ID = hex.EncodeToString(workspaceSum[:])
+	return ws
 }
 
 // byName searches each configured root for a directly-named repository. A

@@ -83,7 +83,7 @@ func runStop(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("determining the current directory: %w", err)
 	}
-	ws, err := resolve.Resolve(fs.Arg(0), defaults.Layer.RepositoryRoots, cwd)
+	ws, err := resolve.Resolve(fs.Arg(0), "", defaults.Layer.RepositoryRoots, cwd)
 	if err != nil {
 		return err
 	}

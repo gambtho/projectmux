@@ -125,7 +125,7 @@ func buildEnvelope(name string) (envelope, error) {
 	if err != nil {
 		return envelope{}, fmt.Errorf("determining the current directory: %w", err)
 	}
-	ws, err := resolve.Resolve(name, defaults.Layer.RepositoryRoots, cwd)
+	ws, err := resolve.Resolve(name, "", defaults.Layer.RepositoryRoots, cwd)
 	if err != nil {
 		return envelope{}, err
 	}

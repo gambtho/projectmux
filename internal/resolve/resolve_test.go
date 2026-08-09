@@ -57,11 +57,11 @@ func root(t *testing.T) string {
 	return dir
 }
 
-func mustResolve(t *testing.T, name string, roots []string, cwd string) Workspace {
+func mustResolve(t *testing.T, name, session string, roots []string, cwd string) Workspace {
 	t.Helper()
-	ws, err := Resolve(name, roots, cwd)
+	ws, err := Resolve(name, session, roots, cwd)
 	if err != nil {
-		t.Fatalf("Resolve(%q): %v", name, err)
+		t.Fatalf("Resolve(%q, %q): %v", name, session, err)
 	}
 	return ws
 }
@@ -74,9 +74,9 @@ func TestWorkspaceIDIsStableAcrossTrailingSlashAndSymlink(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	plain := mustResolve(t, "", nil, repo).ID
-	slashed := mustResolve(t, "", nil, repo+string(filepath.Separator)).ID
-	linked := mustResolve(t, "", nil, link).ID
+	plain := mustResolve(t, "", "", nil, repo).ID
+	slashed := mustResolve(t, "", "", nil, repo+string(filepath.Separator)).ID
+	linked := mustResolve(t, "", "", nil, link).ID
 
 	if plain != slashed {
 		t.Errorf("trailing slash changed the ID: %q vs %q", plain, slashed)
@@ -89,7 +89,7 @@ func TestWorkspaceIDIsStableAcrossTrailingSlashAndSymlink(t *testing.T) {
 func TestWorkspaceIDCombinesTheRepositoryRootAndTheSession(t *testing.T) {
 	base := root(t)
 	repo := makeRepo(t, filepath.Join(base, "euro_trip"))
-	ws := mustResolve(t, "euro_trip", []string{base}, base)
+	ws := mustResolve(t, "euro_trip", "", []string{base}, base)
 
 	wantRepository := sha256.Sum256([]byte(repo))
 	wantWorkspace := sha256.Sum256([]byte(repo + "\x00" + ws.Session))
@@ -104,7 +104,7 @@ func TestWorkspaceIDCombinesTheRepositoryRootAndTheSession(t *testing.T) {
 func TestTheDefaultSessionIsNamedForTheRepository(t *testing.T) {
 	base := root(t)
 	repo := makeRepo(t, filepath.Join(base, "euro_trip"))
-	ws := mustResolve(t, "euro_trip", []string{base}, base)
+	ws := mustResolve(t, "euro_trip", "", []string{base}, base)
 
 	if ws.Slug != "euro_trip" {
 		t.Errorf("slug = %q", ws.Slug)
@@ -124,7 +124,7 @@ func TestASiblingWorktreeNamedDirectlyResolvesToItsRepository(t *testing.T) {
 	base := root(t)
 	repo := makeRepo(t, filepath.Join(base, "euro_trip"))
 	addWorktree(t, repo, filepath.Join(base, "euro_trip-pr5"), "pr5")
-	ws := mustResolve(t, "euro_trip-pr5", []string{base}, base)
+	ws := mustResolve(t, "euro_trip-pr5", "", []string{base}, base)
 
 	if ws.Slug != "euro_trip" || ws.RepoRoot != repo {
 		t.Errorf("slug/root = %q/%q, want the parent repository %q", ws.Slug, ws.RepoRoot, repo)
@@ -147,9 +147,9 @@ func TestEveryWorktreeOfARepositoryResolvesToOneWorkspace(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	want := mustResolve(t, "", nil, repo)
+	want := mustResolve(t, "", "", nil, repo)
 	for _, cwd := range []string{linked, sub} {
-		got := mustResolve(t, "", nil, cwd)
+		got := mustResolve(t, "", "", nil, cwd)
 		if got.RepoRoot != repo {
 			t.Errorf("from %s: RepoRoot = %q, want %q", cwd, got.RepoRoot, repo)
 		}
@@ -173,7 +173,7 @@ func TestNestedWorktreeDirectoriesAreNoLongerSearched(t *testing.T) {
 			repo := makeRepo(t, filepath.Join(base, "slabledger"))
 			addWorktree(t, repo, filepath.Join(repo, nest, "review"), "review")
 
-			_, err := Resolve("review", []string{base}, base)
+			_, err := Resolve("review", "", []string{base}, base)
 			var unknown *UnknownWorkspaceError
 			if !errors.As(err, &unknown) {
 				t.Fatalf("error = %v, want *UnknownWorkspaceError", err)
@@ -189,7 +189,7 @@ func TestAmbiguousNameIsAnErrorListingEveryCandidate(t *testing.T) {
 	first := makeRepo(t, filepath.Join(a, "slabledger"))
 	second := makeRepo(t, filepath.Join(b, "slabledger"))
 
-	_, err := Resolve("slabledger", []string{a, b}, a)
+	_, err := Resolve("slabledger", "", []string{a, b}, a)
 	var ambiguous *AmbiguousError
 	if !errors.As(err, &ambiguous) {
 		t.Fatalf("error = %v, want *AmbiguousError", err)
@@ -212,7 +212,7 @@ func TestTheSameTreeReachedThroughOverlappingRootsIsNotAmbiguous(t *testing.T) {
 	repo := makeRepo(t, filepath.Join(base, "euro_trip"))
 	roots := []string{base, base, filepath.Join(base, "sub", "..")}
 
-	ws := mustResolve(t, "euro_trip", roots, base)
+	ws := mustResolve(t, "euro_trip", "", roots, base)
 	if ws.RepoRoot != repo {
 		t.Errorf("repo root = %q, want %q", ws.RepoRoot, repo)
 	}
@@ -220,7 +220,7 @@ func TestTheSameTreeReachedThroughOverlappingRootsIsNotAmbiguous(t *testing.T) {
 
 func TestUnknownNameNamesTheSearchedRoots(t *testing.T) {
 	base := root(t)
-	_, err := Resolve("nosuchproject", []string{base}, base)
+	_, err := Resolve("nosuchproject", "", []string{base}, base)
 
 	var unknown *UnknownWorkspaceError
 	if !errors.As(err, &unknown) {
@@ -247,7 +247,7 @@ func TestNameIsALiteralDirectoryNameNotAPattern(t *testing.T) {
 		"../" + filepath.Base(filepath.Dir(outside)) + "/elsewhere", // traversal out of the root
 		"a/b", // more than one path component
 	} {
-		_, err := Resolve(name, []string{base}, base)
+		_, err := Resolve(name, "", []string{base}, base)
 		var unknown *UnknownWorkspaceError
 		if !errors.As(err, &unknown) {
 			t.Errorf("Resolve(%q): error = %v, want *UnknownWorkspaceError", name, err)
@@ -260,7 +260,7 @@ func TestResolvingByNameWithoutConfiguredRootsSaysSo(t *testing.T) {
 	// installation policy, so an unconfigured application says what to
 	// configure instead of searching a guessed directory.
 	base := root(t)
-	_, err := Resolve("anything", nil, base)
+	_, err := Resolve("anything", "", nil, base)
 
 	var unknown *UnknownWorkspaceError
 	if !errors.As(err, &unknown) {
@@ -278,7 +278,7 @@ func TestCwdResolutionOutsideGitFallsBackToTheDirectory(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	ws := mustResolve(t, "", nil, dir)
+	ws := mustResolve(t, "", "", nil, dir)
 	if ws.RepoRoot != dir {
 		t.Errorf("repo root = %q, want %q", ws.RepoRoot, dir)
 	}
@@ -289,7 +289,101 @@ func TestCwdResolutionOutsideGitFallsBackToTheDirectory(t *testing.T) {
 
 func TestResolvingAMissingDirectoryFails(t *testing.T) {
 	base := root(t)
-	if _, err := Resolve("", nil, filepath.Join(base, "gone")); err == nil {
+	if _, err := Resolve("", "", nil, filepath.Join(base, "gone")); err == nil {
 		t.Error("expected an error for a missing directory")
+	}
+}
+
+// The workspace ID is the primary key of every row in a user's state store.
+// These digests are hex(sha256(repo_root + "\x00" + session)) for a fixed root,
+// computed independently of this package. If a refactor changes them, every
+// existing installation silently loses its recorded sessions — so they are
+// pinned as literals rather than recomputed from the same expression the
+// implementation uses.
+func TestWorkspaceIDDerivationIsPinned(t *testing.T) {
+	const repoRoot = "/home/u/workspace/euro_trip"
+	base := Workspace{
+		RepositoryID: "28ac435953b10fee07569890551989d4707354301f7c4d467cbf2967b7da2907",
+		Slug:         "euro_trip",
+		RepoRoot:     repoRoot,
+	}
+
+	cases := []struct {
+		session  string
+		wantID   string
+		wantName string
+	}{
+		{
+			session:  "",
+			wantID:   "bb04096e4b690f60b0cbfbe2954f9901ce30f9c67f7e378f4189a2e9ca3c6223",
+			wantName: "euro_trip",
+		},
+		{
+			session:  "feature-a",
+			wantID:   "8c178a36549771dd4a145551d4c0a23298d2f186b8bb5deb2306c448568ba826",
+			wantName: "euro_trip--feature-a",
+		},
+	}
+
+	for _, tc := range cases {
+		got := WithSession(base, tc.session)
+		if got.ID != tc.wantID {
+			t.Errorf("WithSession(%q).ID = %q, want %q", tc.session, got.ID, tc.wantID)
+		}
+		if got.SessionName != tc.wantName {
+			t.Errorf("WithSession(%q).SessionName = %q, want %q",
+				tc.session, got.SessionName, tc.wantName)
+		}
+		if got.Session != tc.session {
+			t.Errorf("WithSession(%q).Session = %q", tc.session, got.Session)
+		}
+		// The repository is not a function of the session.
+		if got.RepositoryID != base.RepositoryID || got.Slug != base.Slug ||
+			got.RepoRoot != base.RepoRoot {
+			t.Errorf("WithSession(%q) disturbed the repository fields: %+v", tc.session, got)
+		}
+	}
+}
+
+// Resolve and WithSession must agree, or a workspace reached through the CLI
+// and the same workspace reconstructed from a live session's @dev_session key
+// would carry different IDs.
+func TestResolveAgreesWithWithSession(t *testing.T) {
+	base := root(t)
+	makeRepo(t, filepath.Join(base, "euro_trip"))
+
+	def := mustResolve(t, "euro_trip", "", []string{base}, base)
+	named := mustResolve(t, "euro_trip", "feature-a", []string{base}, base)
+
+	if got := WithSession(def, "feature-a"); got != named {
+		t.Errorf("WithSession(default, %q) = %+v, want %+v", "feature-a", got, named)
+	}
+	if got := WithSession(named, ""); got != def {
+		t.Errorf("WithSession(named, \"\") = %+v, want the default workspace %+v", got, def)
+	}
+}
+
+func TestResolveDerivesTheNamedSession(t *testing.T) {
+	base := root(t)
+	repo := makeRepo(t, filepath.Join(base, "euro_trip"))
+	ws := mustResolve(t, "euro_trip", "feature-a", []string{base}, base)
+
+	if ws.Session != "feature-a" {
+		t.Errorf("session = %q", ws.Session)
+	}
+	if ws.SessionName != "euro_trip--feature-a" {
+		t.Errorf("session name = %q, want %q", ws.SessionName, "euro_trip--feature-a")
+	}
+	if ws.Slug != "euro_trip" || ws.RepoRoot != repo {
+		t.Errorf("slug/root = %q/%q, want %q/%q", ws.Slug, ws.RepoRoot, "euro_trip", repo)
+	}
+
+	// Two sessions on one repository share the repository, not the workspace.
+	def := mustResolve(t, "euro_trip", "", []string{base}, base)
+	if ws.RepositoryID != def.RepositoryID {
+		t.Errorf("RepositoryID differs between sessions on one repository")
+	}
+	if ws.ID == def.ID {
+		t.Errorf("the named session reused the default session's ID %q", ws.ID)
 	}
 }

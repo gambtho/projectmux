@@ -140,7 +140,7 @@ func buildStatus(ctx context.Context, name string) (statusEnvelope, error) {
 	if err != nil {
 		return statusEnvelope{}, fmt.Errorf("determining the current directory: %w", err)
 	}
-	ws, err := resolve.Resolve(name, defaults.Layer.RepositoryRoots, cwd)
+	ws, err := resolve.Resolve(name, "", defaults.Layer.RepositoryRoots, cwd)
 	if err != nil {
 		return statusEnvelope{}, err
 	}
@@ -222,7 +222,7 @@ func staleSessions(snap controller.Snapshot, ws resolve.Workspace) []string {
 		if controller.SessionBelongsTo(s, ws) || s.Worktree == "" {
 			continue
 		}
-		resolved, err := resolve.Resolve("", nil, s.Worktree)
+		resolved, err := resolve.Resolve("", "", nil, s.Worktree)
 		if err != nil || resolved.RepoRoot != ws.RepoRoot {
 			continue
 		}
@@ -256,7 +256,7 @@ func staleRepositoryRoots(st stateStore, ws resolve.Workspace) ([]string, error)
 		if repo.Slug != ws.Slug || repo.RepoRoot == ws.RepoRoot {
 			continue
 		}
-		resolved, err := resolve.Resolve("", nil, repo.RepoRoot)
+		resolved, err := resolve.Resolve("", "", nil, repo.RepoRoot)
 		if err != nil || resolved.RepoRoot != ws.RepoRoot {
 			continue
 		}

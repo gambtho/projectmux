@@ -55,7 +55,7 @@ func lifecycleRig(t *testing.T, label string) (resolve.Workspace, string) {
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
 	}
-	ws, err := resolve.Resolve("", nil, cwd)
+	ws, err := resolve.Resolve("", "", nil, cwd)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}

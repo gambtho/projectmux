@@ -277,7 +277,7 @@ type worktreeResolver struct{}
 func (worktreeResolver) Resolve(repoRoot string) (resolve.Workspace, error) {
 	// No name and no roots: roots feed only lookup by name, and rebuild
 	// resolves from a directory.
-	return resolve.Resolve("", nil, repoRoot)
+	return resolve.Resolve("", "", nil, repoRoot)
 }
 
 // Exists separates "the directory is gone" from "git would not answer",
