@@ -13,7 +13,7 @@ import (
 	"github.com/gambtho/projectmux/internal/state"
 )
 
-const stopHelp = `usage: projectmux stop [--container] [--force] [--json] [--compact] [<workspace>]
+const stopHelp = `usage: projectmux stop [--container] [--force] [--json] [--compact] [<target>]
 
 End the workspace's tmux session, and with --container also stop its
 bound container. The only destructive command; idempotent — stopping an
@@ -61,7 +61,7 @@ func runStop(ctx context.Context, args []string, stdout io.Writer) error {
 		return usagef("stop: %s", err)
 	}
 	if fs.NArg() > 1 {
-		return usagef("stop: expected at most one workspace, got %d", fs.NArg())
+		return usagef("stop: expected at most one target, got %d", fs.NArg())
 	}
 	if *compact {
 		*asJSON = true

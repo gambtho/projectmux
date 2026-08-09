@@ -69,7 +69,7 @@ func runOpen(ctx context.Context, args []string, stdout io.Writer) error {
 		return usagef("open: %s", err)
 	}
 	if fs.NArg() > 1 {
-		return usagef("open: expected at most one workspace, got %d", fs.NArg())
+		return usagef("open: expected at most one target, got %d", fs.NArg())
 	}
 	if *compact {
 		*asJSON = true

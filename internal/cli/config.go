@@ -26,10 +26,10 @@ import (
 // path.
 const OutputSchemaVersion = 2
 
-const configHelp = `usage: projectmux config [--validate] [--json] [--compact] [<workspace>]
+const configHelp = `usage: projectmux config [--validate] [--json] [--compact] [<target>]
 
 Print the normalized, merged configuration for a workspace, resolved either
-from <workspace> or from the current directory.
+from <target> or from the current directory.
 
   --validate check configuration files instead of printing one, and report
              what is wrong and where. The argument names a workspace file
@@ -79,7 +79,7 @@ func runConfig(args []string, stdout io.Writer) error {
 		return usagef("config: %s", err)
 	}
 	if fs.NArg() > 1 {
-		return usagef("config: expected at most one workspace, got %d", fs.NArg())
+		return usagef("config: expected at most one target, got %d", fs.NArg())
 	}
 	// --compact only affects JSON, so asking for it is asking for JSON.
 	if *compact {

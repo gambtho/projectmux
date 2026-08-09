@@ -40,25 +40,25 @@ const usage = `projectmux - declarative tmux workspaces, optionally backed by De
 usage: projectmux <command> [options]
 
 commands:
-  <workspace>
-        shorthand for: open <workspace>
+  <target>
+        shorthand for: open <target>
   open [--no-attach] [--cwd <path>] [--json] [--compact] [<target>]
         observe, ensure, record, and attach the workspace session
-  attach [--json] [--compact] [<workspace>]
+  attach [--json] [--compact] [<target>]
         attach to the live workspace session; never creates one
-  stop [--container] [--force] [--json] [--compact] [<workspace>]
+  stop [--container] [--force] [--json] [--compact] [<target>]
         end the workspace session, and with --container its container
   bind [--clear] [--json] [--compact] <target> [<path>]
         record the directory a session opens in, relative to the
         repository root; creates the session if it does not exist
   autostart [--json] [--compact]
         start containers for registered repositories with autostart: true
-  config [--validate] [--json] [--compact] [<workspace>]
+  config [--validate] [--json] [--compact] [<target>]
         print the normalized, merged configuration for a workspace, or with
         --validate report what is wrong in the configuration files and where
   list [--json] [--compact]
         list recorded workspaces and live identity-carrying tmux sessions
-  status [--json] [--compact] [<workspace>]
+  status [--json] [--compact] [<target>]
         observe one workspace and explain drift and dependency failures
   doctor [--json] [--compact]
         diagnose dependencies, configuration, state, and drift; changes nothing
@@ -162,9 +162,9 @@ func dispatch(ctx context.Context, args []string, stdout io.Writer) error {
 		return runRebuild(ctx, rest, stdout)
 	default:
 		if !strings.HasPrefix(command, "-") {
-			// Design §8: `projectmux <workspace>` is shorthand for
+			// Design §8: `projectmux <target>` is shorthand for
 			// open. A mistyped command therefore resolves as a
-			// workspace name and exits 4, not 2 — the documented trade.
+			// target and exits 4, not 2 — the documented trade.
 			return runOpen(ctx, append([]string{command}, rest...), stdout)
 		}
 		return usagef("unknown command %q", command)

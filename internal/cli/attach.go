@@ -11,9 +11,9 @@ import (
 	"github.com/gambtho/projectmux/internal/controller"
 )
 
-const attachHelp = `usage: projectmux attach [--json] [--compact] [<workspace>]
+const attachHelp = `usage: projectmux attach [--json] [--compact] [<target>]
 
-Attach to the live workspace session, resolved either from <workspace>
+Attach to the live workspace session, resolved either from <target>
 or from the current directory. attach never creates a session and never
 modifies state; use projectmux open to create one.
 
@@ -41,7 +41,7 @@ func runAttach(ctx context.Context, args []string, stdout io.Writer) error {
 		return usagef("attach: %s", err)
 	}
 	if fs.NArg() > 1 {
-		return usagef("attach: expected at most one workspace, got %d", fs.NArg())
+		return usagef("attach: expected at most one target, got %d", fs.NArg())
 	}
 	if *compact {
 		*asJSON = true

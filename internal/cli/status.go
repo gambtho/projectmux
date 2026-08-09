@@ -14,10 +14,10 @@ import (
 	"github.com/gambtho/projectmux/internal/resolve"
 )
 
-const statusHelp = `usage: projectmux status [--json] [--compact] [<workspace>]
+const statusHelp = `usage: projectmux status [--json] [--compact] [<target>]
 
 Observe one workspace and explain configuration drift and dependency
-failures, resolved either from <workspace> or from the current directory.
+failures, resolved either from <target> or from the current directory.
 
   --json     emit the versioned JSON envelope instead of human-readable text
   --compact  emit the JSON on a single line (implies --json)
@@ -112,7 +112,7 @@ func runStatus(ctx context.Context, args []string, stdout io.Writer) error {
 		return usagef("status: %s", err)
 	}
 	if fs.NArg() > 1 {
-		return usagef("status: expected at most one workspace, got %d", fs.NArg())
+		return usagef("status: expected at most one target, got %d", fs.NArg())
 	}
 	if *compact {
 		*asJSON = true
