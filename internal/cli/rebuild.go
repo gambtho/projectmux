@@ -274,10 +274,11 @@ func buildRebuild(ctx context.Context, dryRun bool) (rebuild.Report, error) {
 // (spec §3), and it is what lets rebuild verify the keys it was handed.
 type worktreeResolver struct{}
 
-func (worktreeResolver) Resolve(repoRoot string) (resolve.Workspace, error) {
+func (worktreeResolver) Resolve(repoRoot, session string) (resolve.Workspace, error) {
 	// No name and no roots: roots feed only lookup by name, and rebuild
-	// resolves from a directory.
-	return resolve.Resolve("", "", nil, repoRoot)
+	// resolves from a directory. The session comes from @dev_session, so
+	// a named session re-derives its own ID rather than the default's.
+	return resolve.Resolve("", session, nil, repoRoot)
 }
 
 // Exists separates "the directory is gone" from "git would not answer",

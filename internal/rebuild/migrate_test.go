@@ -41,7 +41,7 @@ type migrateResolver struct {
 	exists map[string]bool
 }
 
-func (r migrateResolver) Resolve(repoRoot string) (resolve.Workspace, error) {
+func (r migrateResolver) Resolve(repoRoot, _ string) (resolve.Workspace, error) {
 	ws, ok := r.roots[repoRoot]
 	if !ok {
 		return resolve.Workspace{}, errors.New("no such directory: " + repoRoot)
