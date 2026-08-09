@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/gambtho/projectmux/internal/bindpath"
 	"github.com/gambtho/projectmux/internal/state"
 )
 
@@ -28,6 +29,10 @@ type EnsureResult struct {
 	Drifted               bool
 	Container             *ContainerObservation // nil when no container is in play
 	ContainerWindowsStale bool
+	// BindWarning is set when the stored bind was unusable and the
+	// repository root was used instead. An unusable bind is not fatal
+	// (spec §4), so this is reported rather than returned as an error.
+	BindWarning string
 }
 
 // RefusalError carries a refusal out of Ensure or attach; the CLI maps
@@ -89,6 +94,18 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowInte
 		return EnsureResult{}, fmt.Errorf("registering the workspace: %w", err)
 	}
 
+	// The bind is persisted inside the same critical section that
+	// registers the workspace and before the observation below, so no
+	// window is ever built from a bind that changed underneath it. It
+	// persists even when the open fails afterwards: it is a declaration
+	// about the session, not a side effect of a successful open (§4).
+	if d.Bind != nil {
+		if err := c.Store.SetBind(d.Workspace.ID, d.Bind, c.Clock.Now()); err != nil {
+			c.recordFailure(d.Workspace.ID, opName, "recording the bind: "+err.Error())
+			return EnsureResult{}, fmt.Errorf("recording the bind: %w", err)
+		}
+	}
+
 	snap, err := c.Observe(ctx, d)
 	if err != nil {
 		// Best-effort: an Observe error is a store read failure, so this
@@ -109,7 +126,8 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowInte
 		return EnsureResult{}, err
 	}
 
-	windows, err := renderWindows(intents, d, bindBase{Host: d.Workspace.RepoRoot}, containerObs, c.ContainerAct)
+	base := resolveBindBase(d.Workspace.RepoRoot, snap.Stored)
+	windows, err := renderWindows(intents, d, base, containerObs, c.ContainerAct)
 	if err != nil {
 		c.recordFailure(d.Workspace.ID, opName, err.Error())
 		return EnsureResult{}, err
@@ -318,6 +336,22 @@ func (b bindBase) hostDir(relDir string) string {
 // slash-separated container-side paths, never host paths.
 func (b bindBase) containerDir(relDir string) string {
 	return path.Join(b.Rel, relDir)
+}
+
+// resolveBindBase turns the stored bind into the session's base
+// directory. Containment is re-verified here rather than trusted from
+// bind time: a stored in-repository path can later be replaced by a
+// symlink pointing outside the repository (spec §4).
+func resolveBindBase(repoRoot string, stored *state.Record) bindBase {
+	root := bindBase{Host: repoRoot}
+	if stored == nil || stored.Bind == nil || *stored.Bind == "" {
+		return root
+	}
+	abs, err := bindpath.Resolve(repoRoot, *stored.Bind)
+	if err != nil {
+		return root
+	}
+	return bindBase{Host: abs, Rel: *stored.Bind}
 }
 
 // wantsContainerWindows reports whether any intent resolves to the
