@@ -455,3 +455,50 @@ func TestOpenCwdOutsideTheRepositoryExitsTwo(t *testing.T) {
 		t.Error("a rejected --cwd registered the workspace anyway")
 	}
 }
+
+func TestOpenReportsTheEffectiveBind(t *testing.T) {
+	ws := openWorkspace(t)
+	if err := os.MkdirAll(filepath.Join(ws.RepoRoot, "services", "api"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	s := fake.NewStore()
+	if err := s.RegisterWorkspace(ws, "sha256:seed", cliTestTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	bind := "services/api"
+	if err := s.SetBind(ws.ID, &bind, cliTestTime); err != nil {
+		t.Fatalf("set bind: %v", err)
+	}
+	installOpenStore(t, s)
+	installFakeActuator(t)
+	installScriptedSessions(t,
+		cliAbsent(), cliAbsent(), cliLive(ownLive(ws, ws.SessionName)))
+
+	code, stdout, stderr := run(t, "open", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	env := decodeOpen(t, stdout)
+	if env.Bind == nil || *env.Bind != bind {
+		t.Errorf("bind = %v, want %q", env.Bind, bind)
+	}
+	if env.SchemaVersion != OutputSchemaVersion {
+		t.Errorf("schema_version = %d", env.SchemaVersion)
+	}
+}
+
+func TestOpenEmitsNoBindWhenUnbound(t *testing.T) {
+	ws := openWorkspace(t)
+	installOpenStore(t, fake.NewStore())
+	installFakeActuator(t)
+	installScriptedSessions(t,
+		cliAbsent(), cliAbsent(), cliLive(ownLive(ws, ws.SessionName)))
+
+	code, stdout, stderr := run(t, "open", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	if strings.Contains(stdout, `"bind"`) {
+		t.Errorf("an unbound open emits a bind key:\n%s", stdout)
+	}
+}

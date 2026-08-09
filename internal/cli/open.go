@@ -44,6 +44,7 @@ type openEnvelope struct {
 	BindWarning           string             `json:"bind_warning,omitempty"`
 	Container             *openContainerInfo `json:"container,omitempty"`
 	ContainerWindowsStale bool               `json:"container_windows_stale,omitempty"`
+	Bind                  *string            `json:"bind,omitempty"`
 }
 
 // openContainerInfo is the ensured container as reported by open.
@@ -97,6 +98,7 @@ func runOpen(ctx context.Context, args []string, stdout io.Writer) error {
 			Drifted:               res.Drifted,
 			BindWarning:           res.BindWarning,
 			ContainerWindowsStale: res.ContainerWindowsStale,
+			Bind:                  res.Bind,
 		}
 		if res.Container != nil {
 			env.Container = &openContainerInfo{
@@ -114,6 +116,9 @@ func runOpen(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 	if res.Container != nil {
 		fmt.Fprintf(stdout, "container %s (%s)\n", res.Container.ContainerID, res.Container.Health)
+	}
+	if res.Bind != nil {
+		fmt.Fprintf(stdout, "bind %s\n", *res.Bind)
 	}
 	if res.ContainerWindowsStale {
 		fmt.Fprintln(stdout, "container replaced; existing session keeps its old windows — run `projectmux stop` (once available) or kill the session and reopen to rebuild them")

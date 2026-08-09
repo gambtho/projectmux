@@ -33,6 +33,11 @@ type EnsureResult struct {
 	// repository root was used instead. An unusable bind is not fatal
 	// (spec §4), so this is reported rather than returned as an error.
 	BindWarning string
+	// Bind is the bind the session was planned from, repository-relative,
+	// nil when the session opens at the repository root. It is reported
+	// even when BindWarning is set: a caller correcting a broken bind
+	// needs to see the value that is broken.
+	Bind *string
 }
 
 // RefusalError carries a refusal out of Ensure or attach; the CLI maps
@@ -127,6 +132,11 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowInte
 	}
 
 	base, bindWarning := resolveBindBase(d.Workspace.RepoRoot, snap.Stored)
+	var effectiveBind *string
+	if rec := snap.Stored; rec != nil && rec.Bind != nil && *rec.Bind != "" {
+		bind := *rec.Bind
+		effectiveBind = &bind
+	}
 	windows, err := renderWindows(intents, d, base, containerObs, c.ContainerAct)
 	if err != nil {
 		c.recordFailure(d.Workspace.ID, opName, err.Error())
@@ -149,6 +159,7 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowInte
 			Container:             containerObs,
 			ContainerWindowsStale: stale,
 			BindWarning:           bindWarning,
+			Bind:                  effectiveBind,
 		}, nil
 
 	case SessionActionAdopt:
@@ -174,6 +185,7 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowInte
 			Container:             containerObs,
 			ContainerWindowsStale: stale,
 			BindWarning:           bindWarning,
+			Bind:                  effectiveBind,
 		}, nil
 
 	case SessionActionCreate:
@@ -183,6 +195,7 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowInte
 		}
 		res.Container = containerObs
 		res.BindWarning = bindWarning
+		res.Bind = effectiveBind
 		return res, nil
 	}
 	return EnsureResult{}, fmt.Errorf("unexpected session action %q", plan.Session)
