@@ -362,6 +362,15 @@ func resolveBindBase(repoRoot string, stored *state.Record) (bindBase, string) {
 	return bindBase{Host: abs, Rel: *stored.Bind}, ""
 }
 
+// BindWarning reports why a stored bind cannot be used, or "" when it is
+// usable. It is exactly the check Ensure runs before rendering windows,
+// exported so that status can report the condition without ensuring
+// anything — one derivation, so the two commands cannot drift.
+func BindWarning(repoRoot string, stored *state.Record) string {
+	_, warning := resolveBindBase(repoRoot, stored)
+	return warning
+}
+
 // wantsContainerWindows reports whether any intent resolves to the
 // container, given whether one applies.
 func wantsContainerWindows(intents []WindowIntent, containerApplies bool) bool {
