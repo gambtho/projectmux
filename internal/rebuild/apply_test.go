@@ -1022,3 +1022,44 @@ func TestApplyRecoversANamedSession(t *testing.T) {
 		t.Errorf("ActualSession = %v, want the named session", rec.ActualSession)
 	}
 }
+
+func TestApplyKeepsANamedSessionsBindWhenItNoLongerResolves(t *testing.T) {
+	ws := namedWorkspace()
+	sess := namedLiveSession(ws, "projectmux--feature-a")
+	h := newHarness()
+	h.know(ws, "sha256:desired")
+
+	// seedRecorded's fixture carries no session component, which now reads
+	// as an identity mismatch against a named session (Task 3), so the row
+	// is seeded here with one.
+	recorded := workspace(ws.ID, ws.Slug, ws.RepoRoot, "recorded-proposed")
+	recorded.Session = ws.Session
+	if err := h.fakeStore.RegisterWorkspace(recorded, "sha256:recorded", testTime); err != nil {
+		t.Fatalf("seeding the recorded row: %v", err)
+	}
+	bind := "services/gone"
+	if err := h.fakeStore.SetBind(ws.ID, &bind, testTime); err != nil {
+		t.Fatalf("SetBind: %v", err)
+	}
+	h.observer.results = []controller.SessionObservation{observing(sess)}
+
+	report := h.applier().Apply(context.Background(), Plan{
+		Candidates: []Candidate{{Case: CaseAdopt, Session: sess}},
+	})
+
+	if len(report.Conflicts) != 0 {
+		t.Fatalf("Conflicts = %+v; a bind that cannot be resolved is not a reason to refuse recovery",
+			report.Conflicts)
+	}
+	if len(report.Registered) != 1 || report.Registered[0].Session != "projectmux--feature-a" {
+		t.Fatalf("Registered = %+v, want the named session reported", report.Registered)
+	}
+	rec, err := h.fakeStore.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.Bind == nil || *rec.Bind != "services/gone" {
+		t.Errorf("Bind = %v, want it preserved: rebuild recovers state, it does not discard it",
+			rec.Bind)
+	}
+}
