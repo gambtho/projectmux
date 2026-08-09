@@ -133,7 +133,7 @@ Releases publish static `linux/amd64` and `linux/arm64` binaries with a
 `SHA256SUMS` file. Download both, verify, then install:
 
 ```sh
-VERSION=v0.4.0
+VERSION=v0.5.0
 ARCH=amd64   # or arm64
 BASE=https://github.com/gambtho/projectmux/releases/download/$VERSION
 
@@ -151,6 +151,27 @@ file covering both. Verification is the point of publishing checksums — if
 `sha256sum` does not print `OK`, do not install the binary.
 
 While the version is below 1.0, releases are marked as prereleases.
+
+### Upgrading from `v0.4.0`
+
+Run `projectmux rebuild` once after installing. It is a required step, not an
+optional one.
+
+`v0.5.0` keys workspaces and containers on the repository rather than the git
+worktree, which changes both the stored schema and every workspace ID. The
+schema migration moves each stored row verbatim, treating its recorded path as
+a repository root, because telling a main worktree from a linked one needs to
+ask git and a migration must never fail because a directory moved. The result
+is deliberately over-counted, never wrong: one repository per path until
+`rebuild` collapses the linked worktrees into their parents and retags live
+sessions onto their repository. `status` reports a repository whose recorded
+root is not a main worktree as needing this run. See
+[`rebuild`](docs/commands.md#projectmux-rebuild) for what it reports and
+refuses.
+
+`--json` consumers should read [the conventions](docs/commands.md#conventions)
+first: `schema_version` is `2`, the workspace path field is now `repo_root`
+rather than `worktree`, `is_primary` is gone, and `session` is new.
 
 ### With `go install`
 
