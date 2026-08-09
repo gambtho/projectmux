@@ -7,13 +7,11 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"os"
 	"slices"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/gambtho/projectmux/internal/config"
-	"github.com/gambtho/projectmux/internal/resolve"
 )
 
 // OutputSchemaVersion versions the JSON envelope. Below 1.0 nothing
@@ -121,11 +119,7 @@ func buildEnvelope(name string) (envelope, error) {
 		return envelope{}, err
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		return envelope{}, fmt.Errorf("determining the current directory: %w", err)
-	}
-	ws, err := resolve.Resolve(name, "", defaults.Layer.RepositoryRoots, cwd)
+	ws, err := selectWorkspace(name, defaults.Layer.RepositoryRoots)
 	if err != nil {
 		return envelope{}, err
 	}

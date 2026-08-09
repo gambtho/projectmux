@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -130,11 +129,7 @@ func ensureWorkspace(ctx context.Context, name string) (controller.EnsureResult,
 	if err != nil {
 		return zero, resolve.Workspace{}, err
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return zero, resolve.Workspace{}, fmt.Errorf("determining the current directory: %w", err)
-	}
-	ws, err := resolve.Resolve(name, "", defaults.Layer.RepositoryRoots, cwd)
+	ws, err := selectWorkspace(name, defaults.Layer.RepositoryRoots)
 	if err != nil {
 		return zero, resolve.Workspace{}, err
 	}

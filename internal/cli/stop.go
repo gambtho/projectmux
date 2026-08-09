@@ -6,12 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 
 	"github.com/gambtho/projectmux/internal/config"
 	"github.com/gambtho/projectmux/internal/controller"
-	"github.com/gambtho/projectmux/internal/resolve"
 	"github.com/gambtho/projectmux/internal/state"
 )
 
@@ -79,11 +77,7 @@ func runStop(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("determining the current directory: %w", err)
-	}
-	ws, err := resolve.Resolve(fs.Arg(0), "", defaults.Layer.RepositoryRoots, cwd)
+	ws, err := selectWorkspace(fs.Arg(0), defaults.Layer.RepositoryRoots)
 	if err != nil {
 		return err
 	}

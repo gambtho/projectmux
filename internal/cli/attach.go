@@ -6,11 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/gambtho/projectmux/internal/config"
 	"github.com/gambtho/projectmux/internal/controller"
-	"github.com/gambtho/projectmux/internal/resolve"
 )
 
 const attachHelp = `usage: projectmux attach [--json] [--compact] [<workspace>]
@@ -80,11 +78,7 @@ func buildAttach(ctx context.Context, name string) (attachEnvelope, string, erro
 	if err != nil {
 		return zero, "", err
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return zero, "", fmt.Errorf("determining the current directory: %w", err)
-	}
-	ws, err := resolve.Resolve(name, "", defaults.Layer.RepositoryRoots, cwd)
+	ws, err := selectWorkspace(name, defaults.Layer.RepositoryRoots)
 	if err != nil {
 		return zero, "", err
 	}
