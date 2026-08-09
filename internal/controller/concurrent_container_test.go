@@ -157,13 +157,15 @@ func concurrentRepoDesired(ws resolve.Workspace) controller.Desired {
 
 // repoSession is the live tmux session the post-create confirmation must
 // see. @dev_worktree keeps its name but now carries the repository root
-// (design §5.1), so both sessions report the same value there.
+// (design §5.1), so both sessions report the same value there. @dev_session
+// carries the workspace's own session component, distinguishing the two.
 func repoSession(ws resolve.Workspace) controller.LiveSession {
 	return controller.LiveSession{
 		Name:        ws.SessionName,
 		WorkspaceID: ws.ID,
 		Slug:        ws.Slug,
 		Worktree:    ws.RepoRoot,
+		Session:     ws.Session,
 	}
 }
 

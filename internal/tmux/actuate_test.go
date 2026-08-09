@@ -19,6 +19,7 @@ func actuateSpec() controller.SessionSpec {
 		WorkspaceID: "w1",
 		Slug:        "proj",
 		Worktree:    "/w/slab",
+		Session:     "feature-a",
 		Env:         map[string]string{"B_KEY": "2", "A_KEY": "1"},
 		Windows: []controller.WindowSpec{
 			{Name: "agent-1", Command: "claude", Dir: "/w/slab", Focus: true},
@@ -36,6 +37,7 @@ func TestCreateArgvShape(t *testing.T) {
 		"; set-option -t slab @dev_workspace_id w1",
 		"; set-option -t slab @dev_slug proj",
 		"; set-option -t slab @dev_worktree /w/slab",
+		"; set-option -t slab @dev_session feature-a",
 		"; new-window -d -t slab -n shell -c /w/slab/sub -e A_KEY=1 -e B_KEY=2",
 		"; select-window -t slab:agent-1",
 	} {
@@ -123,6 +125,7 @@ func TestCreateArgvEscapesSessionNameInTargets(t *testing.T) {
 		`set-option -t slab\; @dev_workspace_id`,
 		`set-option -t slab\; @dev_slug`,
 		`set-option -t slab\; @dev_worktree`,
+		`set-option -t slab\; @dev_session`,
 		`new-window -d -t slab\;`,
 		// The focus target escapes the complete composite argument; its
 		// trailing character is the window name's, so the session name's
@@ -135,6 +138,42 @@ func TestCreateArgvEscapesSessionNameInTargets(t *testing.T) {
 	}
 	if strings.Contains(joined, "-s slab; ") || strings.Contains(joined, "-t slab; ") {
 		t.Errorf("argv %q carries an unescaped session name in a -s/-t position", joined)
+	}
+}
+
+// A session component cannot contain ";" under the target grammar, but
+// createArgv must not depend on a validation that lives in another package:
+// every argv element it emits goes through escapeChainArg, or the chain parser
+// strips the trailing ";" and truncates the value.
+func TestCreateArgvEscapesTheSessionValue(t *testing.T) {
+	spec := actuateSpec()
+	spec.Session = "feature;"
+	joined := strings.Join(createArgv(spec), " ")
+
+	if !strings.Contains(joined, `@dev_session feature\;`) {
+		t.Errorf("argv %q does not carry an escaped @dev_session value", joined)
+	}
+}
+
+// A default session writes the key with an empty value rather than omitting
+// it, so the four identity keys are always set together and a mid-chain
+// failure cannot leave a session tagged with three of them. The assertion
+// walks argv rather than a joined string: the empty value is invisible once
+// joined with spaces.
+func TestCreateArgvWritesTheSessionKeyForTheDefaultSession(t *testing.T) {
+	spec := actuateSpec()
+	spec.Session = ""
+	argv := createArgv(spec)
+
+	i := slices.Index(argv, controller.KeySession)
+	if i < 0 {
+		t.Fatalf("argv %v does not set @dev_session for the default session", argv)
+	}
+	if i+1 >= len(argv) || argv[i+1] != "" {
+		t.Errorf("argv %v: @dev_session is not followed by an empty value", argv)
+	}
+	if i < 4 || argv[i-1] != "slab" || argv[i-2] != "-t" || argv[i-3] != "set-option" {
+		t.Errorf("argv %v: @dev_session is not a set-option on the session target", argv)
 	}
 }
 

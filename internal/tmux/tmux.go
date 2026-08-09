@@ -69,7 +69,7 @@ var _ controller.SessionObserver = (*Client)(nil)
 
 // Sessions lists every live session with whatever identity keys it
 // carries, in two phases: a strictly validated session-id enumeration,
-// then four per-field display-message calls per session whose entire
+// then five per-field display-message calls per session whose entire
 // output is one raw value (spec §5) — no in-band framing exists for a
 // value to forge. No server is absence: an empty list and nil error.
 // Any other failure is an error, which callers must render as
@@ -96,7 +96,7 @@ func (c *Client) Sessions(ctx context.Context) ([]controller.LiveSession, error)
 
 	live := make([]controller.LiveSession, 0, len(ids))
 	for _, id := range ids {
-		var values [4]string
+		var values [5]string
 		for i, format := range fieldFormats {
 			value, err := c.field(ctx, id, format)
 			if err != nil {
@@ -116,6 +116,7 @@ func (c *Client) Sessions(ctx context.Context) ([]controller.LiveSession, error)
 			WorkspaceID: values[1],
 			Slug:        values[2],
 			Worktree:    values[3],
+			Session:     values[4],
 		})
 	}
 	return live, nil

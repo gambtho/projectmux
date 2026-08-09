@@ -131,7 +131,8 @@ func buildList(ctx context.Context) (listEnvelope, error) {
 			name := s.Name
 			row.SessionState = "live"
 			row.LiveSession = &name
-			row.IdentityConflict = s.Slug != rec.Slug || s.Worktree != rec.RepoRoot
+			row.IdentityConflict = s.Slug != rec.Slug || s.Worktree != rec.RepoRoot ||
+				s.Session != rec.Session
 			consumed[rec.ID] = true
 		default:
 			// Multiple sessions claim this workspace: uncertainty,

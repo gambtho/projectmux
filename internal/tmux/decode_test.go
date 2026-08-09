@@ -65,11 +65,12 @@ func TestValueFromOutputRoundTrips(t *testing.T) {
 }
 
 func TestFieldFormatsOrderAndKeys(t *testing.T) {
-	want := [4]string{
+	want := [5]string{
 		"#{session_name}",
 		"#{" + controller.KeyWorkspaceID + "}",
 		"#{" + controller.KeySlug + "}",
 		"#{" + controller.KeyWorktree + "}",
+		"#{" + controller.KeySession + "}",
 	}
 	if fieldFormats != want {
 		t.Errorf("fieldFormats = %v, want %v", fieldFormats, want)

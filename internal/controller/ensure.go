@@ -390,6 +390,7 @@ func (c *Controller) createSession(ctx context.Context, d Desired, windows []Win
 		WorkspaceID: id,
 		Slug:        d.Workspace.Slug,
 		Worktree:    d.Workspace.RepoRoot,
+		Session:     d.Workspace.Session,
 		Env:         d.Config.Environment,
 		Windows:     windows,
 	}
@@ -425,7 +426,7 @@ func (c *Controller) createSession(ctx context.Context, d Desired, windows []Win
 
 // confirmCreation reports why the post-create observation does not
 // confirm the created session, or "" when it does: live, agreeing on
-// all three identity keys, under the allocated name.
+// all four identity keys, under the allocated name.
 func confirmCreation(snap Snapshot, d Desired, allocated string) string {
 	switch snap.Session.State {
 	case SessionUnknown:
@@ -438,7 +439,7 @@ func confirmCreation(snap Snapshot, d Desired, allocated string) string {
 		return "no identity-matched session was observed after creation"
 	}
 	if live.WorkspaceID != d.Workspace.ID || live.Slug != d.Workspace.Slug ||
-		live.Worktree != d.Workspace.RepoRoot {
+		live.Worktree != d.Workspace.RepoRoot || live.Session != d.Workspace.Session {
 		return fmt.Sprintf("session %q carries contradictory identity keys after creation", live.Name)
 	}
 	if live.Name != allocated {

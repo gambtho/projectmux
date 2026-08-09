@@ -145,8 +145,11 @@ type SessionSpec struct {
 	WorkspaceID string
 	Slug        string
 	Worktree    string
-	Env         map[string]string
-	Windows     []WindowSpec
+	// Session is the session component the created session is tagged with,
+	// empty for the repository's default session.
+	Session string
+	Env     map[string]string
+	Windows []WindowSpec
 }
 
 // SessionActuator creates the workspace session. It is the mutating

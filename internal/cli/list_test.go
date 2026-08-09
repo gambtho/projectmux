@@ -128,6 +128,37 @@ func TestListIdentityConflictOnContradictoryKeys(t *testing.T) {
 	}
 }
 
+// TestListReportsAnIdentityConflictOnTheSessionKey is the list-side half of
+// the same rule: what rebuild refuses to adopt, list must not report as a
+// clean live session.
+func TestListReportsAnIdentityConflictOnTheSessionKey(t *testing.T) {
+	s := fake.NewStore()
+	ws := listWorkspace("w1", "proj")
+	ws.Session = "feature-a"
+	if err := s.RegisterWorkspace(ws, "sha256:d", cliTestTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, err := s.AllocateSessionName("w1", cliTestTime); err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	installFakeStore(t, s)
+	installLiveSessions(t, []controller.LiveSession{
+		{Name: "proj--feature-a", WorkspaceID: "w1", Slug: "proj", Worktree: "/w/proj", Session: "feature-b"},
+	}, nil)
+
+	code, stdout, _ := run(t, "list", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	env := decodeList(t, stdout)
+	if len(env.Workspaces) != 1 {
+		t.Fatalf("Workspaces = %+v, want one", env.Workspaces)
+	}
+	if !env.Workspaces[0].IdentityConflict {
+		t.Error("IdentityConflict = false, want true: @dev_session contradicts the record")
+	}
+}
+
 func TestListDuplicateClaimsReportUncertainty(t *testing.T) {
 	installFakeStore(t, seededListStore(t))
 	installLiveSessions(t, []controller.LiveSession{

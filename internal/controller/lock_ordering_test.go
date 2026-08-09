@@ -91,7 +91,7 @@ func TestConcurrentOpensOnOneRepositorySerializeTheContainerStart(t *testing.T) 
 			Sessions: &scriptedSessions{steps: []func(controller.SessionQuery) (controller.SessionObservation, error){
 				liveStep(controller.LiveSession{
 					Name: ws.SessionName, WorkspaceID: ws.ID,
-					Slug: ws.Slug, Worktree: ws.RepoRoot,
+					Slug: ws.Slug, Worktree: ws.RepoRoot, Session: ws.Session,
 				}),
 			}},
 			Containers: &fake.ContainerObserver{

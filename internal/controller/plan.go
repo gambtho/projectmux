@@ -104,15 +104,18 @@ func refusalFor(snap Snapshot) string {
 	return ""
 }
 
-// SessionBelongsTo compares all three load-bearing identity keys
-// (design §7): a session with the right workspace ID but a contradictory
-// slug or repository root is evidence of corruption or collision, not a
+// SessionBelongsTo compares all four load-bearing identity keys (design §7): a
+// session with the right workspace ID but a contradictory slug, repository
+// root or session component is evidence of corruption or collision, not a
 // match. The CLI's status and attach verdicts reuse it so the rendered
-// identity can never drift from planning's. LiveSession.Worktree keeps
-// its name because it mirrors the tmux user option @dev_worktree, which
-// is unchanged; the value it carries is now the repository root.
+// identity can never drift from planning's. LiveSession.Worktree keeps its
+// name because it mirrors the tmux user option @dev_worktree, which is
+// unchanged; the value it carries is now the repository root. A session
+// created before @dev_session existed reports "" for it, which is exactly a
+// default session, so such a session still matches.
 func SessionBelongsTo(s LiveSession, ws resolve.Workspace) bool {
-	return s.WorkspaceID == ws.ID && s.Slug == ws.Slug && s.Worktree == ws.RepoRoot
+	return s.WorkspaceID == ws.ID && s.Slug == ws.Slug &&
+		s.Worktree == ws.RepoRoot && s.Session == ws.Session
 }
 
 func foreignOccupant(snap Snapshot) *LiveSession {

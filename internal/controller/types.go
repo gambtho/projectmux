@@ -5,13 +5,19 @@
 // internal/container, and internal/state.
 package controller
 
-// The tmux session-scoped identity keys, reused verbatim from the Phase 1
-// Bash implementation (design §7). Adoption of live Bash-created sessions
-// depends on these exact spellings.
+// The tmux session-scoped identity keys. The first three are reused verbatim
+// from the Phase 1 Bash implementation (design §7); adoption of live
+// Bash-created sessions depends on those exact spellings. KeySession was
+// added when a repository gained the ability to hold more than one session:
+// without it a live "<slug>--<session>" re-resolves to the default workspace
+// ID and rebuild reports a false identity conflict. An absent key reads as
+// "", which is exactly a default session, so no session created before it
+// existed is invalidated.
 const (
 	KeyWorkspaceID = "@dev_workspace_id"
 	KeySlug        = "@dev_slug"
 	KeyWorktree    = "@dev_worktree"
+	KeySession     = "@dev_session"
 )
 
 // SessionState is tri-state knowledge about the workspace's tmux session.
@@ -36,6 +42,9 @@ type LiveSession struct {
 	WorkspaceID string
 	Slug        string
 	Worktree    string
+	// Session is the session component, empty for the repository's default
+	// session — which is also what an absent @dev_session decodes to.
+	Session string
 }
 
 // SessionQuery asks the observer for the session carrying the workspace's
