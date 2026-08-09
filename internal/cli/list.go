@@ -163,6 +163,7 @@ func buildList(ctx context.Context) (listEnvelope, error) {
 			ID:               s.WorkspaceID,
 			Slug:             s.Slug,
 			RepoRoot:         s.Worktree,
+			Session:          s.Session,
 			SessionState:     "live",
 			LiveSession:      &name,
 			Recorded:         false,
