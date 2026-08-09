@@ -181,16 +181,36 @@ func writeListHuman(w io.Writer, env listEnvelope) error {
 		return err
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "WORKSPACE\tSESSION\tTMUX\tCONTAINER\tNOTES")
+	fmt.Fprintln(tw, "WORKSPACE\tSESSION\tBIND\tTMUX\tCONTAINER\tNOTES")
 	for _, row := range env.Workspaces {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			dashIfEmpty(row.Slug), listSessionCell(row), row.SessionState,
-			listContainerCell(row.Container), listNotesCell(row))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			listWorkspaceCell(row), listSessionCell(row), listBindCell(row),
+			row.SessionState, listContainerCell(row.Container), listNotesCell(row))
 	}
 	if err := tw.Flush(); err != nil {
 		return fmt.Errorf("writing output: %w", err)
 	}
 	return nil
+}
+
+// listWorkspaceCell renders the target a user would type for this row:
+// slug/session for a named session, bare slug for the repository's
+// default one, which carries the empty session component (spec §5).
+func listWorkspaceCell(row listRow) string {
+	if row.Slug != "" && row.Session != "" {
+		return row.Slug + "/" + row.Session
+	}
+	return dashIfEmpty(row.Slug)
+}
+
+// listBindCell renders the stored bind. It is printed verbatim: list
+// resolves nothing, so a bind that no longer exists still shows the
+// value that has to be corrected.
+func listBindCell(row listRow) string {
+	if row.Bind == nil {
+		return "-"
+	}
+	return dashIfEmpty(*row.Bind)
 }
 
 func listSessionCell(row listRow) string {
