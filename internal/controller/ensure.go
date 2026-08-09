@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"path/filepath"
 	"time"
 
@@ -108,7 +109,7 @@ func (c *Controller) Ensure(ctx context.Context, d Desired, intents []WindowInte
 		return EnsureResult{}, err
 	}
 
-	windows, err := renderWindows(intents, d, containerObs, c.ContainerAct)
+	windows, err := renderWindows(intents, d, bindBase{Host: d.Workspace.RepoRoot}, containerObs, c.ContainerAct)
 	if err != nil {
 		c.recordFailure(d.Workspace.ID, opName, err.Error())
 		return EnsureResult{}, err
@@ -226,7 +227,7 @@ func (c *Controller) retryContainerObservation(ctx context.Context, d Desired, s
 // renderWindows turns intents into concrete window specs, now that the
 // binding (if any) exists. Auto follows the container; an explicit
 // container demand without one is a typed error.
-func renderWindows(intents []WindowIntent, d Desired, container *ContainerObservation, act ContainerActuator) ([]WindowSpec, error) {
+func renderWindows(intents []WindowIntent, d Desired, base bindBase, container *ContainerObservation, act ContainerActuator) ([]WindowSpec, error) {
 	specs := make([]WindowSpec, 0, len(intents))
 	for _, in := range intents {
 		inContainer := false
@@ -253,37 +254,34 @@ func renderWindows(intents []WindowIntent, d Desired, container *ContainerObserv
 			for _, p := range in.Panes {
 				// A pane inherits the window's directory unless it sets
 				// its own; inside the container that is the exec relDir,
-				// while the host-side -c stays the repository root,
-				// matching the window itself.
+				// while the host-side -c stays the session's base
+				// directory, matching the window itself.
 				relDir := in.RelDir
 				if p.RelDir != "" {
 					relDir = p.RelDir
 				}
 				panes = append(panes, PaneSpec{
 					Name:    p.Name,
-					Command: act.ExecCommand(binding, p.Command, relDir, d.Config.Environment),
-					Dir:     d.Workspace.RepoRoot,
+					Command: act.ExecCommand(binding, p.Command, base.containerDir(relDir), d.Config.Environment),
+					Dir:     base.Host,
 					Focus:   p.Focus,
 				})
 			}
 			specs = append(specs, WindowSpec{
 				Name:    in.Name,
-				Command: act.ExecCommand(binding, in.Command, in.RelDir, d.Config.Environment),
-				Dir:     d.Workspace.RepoRoot,
+				Command: act.ExecCommand(binding, in.Command, base.containerDir(in.RelDir), d.Config.Environment),
+				Dir:     base.Host,
 				Focus:   in.Focus,
 				Panes:   panes,
 			})
 			continue
 		}
-		dir := d.Workspace.RepoRoot
-		if in.RelDir != "" {
-			dir = filepath.Join(d.Workspace.RepoRoot, in.RelDir)
-		}
+		dir := base.hostDir(in.RelDir)
 		panes := make([]PaneSpec, 0, len(in.Panes))
 		for _, p := range in.Panes {
 			paneDir := dir
 			if p.RelDir != "" {
-				paneDir = filepath.Join(d.Workspace.RepoRoot, p.RelDir)
+				paneDir = base.hostDir(p.RelDir)
 			}
 			panes = append(panes, PaneSpec{
 				Name: p.Name, Command: p.Command, Dir: paneDir, Focus: p.Focus,
@@ -294,6 +292,32 @@ func renderWindows(intents []WindowIntent, d Desired, container *ContainerObserv
 		})
 	}
 	return specs, nil
+}
+
+// bindBase is the session's base directory, computed once per Ensure and
+// threaded to every site that turns a RelDir into a path — rather than
+// prefixing at five call sites, where a sixth would eventually forget.
+// Host is the absolute directory host-side paths join under; Rel is the
+// repository-relative form folded into the container adapter's relDir,
+// since container/exec.go joins that onto the binding's workdir. With no
+// bind, Host is the repository root and Rel is "", so every join is a
+// no-op.
+type bindBase struct {
+	Host string
+	Rel  string
+}
+
+func (b bindBase) hostDir(relDir string) string {
+	if relDir == "" {
+		return b.Host
+	}
+	return filepath.Join(b.Host, relDir)
+}
+
+// containerDir composes with POSIX semantics: both halves are
+// slash-separated container-side paths, never host paths.
+func (b bindBase) containerDir(relDir string) string {
+	return path.Join(b.Rel, relDir)
 }
 
 // wantsContainerWindows reports whether any intent resolves to the
