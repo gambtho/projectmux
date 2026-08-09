@@ -61,6 +61,10 @@ func (g guardedStore) DropRepository(string) error {
 	return g.forbidden("DropRepository")
 }
 
+func (g guardedStore) SetBind(string, *string, time.Time) error {
+	return g.forbidden("SetBind")
+}
+
 func installFakeStore(t *testing.T, s *fake.Store) {
 	t.Helper()
 	orig := openStore

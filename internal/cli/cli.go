@@ -48,6 +48,9 @@ commands:
         attach to the live workspace session; never creates one
   stop [--container] [--force] [--json] [--compact] [<workspace>]
         end the workspace session, and with --container its container
+  bind [--clear] [--json] [--compact] <target> [<path>]
+        record the directory a session opens in, relative to the
+        repository root; creates the session if it does not exist
   autostart [--json] [--compact]
         start containers for registered repositories with autostart: true
   config [--validate] [--json] [--compact] [<workspace>]
@@ -143,6 +146,8 @@ func dispatch(ctx context.Context, args []string, stdout io.Writer) error {
 		return runAttach(ctx, rest, stdout)
 	case "stop":
 		return runStop(ctx, rest, stdout)
+	case "bind":
+		return runBind(ctx, rest, stdout)
 	case "autostart":
 		return runAutostart(ctx, rest, stdout)
 	case "config":
