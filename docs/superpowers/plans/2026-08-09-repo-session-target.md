@@ -750,11 +750,20 @@ the next run already knows how to repair.
   comment)
 - Modify: `internal/controller/ensure.go:388-394` (the `SessionSpec` literal) and
   `427-443` (`confirmCreation` and its doc comment)
+- Modify: `internal/rebuild/classify.go:151` and `200-206`
+  (`identityMismatchReason`) — the identity comparison that does not call
+  `SessionBelongsTo`
+- Modify: `internal/cli/list.go:135` — the other one
 - Test: `internal/tmux/client_test.go:26-51` (`oneSessionScript`) and `53-64`
   (`TestSessionsObservesRawValues`)
+- Test: `internal/tmux/decode_test.go:67-77` (`TestFieldFormatsOrderAndKeys`
+  hardcodes `[4]string`; it must grow with the array or the package will not
+  compile)
 - Test: `internal/tmux/actuate_test.go:29-47` (`TestCreateArgvShape`) and
   `115-138` (`TestCreateArgvEscapesSessionNameInTargets`)
 - Test: `internal/controller/plan_test.go` (new `SessionBelongsTo` tests)
+- Test: `internal/rebuild/classify_test.go` and `internal/cli/list_test.go` (the
+  two identity comparisons that do not route through `SessionBelongsTo`)
 
 No existing test constructs a `controller.LiveSession` or a
 `controller.SessionSpec` positionally — every literal in the repository uses
@@ -1088,11 +1097,34 @@ And update the count in the `Sessions` doc comment at `internal/tmux/tmux.go:70-
 // uncertainty, never as absence (design §9).
 ```
 
+Finally, `internal/tmux/decode_test.go:67-77` asserts the array's exact
+contents against a hardcoded `[4]string`, so the package will not compile
+until it grows too. This is not optional cleanup — it is part of the same
+edit. Replace it:
+
+```go
+func TestFieldFormatsOrderAndKeys(t *testing.T) {
+	want := [5]string{
+		"#{session_name}",
+		"#{" + controller.KeyWorkspaceID + "}",
+		"#{" + controller.KeySlug + "}",
+		"#{" + controller.KeyWorktree + "}",
+		"#{" + controller.KeySession + "}",
+	}
+	if fieldFormats != want {
+		t.Errorf("fieldFormats = %v, want %v", fieldFormats, want)
+	}
+}
+```
+
 - [ ] **Step 9: Run the decode tests to verify they pass**
 
-Run: `go test ./internal/tmux/ -run 'TestSessions' -v`
+Run: `go test ./internal/tmux/ -run 'TestSessions|TestFieldFormats' -v`
 
-Expected: PASS.
+Expected: PASS. `TestFieldFormatsOrderAndKeys` is included deliberately: it
+is the test that proves the array and its assertion moved together, and
+running only `TestSessions` would let a stale `[4]string` fail the build
+one step later instead.
 
 - [ ] **Step 10: Write the failing `createArgv` test**
 
@@ -1270,7 +1302,131 @@ func confirmCreation(snap Snapshot, d Desired, allocated string) string {
 	}
 ```
 
-- [ ] **Step 15: Run the full suite**
+- [ ] **Step 15: Write the failing tests for the two comparisons that bypass `SessionBelongsTo`**
+
+`SessionBelongsTo` is not the only place identity is compared. Two callers
+derive it themselves from the same fields, and both were written when three
+keys were the whole of identity:
+
+- `internal/rebuild/classify.go:151` — `row.Slug != s.Slug || row.RepoRoot != s.Worktree`
+- `internal/cli/list.go:135` — `s.Slug != rec.Slug || s.Worktree != rec.RepoRoot`
+
+Left alone, a live session whose `@dev_session` contradicts its record slips
+past both: `Classify` falls through to the settled or adopt case and writes the
+adoption, and `list` reports `identity_conflict: false` for the same corruption.
+Adding a fourth key to `SessionBelongsTo` and not to these two is worse than not
+adding it at all — the checks would then disagree about what identity means.
+
+Add to `internal/rebuild/classify_test.go`:
+
+```go
+// TestClassifyRejectsASessionWhoseSessionKeyContradictsTheRecord covers the
+// fourth identity key. Slug and worktree agree here; only @dev_session
+// disagrees, which is exactly the case a three-key comparison cannot see.
+func TestClassifyRejectsASessionWhoseSessionKeyContradictsTheRecord(t *testing.T) {
+	s := live("proj--feature-a", "w1", "proj", "/w/proj")
+	s.Session = "feature-b"
+	rows := []state.Record{{
+		ID: "w1", Slug: "proj", RepoRoot: "/w/proj", Session: "feature-a",
+	}}
+
+	plan := Classify([]controller.LiveSession{s}, rows)
+
+	if len(plan.Candidates) != 0 {
+		t.Errorf("Candidates = %+v, want none: a contradiction is not an adoption",
+			plan.Candidates)
+	}
+	if len(plan.Conflicts) != 1 {
+		t.Fatalf("Conflicts = %+v, want exactly one", plan.Conflicts)
+	}
+	if !strings.Contains(plan.Conflicts[0].Reason, "feature-b") {
+		t.Errorf("Reason = %q, want it to name the live session component",
+			plan.Conflicts[0].Reason)
+	}
+}
+```
+
+Add to `internal/cli/list_test.go`:
+
+```go
+// TestListReportsAnIdentityConflictOnTheSessionKey is the list-side half of
+// the same rule: what rebuild refuses to adopt, list must not report as a
+// clean live session.
+func TestListReportsAnIdentityConflictOnTheSessionKey(t *testing.T) {
+	h := newListHarness()
+	h.record(state.Record{
+		ID: "w1", Slug: "proj", RepoRoot: "/w/proj", Session: "feature-a",
+	})
+	h.observe(controller.LiveSession{
+		Name: "proj--feature-a", WorkspaceID: "w1",
+		Slug: "proj", Worktree: "/w/proj", Session: "feature-b",
+	})
+
+	env := h.run(t)
+
+	if len(env.Workspaces) != 1 {
+		t.Fatalf("Workspaces = %+v, want one", env.Workspaces)
+	}
+	if !env.Workspaces[0].IdentityConflict {
+		t.Error("IdentityConflict = false, want true: @dev_session contradicts the record")
+	}
+}
+```
+
+Both test files gain whatever imports these need (`strings` in
+`classify_test.go`). If `newListHarness`, `record`, or `observe` are spelled
+differently in `internal/cli/list_test.go`, follow that file's existing helpers
+rather than introducing these — the assertion is what matters, not the harness.
+
+- [ ] **Step 16: Run the two tests to verify they fail**
+
+Run: `go test ./internal/rebuild/ ./internal/cli/ -run 'SessionKey' -v`
+
+Expected: FAIL. `Classify` reports one adopt candidate and no conflict; `list`
+reports `IdentityConflict = false`. Both because the comparison stops at three
+keys.
+
+- [ ] **Step 17: Compare the fourth key in both callers**
+
+In `internal/rebuild/classify.go:151`:
+
+```go
+		case row != nil && (row.Slug != s.Slug || row.RepoRoot != s.Worktree ||
+			row.Session != s.Session):
+			conflict(s, identityMismatchReason(s, row))
+```
+
+And widen the reason at `internal/rebuild/classify.go:200-206` so it names the
+key that actually disagrees:
+
+```go
+func identityMismatchReason(s controller.LiveSession, row *state.Record) string {
+	return fmt.Sprintf(
+		"session %q carries slug %q, worktree %q, and session component %q, but "+
+			"workspace %s is recorded as slug %q, worktree %q, and session "+
+			"component %q; that contradiction is evidence of corruption or "+
+			"collision rather than a match, so nothing is written.",
+		s.Name, s.Slug, s.Worktree, s.Session,
+		row.ID, row.Slug, row.RepoRoot, row.Session)
+}
+```
+
+In `internal/cli/list.go:135`:
+
+```go
+			row.IdentityConflict = s.Slug != rec.Slug || s.Worktree != rec.RepoRoot ||
+				s.Session != rec.Session
+```
+
+- [ ] **Step 18: Run the two tests to verify they pass**
+
+Run: `go test ./internal/rebuild/ ./internal/cli/ -v`
+
+Expected: PASS, the whole of both packages. Watch for existing
+`identityMismatchReason` assertions in `classify_test.go` that match on the old
+sentence — reword those to the new one rather than reverting the message.
+
+- [ ] **Step 19: Run the full suite**
 
 Run:
 
@@ -1284,10 +1440,10 @@ Expected: everything passes and `gofmt -l` prints nothing. `RetagSession` and it
 tests are untouched by design — see the decision recorded at the head of this
 task.
 
-- [ ] **Step 16: Commit**
+- [ ] **Step 20: Commit**
 
 ```bash
-git add internal/controller internal/tmux
+git add internal/controller internal/tmux internal/rebuild internal/cli
 git commit -m "feat(identity): record the session component as @dev_session
 
 Sessions carried three tmux user options and none of them recorded which
@@ -1303,21 +1459,46 @@ confirmCreation. tmux reports an absent user option as \"\", which is
 exactly what a default session's component is, so every session created by
 v0.5.0 keeps matching: no stored ID changes and nobody is forced to rebuild.
 
+rebuild.Classify and list derive identity themselves rather than calling
+SessionBelongsTo, so both compare the fourth key too. Widening one and not
+the others would leave three checks disagreeing about what identity is,
+which is worse than the three-key comparison they replace.
+
 RetagSession deliberately still writes two keys. It exists only to retag
 sessions created before repositories became the unit of a workspace, all of
 which are default sessions whose @dev_session is \"\" — writing it would be
 a no-op costing a third subprocess and disturbing the crash-safe ordering
 that keeps @dev_worktree ahead of the ID."
 ```
+
+---
 ### Task 4: `internal/bindpath` — the path rules a bind obeys
 
-A bind is stored relative to the repository root and must lie inside the
+A bind is *stored* relative to the repository root and must lie inside the
 repository after `EvalSymlinks`. Containment is re-checked at **every use**, not
 only at bind time (spec §4): a stored in-repository path can later be replaced
 by a symlink pointing outside, after which host window creation would follow the
 escaped path through `filepath.Join`. Two packages need these rules —
 `internal/target` for the bind lookup and `internal/controller` for window
 rendering — so they live in one package rather than being duplicated.
+
+The stored form and the *argument* form are deliberately different, and the
+difference is the one thing to get right in this task:
+
+- `Resolve(repoRoot, rel)` reads the **stored** form, which is always
+  repository-relative. That is what makes a bind survive the repository moving.
+- `Rel(repoRoot, path)` converts a **user-typed** argument to the stored form,
+  and takes a relative argument against the process's working directory — the
+  ordinary CLI convention, and the only rule under which `--cwd .` and shell
+  tab-completion mean what the user typed.
+
+Those two rules disagree for the same string, so `Rel` carries a hint: when an
+argument escapes the repository but `repoRoot/<argument>` *would* have resolved
+inside it, the error names that directory. This is the copy-from-`list` case —
+`list`'s `BIND` column shows the stored, repository-relative form, and pasting it
+back into `bind` from anywhere but the repository root would otherwise fail with
+a bare containment error that explains nothing. Spec §4 records the rule; the
+hint is what keeps it from being a footgun.
 
 **Files:**
 - Create: `internal/bindpath/bindpath.go`
@@ -1330,7 +1511,7 @@ rendering — so they live in one package rather than being duplicated.
   func Resolve(repoRoot, rel string) (string, error)
   func Rel(repoRoot, path string) (string, error)
   func Contains(dir, path string) bool
-  type EscapedError struct{ Rel, Resolved, RepoRoot string }
+  type EscapedError struct{ Rel, Resolved, RepoRoot, Suggestion string }
   func (e *EscapedError) Error() string
   ```
 
@@ -1345,6 +1526,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -1494,6 +1676,76 @@ func TestRelRejectsOutsideAndMissingDirectories(t *testing.T) {
 		t.Fatal("Rel of a directory that does not exist succeeded, want an error")
 	}
 }
+
+// TestRelTakesARelativeArgumentAgainstTheWorkingDirectory pins the rule that
+// separates Rel from Resolve. Resolve reads the *stored* form, which is
+// repository-relative; Rel reads a *typed* argument, which follows the ordinary
+// CLI convention. Without this, `--cwd .` would bind the repository root
+// instead of the directory the user is standing in.
+func TestRelTakesARelativeArgumentAgainstTheWorkingDirectory(t *testing.T) {
+	repo := root(t)
+	mkdir(t, filepath.Join(repo, "services", "api"))
+	t.Chdir(filepath.Join(repo, "services"))
+
+	for _, tc := range []struct{ arg, want string }{
+		{"api", "services/api"},
+		{".", "services"},
+	} {
+		got, err := Rel(repo, tc.arg)
+		if err != nil {
+			t.Fatalf("Rel(%q): %v", tc.arg, err)
+		}
+		if got != tc.want {
+			t.Errorf("Rel(%q) = %q, want %q", tc.arg, got, tc.want)
+		}
+	}
+}
+
+// TestRelSuggestsTheRepositoryRelativeReadingWhenAnArgumentEscapes covers the
+// copy-from-list case: `list` prints the stored, repository-relative form, and
+// pasting it back from outside the repository resolves somewhere else entirely.
+// The bare containment error would not explain that, so Rel names the directory
+// the repository-relative reading would have found.
+func TestRelSuggestsTheRepositoryRelativeReadingWhenAnArgumentEscapes(t *testing.T) {
+	base := root(t)
+	repo := mkdir(t, filepath.Join(base, "repo"))
+	want := mkdir(t, filepath.Join(repo, "services", "api"))
+	mkdir(t, filepath.Join(base, "services", "api")) // the cwd-relative reading
+	t.Chdir(base)
+
+	_, err := Rel(repo, "services/api")
+	var escaped *EscapedError
+	if !errors.As(err, &escaped) {
+		t.Fatalf("Rel = %v (%T), want *EscapedError", err, err)
+	}
+	if escaped.Suggestion != want {
+		t.Errorf("Suggestion = %q, want %q", escaped.Suggestion, want)
+	}
+	if !strings.Contains(err.Error(), "did you mean") {
+		t.Errorf("Error() = %q, want it to carry the suggestion", err)
+	}
+}
+
+// TestRelOmitsTheSuggestionWhenThereIsNothingToSuggest keeps the hint honest:
+// an argument that escapes and has no in-repository reading gets the plain
+// error, not a pointer at a directory that does not exist.
+func TestRelOmitsTheSuggestionWhenThereIsNothingToSuggest(t *testing.T) {
+	base := root(t)
+	repo := mkdir(t, filepath.Join(base, "repo"))
+	outside := mkdir(t, filepath.Join(base, "outside"))
+
+	_, err := Rel(repo, outside)
+	var escaped *EscapedError
+	if !errors.As(err, &escaped) {
+		t.Fatalf("Rel = %v (%T), want *EscapedError", err, err)
+	}
+	if escaped.Suggestion != "" {
+		t.Errorf("Suggestion = %q, want empty", escaped.Suggestion)
+	}
+	if strings.Contains(err.Error(), "did you mean") {
+		t.Errorf("Error() = %q, want no suggestion", err)
+	}
+}
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -1531,16 +1783,26 @@ import (
 
 // EscapedError reports a bind that no longer canonicalizes to a path inside
 // the repository.
+//
+// Suggestion is set only by Rel, and only when the argument escaped under the
+// working-directory reading but would have resolved inside the repository under
+// the repository-relative one. It is the directory that reading would have
+// found. Empty means there is nothing to suggest.
 type EscapedError struct {
-	Rel      string
-	Resolved string
-	RepoRoot string
+	Rel        string
+	Resolved   string
+	RepoRoot   string
+	Suggestion string
 }
 
 func (e *EscapedError) Error() string {
-	return fmt.Sprintf(
+	msg := fmt.Sprintf(
 		"the bind %q resolves to %s, which is outside the repository at %s",
 		e.Rel, e.Resolved, e.RepoRoot)
+	if e.Suggestion != "" {
+		msg += fmt.Sprintf("; did you mean %s?", e.Suggestion)
+	}
+	return msg
 }
 
 // Resolve canonicalizes a repository-relative bind against repoRoot and
@@ -1578,14 +1840,21 @@ func Resolve(repoRoot, rel string) (string, error) {
 	return resolved, nil
 }
 
-// Rel converts an absolute or relative path to the repository-relative,
-// slash-separated form that is stored. It canonicalizes both sides and
-// requires the result to lie inside the repository, and requires the
-// directory to exist.
+// Rel converts a user-typed path argument to the repository-relative,
+// slash-separated form that is stored. It canonicalizes both sides, requires
+// the directory to exist, and requires the result to lie inside the repository.
 //
-// A relative path is taken against the process's working directory, which is
-// what filepath.Abs does; callers that mean something else pass an absolute
-// path.
+// A relative argument is taken against the process's working directory, which
+// is what filepath.Abs does and what every other CLI does with a path argument.
+// That is deliberately *not* how the stored form is read — Resolve takes that
+// against the repository root — because only this rule makes `--cwd .` and
+// shell tab-completion mean what the user typed (design §4).
+//
+// The two rules disagree for the same string, so when an argument escapes the
+// repository this way, Rel checks whether the repository-relative reading would
+// have landed inside and, if so, names that directory in the error. `list`
+// prints the stored form, so pasting it back from elsewhere is the expected
+// mistake, not an exotic one.
 func Rel(repoRoot, path string) (string, error) {
 	root, err := canonicalize(repoRoot)
 	if err != nil {
@@ -1596,13 +1865,33 @@ func Rel(repoRoot, path string) (string, error) {
 		return "", err
 	}
 	if !Contains(root, resolved) {
-		return "", &EscapedError{Rel: path, Resolved: resolved, RepoRoot: root}
+		return "", &EscapedError{
+			Rel:        path,
+			Resolved:   resolved,
+			RepoRoot:   root,
+			Suggestion: suggest(root, path),
+		}
 	}
 	rel, err := filepath.Rel(root, resolved)
 	if err != nil {
 		return "", fmt.Errorf("relating %s to %s: %w", resolved, root, err)
 	}
 	return filepath.ToSlash(rel), nil
+}
+
+// suggest returns the directory the repository-relative reading of arg would
+// have found, or "" when that reading is unavailable or lands nowhere. It
+// reuses Resolve so the suggestion is only ever a path a bind could actually
+// hold — a suggestion the very next command would reject is worse than none.
+func suggest(root, arg string) string {
+	if filepath.IsAbs(arg) {
+		return ""
+	}
+	resolved, err := Resolve(root, arg)
+	if err != nil {
+		return ""
+	}
+	return resolved
 }
 
 // Contains reports whether path lies at or below dir, comparing path
@@ -1648,7 +1937,10 @@ func canonicalize(path string) (string, error) {
 
 Run: `go test ./internal/bindpath/ -v`
 
-Expected: PASS, every subtest of `TestContainsComparesPathComponents` included.
+Expected: PASS, every subtest of `TestContainsComparesPathComponents` included,
+and both working-directory tests
+(`TestRelTakesARelativeArgumentAgainstTheWorkingDirectory`,
+`TestRelSuggestsTheRepositoryRelativeReadingWhenAnArgumentEscapes`) among them.
 
 Then `go build ./...` — expected: no output.
 
@@ -1661,7 +1953,12 @@ git commit -m "feat(bindpath): the containment rules a session bind obeys
 A bind is stored relative to the repository root and must resolve inside
 it after EvalSymlinks. Containment is component-wise, not a string
 prefix, so a bind of services/api does not claim services/apixyz, and it
-is re-checked on every read rather than only at bind time."
+is re-checked on every read rather than only at bind time.
+
+A typed argument is read against the working directory, so --cwd . means
+the directory the user is standing in. Because that disagrees with the
+stored form, an argument that escapes carries a did-you-mean naming the
+directory the repository-relative reading would have found."
 ```
 
 ---
@@ -3468,12 +3765,6 @@ exactly that, so that a workspace whose worktree has moved can still be
 checked — and it never reaches resolution (`config.go:91-97` returns before
 `buildEnvelope`). It keeps taking a raw name.
 
-`target.MalformedError` has to reach exit 2. `exitCode` (`cli.go:168-190`) is
-the one function that maps a typed error to an exit code, and it gains a case.
-Without it a malformed target would fall to the `default` and exit 1, which is
-the opposite of the error-quality argument in spec §1: the restrictive grammar
-exists to turn a confusing exit 4 into an accurate exit 2.
-
 `open --cwd <path>` is the other half. It does **not** bind and then open. The
 bind is a field on `Desired`, so `Ensure` persists it in the same critical
 section that registers the workspace, before the observation the windows are
@@ -3486,8 +3777,7 @@ persists when the open carrying it fails afterwards.
 **Files:**
 - Modify: `internal/cli/wiring.go` (new `selectWorkspace`, appended after the
   observation seams at `36-50`)
-- Modify: `internal/cli/cli.go:168-190` (`exitCode`), and `cli.go:44` (the
-  `open` line in `usage`)
+- Modify: `internal/cli/cli.go:44` (the `open` line in `usage`)
 - Modify: `internal/cli/open.go:19-28` (`openHelp`), `52-78` (flags and the
   `ensureWorkspace` call), `121-171` (`ensureWorkspace`), `34-43`
   (`openEnvelope`), `80-103` (the JSON block), `105-114` (the human block)
@@ -3501,7 +3791,6 @@ persists when the open carrying it fails afterwards.
   `statusEnvelopeFrom`)
 - Modify: `internal/cli/config.go:114-136` (`buildEnvelope`'s resolution) and
   `3-17` (imports: `os` and `resolve` become unused)
-- Test: `internal/cli/exit_test.go` (a `target.MalformedError` case)
 - Test: `internal/cli/target_test.go` (new: the grammar through every command)
 - Test: `internal/cli/open_test.go` (new `--cwd` tests)
 
@@ -3526,88 +3815,13 @@ persists when the open carrying it fails afterwards.
 
 ---
 
-- [ ] **Step 1: Write the failing exit-code test**
+`target.MalformedError`'s exit-2 mapping is **not** in this task. Task 2 ships
+`exitCode`'s new case and `TestMalformedTargetExitsTwo` in the same commit that
+defines the error type, because an error type whose exit code lands one task
+later is an error type that is briefly wrong. This task consumes that mapping;
+it does not repeat it.
 
-Append to `internal/cli/exit_test.go`, and add
-`"github.com/gambtho/projectmux/internal/target"` to its imports:
-
-```go
-// A malformed target is a caller mistake, not an unknown workspace: spec
-// §1 makes the grammar restrictive precisely so `projectmux
-// docs/commands.md` exits 2 naming the grammar rather than exiting 4
-// claiming there is no such workspace.
-func TestMalformedTargetExitsTwo(t *testing.T) {
-	err := &target.MalformedError{Arg: "docs/commands.md", Reason: "invalid session component"}
-
-	if got := exitCode(err); got != ExitUsage {
-		t.Errorf("exitCode = %d, want %d", got, ExitUsage)
-	}
-}
-```
-
-- [ ] **Step 2: Run the test to verify it fails**
-
-Run: `go test ./internal/cli/ -run TestMalformedTargetExitsTwo`
-
-Expected: FAIL — `exitCode = 1, want 2`. The error falls through `exitCode`'s
-`default` branch.
-
-- [ ] **Step 3: Extend `exitCode`**
-
-In `internal/cli/cli.go`, add `"github.com/gambtho/projectmux/internal/target"`
-to the imports and replace `exitCode`'s variable block and first case:
-
-```go
-func exitCode(err error) int {
-	var (
-		usageErr   *usageError
-		malformed  *target.MalformedError
-		ambiguous  *resolve.AmbiguousError
-		unknown    *resolve.UnknownWorkspaceError
-		invalidCfg *config.InvalidConfigError
-		refusal    *controller.RefusalError
-	)
-	switch {
-	case errors.As(err, &usageErr):
-		return ExitUsage
-	// A malformed target is the same class of mistake as a bad flag, and
-	// exits the same way. It is a separate case rather than a usageError
-	// because the grammar's diagnostic belongs to internal/target, which
-	// must not import the CLI's error types.
-	case errors.As(err, &malformed):
-		return ExitUsage
-	case errors.As(err, &ambiguous):
-		return ExitAmbiguous
-	case errors.As(err, &unknown):
-		return ExitUnknownWorkspace
-	case errors.As(err, &invalidCfg):
-		return ExitInvalidConfig
-	case errors.As(err, &refusal):
-		return ExitRefused
-	default:
-		return ExitError
-	}
-}
-```
-
-- [ ] **Step 4: Run the test to verify it passes**
-
-Run: `go test ./internal/cli/ -run TestMalformedTargetExitsTwo`
-
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add internal/cli/cli.go internal/cli/exit_test.go
-git commit -m "feat(cli): a malformed target exits 2
-
-The restrictive session grammar exists so that a mistyped path exits 2
-naming the grammar instead of exiting 4 claiming there is no such
-workspace. That only holds once exitCode classifies the error."
-```
-
-- [ ] **Step 6: Write the failing test for the seam across every command**
+- [ ] **Step 1: Write the failing test for the seam across every command**
 
 Create `internal/cli/target_test.go`:
 
@@ -3686,7 +3900,7 @@ func decodeJSON(t *testing.T, stdout string, into any) {
 
 with `"encoding/json"` added to the file's imports.
 
-- [ ] **Step 7: Run the test to verify it fails**
+- [ ] **Step 2: Run the test to verify it fails**
 
 Run: `go test ./internal/cli/ -run 'TestMalformedTargetIsAUsageErrorForEveryCommand|TestNamedSessionTargetResolvesToThatSession'`
 
@@ -3695,7 +3909,7 @@ reaches `resolve.Resolve` as a literal name and comes back
 `UnknownWorkspaceError` — and the named-session case reports `session = ""`,
 because nothing splits the argument on `/`.
 
-- [ ] **Step 8: Add `selectWorkspace` and route all five commands**
+- [ ] **Step 3: Add `selectWorkspace` and route all five commands**
 
 Append to `internal/cli/wiring.go`, adding `"os"` (already imported) and
 `"github.com/gambtho/projectmux/internal/resolve"` and
@@ -3778,7 +3992,7 @@ Drop the now-unused `"os"` import from all five files, and the now-unused
 `status.go` keeps it (`rebuildReasons`, `staleSessions`,
 `staleRepositoryRoots`, `statusEnvelopeFrom`).
 
-- [ ] **Step 9: Run the test to verify it passes**
+- [ ] **Step 4: Run the test to verify it passes**
 
 Run: `go test ./internal/cli/ -run 'TestMalformedTargetIsAUsageErrorForEveryCommand|TestNamedSessionTargetResolvesToThatSession'`
 
@@ -3787,7 +4001,7 @@ Expected: PASS, all seven subtests.
 Then `go test ./internal/cli/` — expected: PASS. Then `gofmt -l internal/cli`
 — expected: no output.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add internal/cli/wiring.go internal/cli/open.go internal/cli/attach.go \
@@ -3803,7 +4017,7 @@ commands. config --validate keeps its raw name: its argument is a
 configuration file, not a target."
 ```
 
-- [ ] **Step 11: Write the failing `--cwd` tests**
+- [ ] **Step 6: Write the failing `--cwd` tests**
 
 Append to `internal/cli/open_test.go`, adding `"path/filepath"` to its imports:
 
@@ -3893,7 +4107,7 @@ func TestOpenCwdOutsideTheRepositoryExitsTwo(t *testing.T) {
 }
 ```
 
-- [ ] **Step 12: Run the tests to verify they fail**
+- [ ] **Step 7: Run the tests to verify they fail**
 
 Run: `go test ./internal/cli/ -run TestOpenCwd`
 
@@ -3901,7 +4115,7 @@ Expected: FAIL — `flag provided but not defined: -cwd`, so all three exit 2 an
 the first two fail on the exit code (the third passes for the wrong reason,
 which the next step corrects).
 
-- [ ] **Step 13: Implement `--cwd`**
+- [ ] **Step 8: Implement `--cwd`**
 
 In `internal/cli/open.go`, add `"github.com/gambtho/projectmux/internal/bindpath"`
 to the imports, extend `openHelp`:
@@ -4008,7 +4222,7 @@ Update `usage` in `internal/cli/cli.go` to match:
         observe, ensure, record, and attach the workspace session
 ```
 
-- [ ] **Step 14: Run the tests to verify they pass**
+- [ ] **Step 9: Run the tests to verify they pass**
 
 Run: `go test ./internal/cli/ -run TestOpenCwd`
 
@@ -4017,7 +4231,7 @@ Expected: PASS, all three.
 Then `go test -race ./...` — expected: PASS. Then `gofmt -l internal/cli` —
 expected: no output.
 
-- [ ] **Step 15: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add internal/cli/open.go internal/cli/cli.go internal/cli/open_test.go
@@ -4729,6 +4943,8 @@ stopping the *named* session's container while the *default* sibling is live.
   - `func resolve.Resolve(name, session string, roots []string, cwd string) (resolve.Workspace, error)` (Task 1)
   - `controller.LiveSession.Session string` (Task 3)
   - `func controller.SessionBelongsTo(s controller.LiveSession, ws resolve.Workspace) bool` (Task 3, now four keys)
+  - `state.Record.Bind *string` (Task 7)
+  - `func (*fake.Store) SetBind(workspaceID string, bind *string, now time.Time) error` (Task 8)
 - Produces:
   - `rebuild.Resolver.Resolve(repoRoot, session string) (resolve.Workspace, error)`
 
@@ -4934,48 +5150,59 @@ onto its repository's default workspace, so rebuild reported a false
 identity conflict instead of recovering it."
 ```
 
-- [ ] **Step 6: Write the failing unresolvable-bind test**
+- [ ] **Step 6: Write the unresolvable-bind pinning test**
 
 A named session's stored row can carry a `bind` that no longer resolves —
 deleted, or replaced by a symlink pointing outside the repository. `rebuild`
 must still recover the session and must leave the bind alone: dropping a
 column the operator set, on a pass whose whole purpose is recovery, destroys
 state instead of restoring it. `rebuild` deliberately never writes `bind`
-(`RegisterWorkspace` upserts slug, repository root, proposed session, and
-desired digest only), so this test pins that as a property rather than an
+(`RegisterWorkspace` upserts slug, repository root, session, proposed session,
+and desired digest only), so this test pins that as a property rather than an
 accident.
+
+**This is the one test in the plan with no red phase, and that is deliberate.**
+It is a pinning test: the property already holds the moment `state.Record.Bind`
+exists, because no rebuild code path names the column. Manufacturing a red
+phase here would mean writing a wrong implementation first, which for a
+"nothing touches this" property means deliberately breaking rebuild. Step 7
+therefore expects PASS on the first run, and its value is entirely in the
+future run where someone adds a `RegisterWorkspace` call to the adopt path and
+this test stops them.
+
+The bind must be *real stored state*, not an overlay on reads: a wrapper store
+that synthesizes `rec.Bind` on every `Workspace` call would return the bind
+whatever the write paths did, so it could not fail. `fake.Store.SetBind` (Task
+8) is the writer, so the row is seeded exactly the way `bind` seeds it.
+
+The candidate is `CaseAdopt`, not `CaseRegister`: a register candidate has no
+row, so it has no bind to preserve and the test would be about nothing.
 
 Add to `internal/rebuild/apply_test.go`:
 
 ```go
-// bindingStore overlays a bind on the record the fake store returns, so
-// the unresolvable-bind case can be built without a bind writer. It
-// records nothing extra: what matters is that no rebuild write path
-// clears the column.
-type bindingStore struct {
-	*fake.Store
-	bind string
-}
-
-func (s *bindingStore) Workspace(id string) (state.Record, error) {
-	rec, err := s.Store.Workspace(id)
-	if err != nil {
-		return rec, err
-	}
-	rec.Bind = &s.bind
-	return rec, nil
-}
-
-func TestApplyReportsANamedSessionWhoseBindNoLongerResolves(t *testing.T) {
+func TestApplyKeepsANamedSessionsBindWhenItNoLongerResolves(t *testing.T) {
 	ws := namedWorkspace()
 	sess := namedLiveSession(ws, "projectmux--feature-a")
 	h := newHarness()
 	h.know(ws, "sha256:desired")
-	h.store = &bindingStore{Store: h.fakeStore, bind: "services/gone"}
+
+	// seedRecorded's fixture carries no session component, which now reads
+	// as an identity mismatch against a named session (Task 3), so the row
+	// is seeded here with one.
+	recorded := workspace(ws.ID, ws.Slug, ws.RepoRoot, "recorded-proposed")
+	recorded.Session = ws.Session
+	if err := h.fakeStore.RegisterWorkspace(recorded, "sha256:recorded", testTime); err != nil {
+		t.Fatalf("seeding the recorded row: %v", err)
+	}
+	bind := "services/gone"
+	if err := h.fakeStore.SetBind(ws.ID, &bind, testTime); err != nil {
+		t.Fatalf("SetBind: %v", err)
+	}
 	h.observer.results = []controller.SessionObservation{observing(sess)}
 
 	report := h.applier().Apply(context.Background(), Plan{
-		Candidates: []Candidate{{Case: CaseRegister, Session: sess}},
+		Candidates: []Candidate{{Case: CaseAdopt, Session: sess}},
 	})
 
 	if len(report.Conflicts) != 0 {
@@ -4996,21 +5223,28 @@ func TestApplyReportsANamedSessionWhoseBindNoLongerResolves(t *testing.T) {
 }
 ```
 
-- [ ] **Step 7: Run it and see the failure**
+- [ ] **Step 7: Run it and confirm it passes unchanged**
 
 ```bash
-go test ./internal/rebuild/ -run TestApplyReportsANamedSessionWhoseBindNoLongerResolves
+go test ./internal/rebuild/ -run TestApplyKeepsANamedSessionsBindWhenItNoLongerResolves -v
 ```
 
-Expected: the package does not build —
-`internal/rebuild/apply_test.go: rec.Bind undefined (type state.Record has no field or method Bind)` until the `bind` column task lands, and once it does, a
-failure here would mean a rebuild write path cleared the column.
+Expected: PASS, with no production edit.
 
-- [ ] **Step 8: Confirm no production change is needed, then run it green**
+If it fails to compile on `rec.Bind` or `SetBind`, Tasks 7 and 8 have not
+landed and this task is being run out of order — stop and check the sequence
+rather than adding the column here.
 
-`applyCandidate` never reads or writes `bind`, and `RegisterWorkspace`'s
-conflict branch overwrites slug, repository root, proposed session, and
-desired digest only, so the column survives untouched. No production edit.
+If it fails on the `Bind` assertion, a rebuild write path is clearing the
+column, which is the regression this test exists to catch: fix that path, do
+not relax the assertion.
+
+- [ ] **Step 8: Run the whole package**
+
+`applyCandidate` never reads or writes `bind`, and the adopt branch calls
+`AdoptSessionName` alone — never `RegisterWorkspace`, whose conflict branch
+overwrites slug, repository root, session, proposed session, and desired
+digest. The column survives untouched.
 
 ```bash
 go test ./internal/rebuild/
@@ -5024,8 +5258,9 @@ Expected: PASS, all tests in the package.
 git add internal/rebuild/apply_test.go
 git commit -m "test(rebuild): pin that an unresolvable bind is kept, not dropped
 
-A named session whose bind no longer resolves is still recovered, and
-its bind column survives the run."
+Adoption calls AdoptSessionName alone, so the bind column survives. This
+is a pinning test with no red phase: it guards the property against a
+future write path rather than driving one."
 ```
 
 - [ ] **Step 10: Write the failing sibling-refusal test**
@@ -5882,7 +6117,230 @@ If `gofmt` changed anything above, commit it:
 git add -A
 git commit -m "style: gofmt"
 ```
-### Task 12: User-facing documentation for targets, binds, and per-session worktrees
+### Task 12: Decision record for the bound directory and the session grammar
+
+Decision 0001 exists because the design doc and plan behind #31 were removed, leaving the *why* nowhere. The same is about to happen here. Two choices in this slice are departures from the design of record and will read as arbitrary to anyone who finds them in the code later: the bind is the session's base directory rather than the directory the session opens in, and the session grammar is stricter than tmux's own. Both are cheap to reverse by accident and expensive to rediscover, so they get a record.
+
+There is exactly one existing decision record, `0001-repository-scoped-workspaces.md`, so the next number is 0002 and the template is whatever 0001 does: an `# N. Title` heading, a `**Status:** Accepted — implemented in #NN` line, a short paragraph saying what the record is for and where the behavior itself is documented, then `## Context`, `## Decision`, `## Consequences worth knowing` (paragraphs with bolded lead-in sentences, not bullets), and `## Deferred`.
+
+**Files:**
+- Create: `docs/decisions/0002-session-targets-and-the-bound-directory.md`
+- Test: none. Step 4 is the verification gate.
+
+**Interfaces:**
+- Consumes: the behavior built in tasks 1-11, read from the code rather than from the docs — the session grammar in `internal/target/target.go`, and the base-directory composition `controller.Ensure` performs via `bindpath.Resolve`. `docs/commands.md` is *not* an input here: it still describes a one-session-per-repository world until Task 13 rewrites it.
+- Produces: the fixed reasoning behind two decisions, and the link target `docs/decisions/0002-session-targets-and-the-bound-directory.md` that Task 13 Step 15 writes into decision 0001's `## Deferred` section. Task 13's prose must agree with this record's `## Decision` section; where they differ, this record is the one that was checked against the code.
+
+- [ ] **Step 1: Write the decision record**
+
+Create `docs/decisions/0002-session-targets-and-the-bound-directory.md` with exactly this content:
+
+```markdown
+# 2. Session targets and the bound directory
+
+**Status:** Accepted — implemented in #37 and #38.
+
+Records the two places where session targets and `bind` depart from the design
+of record, now that the spec and plan they came from have been removed. The
+behavior itself is documented in `docs/commands.md` and `docs/worktrees.md`;
+this is only the *why*, for the decisions a reader would otherwise have to
+reconstruct from the code. It closes the "Deferred" section of
+[decision 0001](0001-repository-scoped-workspaces.md).
+
+## Context
+
+Decision 0001 made the repository the unit and deferred two things: the
+`<repo>/<session>` target form (#37) and a `bind` command giving a session its
+own working directory (#38).
+
+They shipped together because neither is worth much alone. #37 on its own
+gives a repository two sessions that open the same directory and load the same
+configuration — the same workspace twice under two names. The directory is
+most of what a second session is *for*. So the two arrived as one slice, and
+as one slice they raised two questions the design of record either answered
+differently or did not answer at all.
+
+## Decision
+
+**A bind is the session's base directory.** Issue #38 words it as "the
+directory the session opens in", which puts it in the same slot as a window's
+`cwd` and leaves the two settings fighting over that slot. Instead the bind
+prefixes whichever `cwd` wins: a session bound to `services/api` with a window
+`cwd: cmd` opens `services/api/cmd`.
+
+**The session component of a target is stricter than tmux's own naming
+rules.** It must match `^[A-Za-z0-9][A-Za-z0-9_-]*$` and be at most 64
+characters, which rejects names tmux itself would accept.
+
+## Consequences worth knowing
+
+**The base is computed once rather than prefixed at five sites.** A relative
+directory becomes a real path in exactly one file, `controller/ensure.go`, but
+at five places within it: the container pane command, the container window
+command, the host window directory, the host pane directory, and the host-side
+`-c` for container windows and panes. All five need the base, so it is derived
+once — the repository root joined with the bind — and threaded through. Joining
+at each site would work today and leave a sixth site free to forget it.
+
+**A pane's directory replaces the window's rather than nesting inside it.**
+That is pre-existing behavior, and it means the bind has to prefix whichever of
+the two wins, not the window's alone. It is written down because "prefix the
+window directory" is the natural reading and the wrong one.
+
+**Containers needed no adapter change.** The container path already joins the
+binding's workdir with the relative directory, so the same prefix that produces
+`services/api/cmd` on the host produces `/workspaces/<repo>/services/api/cmd`
+inside the container, with nothing added to the adapter.
+
+**Containment is re-checked at every use, not only at bind time.** A bind is
+validated when it is set — relative to the repository root, existing, inside
+the repository once symlinks are resolved — but a path that passed can later be
+replaced by a symlink pointing out of the repository, after which window
+creation would follow it out. Every read re-canonicalizes and re-verifies, and
+a bind that no longer resolves inside the repository is treated as missing.
+`open` then falls back to the repository root and says so, because failing to
+open a session over a stale directory is a worse outcome than opening it one
+level up.
+
+**A relative bind argument is read against the current directory, not against
+the repository root.** It is *stored* relative to the repository root, which is
+what makes the row portable, and that asymmetry is deliberate rather than an
+oversight. `bind services/api` typed from inside `services/` would mean
+`services/services/api` under a root-relative rule — the shell just completed
+that path against the current directory, so reading it any other way makes tab
+completion produce a wrong answer. The cost is the reverse case: the same
+command typed from `services/` when `services/api` exists only at the root now
+resolves to a path that is not there. That is why the "outside the repository"
+error carries a `did you mean` line naming the root-relative interpretation
+whenever it would have resolved. An error that names the path the user probably
+meant is cheaper than a rule that silently picks the wrong one of two readings.
+
+**A restrictive grammar converts a confusing error into an accurate one.**
+`projectmux <target>` with no command is shorthand for `open`, so a mistyped
+path — a tab-completed filename, `docs/commands.md` — reaches target parsing.
+Under tmux's own rules it would parse, resolve as a repository name, and be
+reported as an *unknown workspace*, exit 4, sending the reader to look for a
+repository they never meant to name. Under this grammar it is a malformed
+target, exit 2, and the message names the grammar. The cost is that a session
+cannot be called `my.session` or `_wip`. That was judged cheaper than the
+misdirected error, and the grammar can be widened later without invalidating
+any name it accepts today.
+
+**`/` is the separator because a git repository directory cannot contain
+one.** No name that was a valid target before this change became ambiguous
+after it.
+
+**A fourth identity key was required, and neither issue named it.** Sessions
+carried the workspace ID, the slug, and the repository root; none of them
+recorded the session component, which is harmless while a repository has one
+session and a correctness bug the moment it has two. `rebuild` re-derives a
+live session's identity before comparing it, and with no session component
+recorded a named session re-derives to the *default* workspace ID and is
+reported as an identity conflict. A fourth key records it. An absent key reads
+as the empty string, which is exactly what a `v0.5.0` default session is — so
+no stored ID changed and nobody is forced to rebuild.
+
+**`OutputSchemaVersion` stays 2.** `bind` is an added field on `list`,
+`status`, and `open`, and `BIND` is an added column. Nothing was renamed,
+retyped, or removed, so a consumer written against version 2 keeps working —
+unlike the version 1 break decision 0001 records.
+
+## Deferred
+
+**Per-session configuration.** Configuration is still loaded by slug, so every
+session on a repository reads the same `workspaces/<slug>.yaml`. Two sessions
+bound to different directories run the same windows, each rooted at its own
+base, which is the useful case; a session that needs *different* windows has
+no way to say so yet.
+
+**A `doctor` check for dangling binds.** `open` already reports an unusable
+bind and falls back to the repository root, so a stale bind is visible at the
+moment it matters rather than only in a diagnosis.
+```
+
+- [ ] **Step 2: Correct the issue numbers in the status line**
+
+The status line above reads `**Status:** Accepted — implemented in #37 and #38.`, following decision 0001's form (`Accepted — implemented in #31, merged 2026-08-08.`). Confirm against the branch which PR actually carries this work and rewrite that one line to match — a single PR closing both issues becomes `Accepted — implemented in #NN, merged YYYY-MM-DD.`:
+
+```bash
+git log --oneline main..HEAD | tail -5
+gh pr view --json number,title,mergedAt 2>/dev/null || echo "no PR yet; use the issue numbers"
+```
+
+If the PR is not open yet, leave `#37 and #38` — they are the real issue numbers from the spec and are accurate either way.
+
+- [ ] **Step 3: Check the record against decision 0001's shape**
+
+Read `docs/decisions/0001-repository-scoped-workspaces.md` and the new file side by side and confirm four things: the heading is `# N. Title` with the number matching the filename; the status line uses the same `**Status:** Accepted — …` vocabulary; the section headings are `## Context`, `## Decision`, `## Consequences worth knowing`, `## Deferred` in that order; and the consequences are paragraphs with bolded lead-in sentences rather than a bullet list.
+
+```bash
+grep -n '^#' docs/decisions/0001-repository-scoped-workspaces.md
+grep -n '^#' docs/decisions/0002-session-targets-and-the-bound-directory.md
+```
+
+Expected: the same sequence of heading levels and section names in both files, with `0002` adding no section `0001` does not have.
+
+- [ ] **Step 4: Verify the record matches the shipped behavior and reads on its own**
+
+This task now runs *before* the user-facing documentation, so the record is
+written against the code, not against `docs/commands.md` — which still says a
+repository holds exactly one session until Task 13 rewrites it. Two concrete
+checks:
+
+1. **The record does not describe something else.** Each claim is checked
+   against the implementation, which is the ground truth here. Confirm the
+   grammar the record states is the one the parser enforces, and that the
+   composition rule it states is the one `controller.Ensure` performs:
+
+```bash
+grep -n 'A-Za-z0-9' internal/target/target.go docs/decisions/0002-session-targets-and-the-bound-directory.md
+grep -rn 'bindpath.Resolve' internal/controller/
+```
+
+Expected: the same character class and 64-character limit in both the parser
+and the record, and the base-directory composition happening in
+`controller.Ensure` before either actuator sees a path — the record's claim, in
+code.
+
+   The record also claims a relative bind argument is read against the current
+   directory while the *stored* form is root-relative. That asymmetry is the one
+   claim in the record a reader is most likely to assume is a typo, so check
+   both halves against `internal/bindpath`:
+
+```bash
+grep -n 'filepath.Abs\|filepath.Rel' internal/bindpath/bindpath.go
+grep -n 'Suggestion' internal/bindpath/bindpath.go
+```
+
+Expected: `filepath.Abs` resolving the argument (cwd-relative, per Task 4) and
+`filepath.Rel` against the repository root producing the stored form, plus the
+`Suggestion` field the record's `did you mean` sentence describes. If
+`Suggestion` is absent, Task 4 shipped without the smart error and the record
+overstates what the command does — fix the code, not the record.
+
+2. **The reciprocal link resolves.** 0002 links back to 0001; the forward link
+   from 0001 to 0002 is Task 13's Step 15 and does not exist yet.
+
+```bash
+grep -n '0001-' docs/decisions/0002-session-targets-and-the-bound-directory.md
+ls docs/decisions/
+```
+
+Expected: `0001-repository-scoped-workspaces.md` present in both. Do **not**
+grep 0001 for a `0002-` link at this point: it is legitimately absent until
+Task 13, and Task 13's Step 16 is where that direction is gated.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add docs/decisions/0002-session-targets-and-the-bound-directory.md
+git commit -m "docs: record the bind-as-base-directory and session-grammar decisions"
+```
+
+
+---
+
+### Task 13: User-facing documentation for targets, binds, and per-session worktrees
 
 Nothing in `docs/` knows that a repository can hold more than one session. `docs/commands.md` calls the argument `<workspace>`, states that every tree of a project shares "one workspace, one session, and one container", and documents no `bind`. `docs/worktrees.md` tells the reader that opening a worktree as its own session is "Not supported". Decision 0001 still lists the `<repo>/<session>` form and per-session working directories as deferred. This task brings all three in line with what tasks 1-11 built. It is documentation only — no Go file is touched.
 
@@ -5896,7 +6354,7 @@ The transcripts in `docs/commands.md` are held to a stated contract, stated in i
 
 **Interfaces:**
 - Consumes: the user-visible surface built in tasks 1-11 and documented verbatim here — `projectmux bind [--clear] [--json] [--compact] <target> [<path>]`; `projectmux open [--no-attach] [--cwd <path>] [--json] [--compact] [<target>]`; the target grammar `<repo>` or `<repo>/<session>` with the session component matching `^[A-Za-z0-9][A-Za-z0-9_-]*$` and at most 64 characters; the tmux session names `<slug>` and `<slug>--<session>`; the `BIND` column on `list`; the `bind` field in the JSON envelopes of `list`, `status`, and `open`; `OutputSchemaVersion` still 2; and exit codes 2 (malformed target or invalid bind path), 3 (ambiguous), 4 (unknown repository).
-- Produces: the documented behavior that decision 0002 (Task 13) cites as the record of *why* — specifically the bind-as-base-directory composition rule documented under `## projectmux bind`, and the grammar-rejection wording under `## Conventions`. Task 13's `## Decision` section is only correct if the prose written here matches it.
+- Produces: the user-facing prose that decision 0002 (Task 12, already written) points at. Task 12's `## Decision` section was checked against the code, so where this task's prose and that record disagree, the record wins and the prose here is what changes.
 
 - [ ] **Step 1: Update the table of contents in `docs/commands.md`**
 
@@ -6453,7 +6911,11 @@ still what a repository's default session uses, so no ID recorded by #31
 changed and no existing session was invalidated.
 ```
 
-The link target is created by Task 13. If Task 13 has not run yet, the link is dangling until it does; Task 13's final step re-checks it.
+The link target already exists: Task 12 created
+`docs/decisions/0002-session-targets-and-the-bound-directory.md` before this
+task ran, which is why Step 16's `ls` of that path is a gate this task can
+actually satisfy. If it is missing, Task 12 has not run and this task is out of
+order.
 
 - [ ] **Step 16: Verify the documentation against the real binary**
 
@@ -6505,183 +6967,3 @@ git add docs/commands.md docs/worktrees.md docs/decisions/0001-repository-scoped
 git commit -m "docs: close decision 0001's deferred items and verify transcripts"
 ```
 
----
-
-### Task 13: Decision record for the bound directory and the session grammar
-
-Decision 0001 exists because the design doc and plan behind #31 were removed, leaving the *why* nowhere. The same is about to happen here. Two choices in this slice are departures from the design of record and will read as arbitrary to anyone who finds them in the code later: the bind is the session's base directory rather than the directory the session opens in, and the session grammar is stricter than tmux's own. Both are cheap to reverse by accident and expensive to rediscover, so they get a record.
-
-There is exactly one existing decision record, `0001-repository-scoped-workspaces.md`, so the next number is 0002 and the template is whatever 0001 does: an `# N. Title` heading, a `**Status:** Accepted — implemented in #NN` line, a short paragraph saying what the record is for and where the behavior itself is documented, then `## Context`, `## Decision`, `## Consequences worth knowing` (paragraphs with bolded lead-in sentences, not bullets), and `## Deferred`.
-
-**Files:**
-- Create: `docs/decisions/0002-session-targets-and-the-bound-directory.md`
-- Test: none. Step 4 is the verification gate.
-
-**Interfaces:**
-- Consumes: the behavior documented by Task 12 — the bind-as-base-directory composition rule under `## projectmux bind` in `docs/commands.md`, and the grammar and its rejection wording under `## Conventions`. The record explains those two; if Task 12's prose says something different, the record is wrong.
-- Produces: the fixed reasoning behind two decisions, and the link target `docs/decisions/0002-session-targets-and-the-bound-directory.md` that Task 12 Step 15 writes into decision 0001's `## Deferred` section.
-
-- [ ] **Step 1: Write the decision record**
-
-Create `docs/decisions/0002-session-targets-and-the-bound-directory.md` with exactly this content:
-
-```markdown
-# 2. Session targets and the bound directory
-
-**Status:** Accepted — implemented in #37 and #38.
-
-Records the two places where session targets and `bind` depart from the design
-of record, now that the spec and plan they came from have been removed. The
-behavior itself is documented in `docs/commands.md` and `docs/worktrees.md`;
-this is only the *why*, for the decisions a reader would otherwise have to
-reconstruct from the code. It closes the "Deferred" section of
-[decision 0001](0001-repository-scoped-workspaces.md).
-
-## Context
-
-Decision 0001 made the repository the unit and deferred two things: the
-`<repo>/<session>` target form (#37) and a `bind` command giving a session its
-own working directory (#38).
-
-They shipped together because neither is worth much alone. #37 on its own
-gives a repository two sessions that open the same directory and load the same
-configuration — the same workspace twice under two names. The directory is
-most of what a second session is *for*. So the two arrived as one slice, and
-as one slice they raised two questions the design of record either answered
-differently or did not answer at all.
-
-## Decision
-
-**A bind is the session's base directory.** Issue #38 words it as "the
-directory the session opens in", which puts it in the same slot as a window's
-`cwd` and leaves the two settings fighting over that slot. Instead the bind
-prefixes whichever `cwd` wins: a session bound to `services/api` with a window
-`cwd: cmd` opens `services/api/cmd`.
-
-**The session component of a target is stricter than tmux's own naming
-rules.** It must match `^[A-Za-z0-9][A-Za-z0-9_-]*$` and be at most 64
-characters, which rejects names tmux itself would accept.
-
-## Consequences worth knowing
-
-**The base is computed once rather than prefixed at five sites.** A relative
-directory becomes a real path in exactly one file, `controller/ensure.go`, but
-at five places within it: the container pane command, the container window
-command, the host window directory, the host pane directory, and the host-side
-`-c` for container windows and panes. All five need the base, so it is derived
-once — the repository root joined with the bind — and threaded through. Joining
-at each site would work today and leave a sixth site free to forget it.
-
-**A pane's directory replaces the window's rather than nesting inside it.**
-That is pre-existing behavior, and it means the bind has to prefix whichever of
-the two wins, not the window's alone. It is written down because "prefix the
-window directory" is the natural reading and the wrong one.
-
-**Containers needed no adapter change.** The container path already joins the
-binding's workdir with the relative directory, so the same prefix that produces
-`services/api/cmd` on the host produces `/workspaces/<repo>/services/api/cmd`
-inside the container, with nothing added to the adapter.
-
-**Containment is re-checked at every use, not only at bind time.** A bind is
-validated when it is set — relative to the repository root, existing, inside
-the repository once symlinks are resolved — but a path that passed can later be
-replaced by a symlink pointing out of the repository, after which window
-creation would follow it out. Every read re-canonicalizes and re-verifies, and
-a bind that no longer resolves inside the repository is treated as missing.
-`open` then falls back to the repository root and says so, because failing to
-open a session over a stale directory is a worse outcome than opening it one
-level up.
-
-**A restrictive grammar converts a confusing error into an accurate one.**
-`projectmux <target>` with no command is shorthand for `open`, so a mistyped
-path — a tab-completed filename, `docs/commands.md` — reaches target parsing.
-Under tmux's own rules it would parse, resolve as a repository name, and be
-reported as an *unknown workspace*, exit 4, sending the reader to look for a
-repository they never meant to name. Under this grammar it is a malformed
-target, exit 2, and the message names the grammar. The cost is that a session
-cannot be called `my.session` or `_wip`. That was judged cheaper than the
-misdirected error, and the grammar can be widened later without invalidating
-any name it accepts today.
-
-**`/` is the separator because a git repository directory cannot contain
-one.** No name that was a valid target before this change became ambiguous
-after it.
-
-**A fourth identity key was required, and neither issue named it.** Sessions
-carried the workspace ID, the slug, and the repository root; none of them
-recorded the session component, which is harmless while a repository has one
-session and a correctness bug the moment it has two. `rebuild` re-derives a
-live session's identity before comparing it, and with no session component
-recorded a named session re-derives to the *default* workspace ID and is
-reported as an identity conflict. A fourth key records it. An absent key reads
-as the empty string, which is exactly what a `v0.5.0` default session is — so
-no stored ID changed and nobody is forced to rebuild.
-
-**`OutputSchemaVersion` stays 2.** `bind` is an added field on `list`,
-`status`, and `open`, and `BIND` is an added column. Nothing was renamed,
-retyped, or removed, so a consumer written against version 2 keeps working —
-unlike the version 1 break decision 0001 records.
-
-## Deferred
-
-**Per-session configuration.** Configuration is still loaded by slug, so every
-session on a repository reads the same `workspaces/<slug>.yaml`. Two sessions
-bound to different directories run the same windows, each rooted at its own
-base, which is the useful case; a session that needs *different* windows has
-no way to say so yet.
-
-**A `doctor` check for dangling binds.** `open` already reports an unusable
-bind and falls back to the repository root, so a stale bind is visible at the
-moment it matters rather than only in a diagnosis.
-```
-
-- [ ] **Step 2: Correct the issue numbers in the status line**
-
-The status line above reads `**Status:** Accepted — implemented in #37 and #38.`, following decision 0001's form (`Accepted — implemented in #31, merged 2026-08-08.`). Confirm against the branch which PR actually carries this work and rewrite that one line to match — a single PR closing both issues becomes `Accepted — implemented in #NN, merged YYYY-MM-DD.`:
-
-```bash
-git log --oneline main..HEAD | tail -5
-gh pr view --json number,title,mergedAt 2>/dev/null || echo "no PR yet; use the issue numbers"
-```
-
-If the PR is not open yet, leave `#37 and #38` — they are the real issue numbers from the spec and are accurate either way.
-
-- [ ] **Step 3: Check the record against decision 0001's shape**
-
-Read `docs/decisions/0001-repository-scoped-workspaces.md` and the new file side by side and confirm four things: the heading is `# N. Title` with the number matching the filename; the status line uses the same `**Status:** Accepted — …` vocabulary; the section headings are `## Context`, `## Decision`, `## Consequences worth knowing`, `## Deferred` in that order; and the consequences are paragraphs with bolded lead-in sentences rather than a bullet list.
-
-```bash
-grep -n '^#' docs/decisions/0001-repository-scoped-workspaces.md
-grep -n '^#' docs/decisions/0002-session-targets-and-the-bound-directory.md
-```
-
-Expected: the same sequence of heading levels and section names in both files, with `0002` adding no section `0001` does not have.
-
-- [ ] **Step 4: Verify the record matches the shipped behavior and the cross-links resolve**
-
-Two concrete checks:
-
-1. **The record does not describe something else.** For each claim, confirm the corresponding sentence in `docs/commands.md` written in Task 12 says the same thing — specifically that `## projectmux bind` states the bind is the base directory and that a window's `cwd` composes on top of it, and that `## Conventions` states the grammar as `^[A-Za-z0-9][A-Za-z0-9_-]*$` with a 64-character limit and says a rejected target is exit 2:
-
-```bash
-grep -n 'base directory' docs/commands.md docs/decisions/0002-session-targets-and-the-bound-directory.md
-grep -n 'A-Za-z0-9' docs/commands.md docs/decisions/0002-session-targets-and-the-bound-directory.md
-```
-
-Expected: both files present in both result sets, stating the same rule.
-
-2. **Decision 0001's link resolves.** Task 12 Step 15 added a link to this file; confirm the filename matches exactly:
-
-```bash
-grep -n '0002-' docs/decisions/0001-repository-scoped-workspaces.md
-ls docs/decisions/
-```
-
-Expected: the path in the link is exactly `0002-session-targets-and-the-bound-directory.md`, and the reciprocal link from 0002 back to `0001-repository-scoped-workspaces.md` resolves too.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add docs/decisions/0002-session-targets-and-the-bound-directory.md
-git commit -m "docs: record the bind-as-base-directory and session-grammar decisions"
-```

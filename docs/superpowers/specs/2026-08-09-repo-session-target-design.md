@@ -160,10 +160,25 @@ drifting as that file evolves.
 Migration 0003 adds a nullable `bind TEXT` to the workspaces table. It is
 additive and does not require a rebuild.
 
-A bind is interpreted relative to the repository root, must lie inside the
+A bind is *stored* relative to the repository root, must lie inside the
 repository after `EvalSymlinks`, and must exist at bind time — otherwise exit 2.
 Storing it relative rather than absolute keeps it stable if the repository
 moves.
+
+A relative path *typed as an argument* to `bind` or `open --cwd` is read against
+the process's working directory, not the repository root. That is the ordinary
+CLI convention, and it is the only rule under which `open --cwd .` binds the
+directory the user is standing in and shell tab-completion produces a usable
+argument; the repository-relative reading would silently bind the repository
+root instead.
+
+The two readings disagree for the same string, and `list` prints the stored,
+repository-relative form — so pasting a `BIND` column value back into `bind`
+from anywhere but the repository root is an expected mistake. When an argument
+escapes the repository under the working-directory reading but *would* have
+resolved inside it under the repository-relative one, the exit-2 message names
+that directory: `"services/api" resolves to … , which is outside the repository
+at …; did you mean /home/u/work/repo/services/api?`
 
 Containment is re-checked at **every use**, not only at bind time. A stored
 in-repository path can later be replaced by a symlink pointing outside the
