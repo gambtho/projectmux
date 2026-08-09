@@ -42,7 +42,7 @@ usage: projectmux <command> [options]
 commands:
   <workspace>
         shorthand for: open <workspace>
-  open [--no-attach] [--json] [--compact] [<workspace>]
+  open [--no-attach] [--cwd <path>] [--json] [--compact] [<target>]
         observe, ensure, record, and attach the workspace session
   attach [--json] [--compact] [<workspace>]
         attach to the live workspace session; never creates one

@@ -9,19 +9,23 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/gambtho/projectmux/internal/bindpath"
 	"github.com/gambtho/projectmux/internal/config"
 	"github.com/gambtho/projectmux/internal/controller"
 	"github.com/gambtho/projectmux/internal/resolve"
 	"github.com/gambtho/projectmux/internal/state"
 )
 
-const openHelp = `usage: projectmux open [--no-attach] [--json] [--compact] [<workspace>]
+const openHelp = `usage: projectmux open [--no-attach] [--cwd <path>] [--json] [--compact] [<target>]
 
 Observe, ensure, record, and attach the workspace session, resolved
-either from <workspace> or from the current directory. The bare form
-"projectmux <workspace>" is shorthand for this command (no flags).
+either from <target> or from the current directory. <target> is <repo> or
+<repo>/<session>. The bare form "projectmux <target>" is shorthand for
+this command (no flags).
 
   --no-attach  ensure and record without attaching the terminal
+  --cwd <path> record <path> as the session's base directory before
+               opening, in the same locked operation
   --json       emit the versioned JSON envelope (implies --no-attach)
   --compact    emit the JSON on a single line (implies --json)
 `
@@ -37,6 +41,7 @@ type openEnvelope struct {
 	Action                string             `json:"action"`
 	Session               string             `json:"session"`
 	Drifted               bool               `json:"drifted"`
+	BindWarning           string             `json:"bind_warning,omitempty"`
 	Container             *openContainerInfo `json:"container,omitempty"`
 	ContainerWindowsStale bool               `json:"container_windows_stale,omitempty"`
 }
@@ -51,6 +56,7 @@ type openContainerInfo struct {
 func runOpen(ctx context.Context, args []string, stdout io.Writer) error {
 	fs := newFlagSet("open")
 	noAttach := fs.Bool("no-attach", false, "ensure without attaching the terminal")
+	cwdFlag := fs.String("cwd", "", "record the session's base directory")
 	asJSON := fs.Bool("json", false, "emit the versioned JSON envelope")
 	compact := fs.Bool("compact", false, "emit the JSON on a single line")
 
@@ -71,7 +77,7 @@ func runOpen(ctx context.Context, args []string, stdout io.Writer) error {
 		*noAttach = true
 	}
 
-	res, ws, err := ensureWorkspace(ctx, fs.Arg(0))
+	res, ws, err := ensureWorkspace(ctx, fs.Arg(0), *cwdFlag)
 	if err != nil {
 		return err
 	}
@@ -89,6 +95,7 @@ func runOpen(ctx context.Context, args []string, stdout io.Writer) error {
 			Action:                string(res.Action),
 			Session:               res.Session,
 			Drifted:               res.Drifted,
+			BindWarning:           res.BindWarning,
 			ContainerWindowsStale: res.ContainerWindowsStale,
 		}
 		if res.Container != nil {
@@ -102,6 +109,9 @@ func runOpen(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 
 	fmt.Fprintf(stdout, "session %s (%s)\n", res.Session, res.Action)
+	if res.BindWarning != "" {
+		fmt.Fprintln(stdout, res.BindWarning)
+	}
 	if res.Container != nil {
 		fmt.Fprintf(stdout, "container %s (%s)\n", res.Container.ContainerID, res.Container.Health)
 	}
@@ -119,7 +129,13 @@ func runOpen(ctx context.Context, args []string, stdout io.Writer) error {
 
 // ensureWorkspace runs the read-only pipeline, derives the actuator
 // windows, and calls the controller's Ensure under the workspace lock.
-func ensureWorkspace(ctx context.Context, name string) (controller.EnsureResult, resolve.Workspace, error) {
+//
+// cwdFlag carries --cwd into Desired.Bind rather than binding first and
+// opening second. Ensure persists it in the same critical section that
+// registers the workspace, before the observation the windows are planned
+// from: one lock acquisition, and no window built from a bind that changed
+// underneath it (spec §4). An empty cwdFlag leaves any stored bind alone.
+func ensureWorkspace(ctx context.Context, name, cwdFlag string) (controller.EnsureResult, resolve.Workspace, error) {
 	var zero controller.EnsureResult
 	root, err := config.Root()
 	if err != nil {
@@ -132,6 +148,16 @@ func ensureWorkspace(ctx context.Context, name string) (controller.EnsureResult,
 	ws, err := selectWorkspace(name, defaults.Layer.RepositoryRoots)
 	if err != nil {
 		return zero, resolve.Workspace{}, err
+	}
+	var bind *string
+	if cwdFlag != "" {
+		rel, relErr := bindpath.Rel(ws.RepoRoot, cwdFlag)
+		if relErr != nil {
+			// A path that does not exist or leaves the repository is a
+			// caller mistake, not a failure: spec §6 puts it at exit 2.
+			return zero, ws, usagef("open: --cwd: %s", relErr)
+		}
+		bind = &rel
 	}
 	effective, err := config.Load(root, defaults, ws.Slug)
 	if err != nil {
@@ -161,6 +187,7 @@ func ensureWorkspace(ctx context.Context, name string) (controller.EnsureResult,
 		Workspace: ws,
 		Config:    effective.Config,
 		Digest:    effective.Digest,
+		Bind:      bind,
 	}, intents, filepath.Join(stateRoot, "locks"), lockTimeout)
 	return res, ws, err
 }
