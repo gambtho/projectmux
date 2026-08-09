@@ -17,6 +17,7 @@ import (
 	"github.com/gambtho/projectmux/internal/config"
 	"github.com/gambtho/projectmux/internal/controller"
 	"github.com/gambtho/projectmux/internal/resolve"
+	"github.com/gambtho/projectmux/internal/target"
 )
 
 // Exit codes. Automation branches on them, so they should not churn without a
@@ -168,6 +169,7 @@ func dispatch(ctx context.Context, args []string, stdout io.Writer) error {
 func exitCode(err error) int {
 	var (
 		usageErr   *usageError
+		malformed  *target.MalformedError
 		ambiguous  *resolve.AmbiguousError
 		unknown    *resolve.UnknownWorkspaceError
 		invalidCfg *config.InvalidConfigError
@@ -175,6 +177,11 @@ func exitCode(err error) int {
 	)
 	switch {
 	case errors.As(err, &usageErr):
+		return ExitUsage
+	// A malformed target is bad usage, not an unknown workspace: the
+	// restrictive grammar exists so a mistyped path reports what a target is
+	// rather than which roots were searched for it.
+	case errors.As(err, &malformed):
 		return ExitUsage
 	case errors.As(err, &ambiguous):
 		return ExitAmbiguous
