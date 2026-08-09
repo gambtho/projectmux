@@ -322,6 +322,10 @@ func (s *Store) copyRecordLocked(rec *state.Record) state.Record {
 		v := *rec.AppliedDigest
 		out.AppliedDigest = &v
 	}
+	if rec.Bind != nil {
+		v := *rec.Bind
+		out.Bind = &v
+	}
 	out.Container = nil
 	if b, ok := s.containers[rec.RepositoryID]; ok {
 		c := *b
@@ -452,6 +456,25 @@ func (s *Store) AdoptSessionName(workspaceID, name string, now time.Time) error 
 	}
 	adopted := name
 	rec.ActualSession = &adopted
+	rec.UpdatedAt = now
+	return nil
+}
+
+// SetBind mirrors the real store: an unknown workspace is ErrNotFound, and
+// the stored pointer is a copy, so a caller keeping its own pointer cannot
+// mutate the record afterwards.
+func (s *Store) SetBind(workspaceID string, bind *string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.records[workspaceID]
+	if !ok {
+		return fmt.Errorf("workspace %s: %w", workspaceID, state.ErrNotFound)
+	}
+	rec.Bind = nil
+	if bind != nil {
+		v := *bind
+		rec.Bind = &v
+	}
 	rec.UpdatedAt = now
 	return nil
 }

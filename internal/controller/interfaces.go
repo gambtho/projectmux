@@ -31,6 +31,12 @@ type Store interface {
 	RegisterWorkspace(ws resolve.Workspace, desiredDigest string, now time.Time) error
 	AllocateSessionName(workspaceID string, now time.Time) (string, error)
 	AdoptSessionName(workspaceID, name string, now time.Time) error
+	// SetBind records the session's bind — a repository-relative
+	// directory, or nil to clear it. It is separate from
+	// RegisterWorkspace because registration is fill-only with respect
+	// to the bind: rebuild re-registers a workspace and must not drop
+	// one (spec §4).
+	SetBind(workspaceID string, bind *string, now time.Time) error
 	RecordContainerObservation(repositoryID string, obs state.ContainerObservation, now time.Time) error
 	RecordOperation(workspaceID string, op state.Operation, now time.Time) error
 	CommitReconciliation(workspaceID string, r state.ReconciliationResult, now time.Time) error
