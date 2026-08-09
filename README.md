@@ -399,6 +399,8 @@ rather than each getting its own.
 No. Managing project source and creating worktrees are explicit non-goals.
 ProjectMux opens repositories that already exist; `git` and your existing tools
 remain responsible for creating and removing their worktrees.
+[Working with git worktrees](docs/worktrees.md) covers where to put them and
+how to reach them inside the container.
 
 ### Which operating systems are supported?
 
@@ -409,6 +411,8 @@ currently tested.
 
 - [Command reference](docs/commands.md) — every command, its flags, its output,
   and its exit codes.
+- [Working with git worktrees](docs/worktrees.md) — where to put them, why they
+  share one session and one container, and how to reach them inside it.
 - [Design](docs/design.md) — the full design document: architecture, identity
   and state, reconciliation, and the decisions behind them.
 
