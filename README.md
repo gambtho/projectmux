@@ -133,7 +133,7 @@ Releases publish static `linux/amd64` and `linux/arm64` binaries with a
 `SHA256SUMS` file. Download both, verify, then install:
 
 ```sh
-VERSION=v0.5.0
+VERSION=v0.6.0
 ARCH=amd64   # or arm64
 BASE=https://github.com/gambtho/projectmux/releases/download/$VERSION
 
@@ -151,6 +151,24 @@ file covering both. Verification is the point of publishing checksums — if
 `sha256sum` does not print `OK`, do not install the binary.
 
 While the version is below 1.0, releases are marked as prereleases.
+
+### Upgrading from `v0.5.0`
+
+Install the new binary. Nothing else is required.
+
+`v0.6.0` adds a nullable `bind` column, moving the stored schema to version 3.
+`ALTER TABLE ADD COLUMN` rewrites no rows, so the migration runs on first open
+and every existing session stays bound to nothing — its previous behavior. No
+workspace ID changes: a session recorded before `v0.6.0` carries no session
+component, which reads back as the empty string, and that is exactly what a
+default session is. `rebuild` is not needed.
+
+An older binary refuses a database this migration has touched, reporting the
+schema version it found and the one it supports. Downgrading therefore means
+restoring a copy of the database taken before the upgrade.
+
+`--json` consumers need no changes: `schema_version` stays `2`, because `bind`
+is an added field on existing objects and is omitted when unset.
 
 ### Upgrading from `v0.4.0`
 
