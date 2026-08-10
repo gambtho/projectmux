@@ -361,7 +361,9 @@ operation. It is not [`bind`](#projectmux-bind) followed by `open`: the bind
 is persisted inside the one critical section this command already holds, before
 the observation the windows are planned from, so the windows this call creates
 are the first ones built from the new bind and no second command can slip into
-the gap. The path is relative to the repository root and must exist inside it.
+the gap. A relative path is read against the current directory, the same as
+[`bind`](#projectmux-bind)'s, and must resolve to somewhere inside the
+repository that exists.
 
 ```text
 $ projectmux open --no-attach --cwd .worktrees/feature-a slabledger/feature-a
@@ -476,11 +478,12 @@ The same composition happens under the container mount, giving
 `/workspaces/slabledger/services/api/cmd`, so a bind works the same for
 `location: container` windows as for host ones.
 
-`<path>` defaults to the current directory when omitted, is interpreted
-relative to the repository root, and is stored relative so that moving the
-repository does not invalidate it. It must exist when you bind it, and it must
-lie inside the repository once symlinks are resolved. Anything else is a usage
-error:
+`<path>` defaults to the current directory when omitted. A relative path you
+type is read against the current directory, the way your shell's tab completion
+just wrote it, and is *stored* relative to the repository root so that moving
+the repository does not invalidate it. It must exist when you bind it, and it
+must lie inside the repository once symlinks are resolved. Anything else is a
+usage error:
 
 ```text
 $ projectmux bind slabledger/feature-a ../elsewhere

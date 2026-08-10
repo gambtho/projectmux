@@ -55,8 +55,8 @@ binding's workdir with the relative directory, so the same prefix that produces
 inside the container, with nothing added to the adapter.
 
 **Containment is re-checked at every use, not only at bind time.** A bind is
-validated when it is set — relative to the repository root, existing, inside
-the repository once symlinks are resolved — but a path that passed can later be
+validated when it is set — existing, inside the repository once symlinks are
+resolved — but a path that passed can later be
 replaced by a symlink pointing out of the repository, after which window
 creation would follow it out. Every read re-canonicalizes and re-verifies, and
 a bind that no longer resolves inside the repository is treated as missing.
