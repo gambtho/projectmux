@@ -75,7 +75,7 @@ func (a *Applier) collapseRows(ctx context.Context, res *MigrationResult) {
 	}
 
 	for _, repo := range repos {
-		ws, resolveErr := a.Resolver.Resolve(repo.RepoRoot)
+		ws, resolveErr := a.Resolver.Resolve(repo.RepoRoot, "")
 		if resolveErr != nil {
 			if a.Resolver.Exists(repo.RepoRoot) {
 				// The directory is there and git would not answer for it.
@@ -218,7 +218,7 @@ func (a *Applier) retagSessions(ctx context.Context, res *MigrationResult) {
 		if sess.WorkspaceID == "" {
 			continue
 		}
-		ws, err := a.Resolver.Resolve(sess.Worktree)
+		ws, err := a.Resolver.Resolve(sess.Worktree, sess.Session)
 		if err != nil {
 			// A session whose tree is gone is not this pass's problem:
 			// applyCandidate already reports it, with the reason an

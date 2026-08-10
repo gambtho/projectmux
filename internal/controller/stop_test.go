@@ -236,16 +236,26 @@ func TestStopKillsByObservedSessionID(t *testing.T) {
 	}
 }
 
-// registerSibling adds a second session on the same repository. The
-// resolver cannot produce one yet, but the schema permits it and rebuild
-// creates them, so the store is where a sibling comes from.
-func registerSibling(t *testing.T, r *ensureRig) {
-	t.Helper()
-	sib := resolve.Workspace{
+// siblingWorkspace is the second session on repository r1. The resolver
+// can produce one as of the target grammar, and the schema has permitted
+// it since #31.
+func siblingWorkspace() resolve.Workspace {
+	return resolve.Workspace{
 		ID: "w2", RepositoryID: "r1", Slug: "slab", RepoRoot: "/w/slab",
 		Session: "feature-a", SessionName: "slab--feature-a",
 	}
-	if err := r.store.RegisterWorkspace(sib, "sha256:x", ensureTime); err != nil {
+}
+
+func siblingDesired() controller.Desired {
+	d := ensureDesired()
+	d.Workspace = siblingWorkspace()
+	return d
+}
+
+// registerSibling adds a second session on the same repository.
+func registerSibling(t *testing.T, r *ensureRig) {
+	t.Helper()
+	if err := r.store.RegisterWorkspace(siblingWorkspace(), "sha256:x", ensureTime); err != nil {
 		t.Fatalf("register sibling: %v", err)
 	}
 	if _, err := r.store.AllocateSessionName("w2", ensureTime); err != nil {
@@ -256,7 +266,7 @@ func registerSibling(t *testing.T, r *ensureRig) {
 func siblingSession() controller.LiveSession {
 	return controller.LiveSession{
 		ID: "$9", Name: "slab--feature-a", WorkspaceID: "w2",
-		Slug: "slab", Worktree: "/w/slab",
+		Slug: "slab", Worktree: "/w/slab", Session: "feature-a",
 	}
 }
 
@@ -311,6 +321,39 @@ func TestStopContainerForceOverridesLiveSibling(t *testing.T) {
 	}
 	if len(r.actuatorC.Stopped) != 1 || r.actuatorC.Stopped[0] != "cid-1" {
 		t.Errorf("Stopped = %v", r.actuatorC.Stopped)
+	}
+}
+
+// TestStopContainerRefusesTheNamedSessionWhileTheDefaultIsLive is the
+// direction that only became reachable with named sessions: the target
+// is the named workspace and the live sibling is the repository's
+// default. liveSiblings skips by record ID, so nothing about the two
+// sharing a slug may let the target observe itself.
+func TestStopContainerRefusesTheNamedSessionWhileTheDefaultIsLive(t *testing.T) {
+	r := newEnsureRig(t, liveStep(ownSession("slab"))).withContainerActuator()
+	registerStopFixture(t, r)
+	registerSibling(t, r)
+	bindStopContainer(t, r)
+
+	_, err := r.stop(t, siblingDesired(), controller.StopOptions{Container: true})
+	var refusal *controller.RefusalError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("err = %v, want *RefusalError", err)
+	}
+	if !strings.Contains(refusal.Reason, "slab") ||
+		!strings.Contains(refusal.Reason, "use --force") {
+		t.Errorf("reason = %q, want the live default sibling named and --force offered",
+			refusal.Reason)
+	}
+	if len(r.sessions.queries) != 1 || r.sessions.queries[0].WorkspaceID != "w1" {
+		t.Errorf("queries = %+v, want one query naming the default workspace w1",
+			r.sessions.queries)
+	}
+	if len(r.actuator.Killed) != 0 {
+		t.Errorf("Killed = %v; a refusal must destroy nothing", r.actuator.Killed)
+	}
+	if len(r.actuatorC.Stopped) != 0 {
+		t.Errorf("Stopped = %v; the shared container was killed anyway", r.actuatorC.Stopped)
 	}
 }
 

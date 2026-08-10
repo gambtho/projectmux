@@ -41,10 +41,20 @@ type migrateResolver struct {
 	exists map[string]bool
 }
 
-func (r migrateResolver) Resolve(repoRoot string) (resolve.Workspace, error) {
+func (r migrateResolver) Resolve(repoRoot, session string) (resolve.Workspace, error) {
 	ws, ok := r.roots[repoRoot]
 	if !ok {
 		return resolve.Workspace{}, errors.New("no such directory: " + repoRoot)
+	}
+	// Mirrors resolve.WithSession in shape, on the fixtures' readable IDs
+	// rather than real digests: the session component is part of the
+	// identity, so a fake that answered the same workspace whatever the
+	// session would let a regression that drops the session somewhere in
+	// this pass go unnoticed here.
+	ws.Session = session
+	if session != "" {
+		ws.ID += "--" + session
+		ws.SessionName += "--" + session
 	}
 	return ws, nil
 }
@@ -468,6 +478,58 @@ func TestMigrateLeavesACorrectSessionUntouched(t *testing.T) {
 	}
 	if len(res.Migrated) != 0 {
 		t.Errorf("migrated = %+v, want nothing reported", res.Migrated)
+	}
+}
+
+// Two sessions of one repository differ only in their session component,
+// so retagging must give them distinct workspace IDs. If the pass ever
+// dropped the session on its way to the resolver, both would resolve to
+// the repository's default workspace and the duplicate-ID rule would
+// refuse the pair — a silent regression for everyone running more than one
+// session per repository.
+func TestMigrateRetagsSiblingSessionsToDistinctIDs(t *testing.T) {
+	parent := repoWorkspace("/repo")
+	retagger := &recordingRetagger{}
+	a := &Applier{
+		Store:    &registerRecorder{},
+		Repos:    &migrateStore{},
+		Config:   fixedDigest{},
+		Locker:   nopLocker{},
+		Clock:    fixedClock{},
+		Retagger: retagger,
+		Resolver: migrateResolver{
+			roots: map[string]resolve.Workspace{
+				"/repo/.worktrees/alpha": parent,
+				"/repo/.worktrees/beta":  parent,
+			},
+			exists: map[string]bool{
+				"/repo/.worktrees/alpha": true,
+				"/repo/.worktrees/beta":  true,
+			},
+		},
+	}
+
+	res := a.Migrate(context.Background(), []controller.LiveSession{
+		{Name: "slabledger--alpha", WorkspaceID: "old-alpha",
+			Slug: "slabledger", Worktree: "/repo/.worktrees/alpha", Session: "alpha"},
+		{Name: "slabledger--beta", WorkspaceID: "old-beta",
+			Slug: "slabledger", Worktree: "/repo/.worktrees/beta", Session: "beta"},
+	})
+
+	if len(res.Conflicts) != 0 {
+		t.Fatalf("conflicts = %+v, want none", res.Conflicts)
+	}
+	if len(retagger.calls) != 2 {
+		t.Fatalf("retag calls = %v, want two", retagger.calls)
+	}
+	if retagger.calls[0][1] == retagger.calls[1][1] {
+		t.Errorf("both sessions retagged to workspace %q, want distinct IDs",
+			retagger.calls[0][1])
+	}
+	for _, call := range retagger.calls {
+		if call[2] != "/repo" {
+			t.Errorf("retagged %q into %q, want the repository root /repo", call[0], call[2])
+		}
 	}
 }
 

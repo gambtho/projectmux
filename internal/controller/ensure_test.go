@@ -6,6 +6,8 @@ package controller_test
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -844,5 +846,130 @@ func TestEnsureNilActuatorStillRefusesContainerActions(t *testing.T) {
 		[]controller.WindowIntent{{Name: "shell"}}, r.lockDir, time.Second)
 	if !errors.Is(err, controller.ErrContainerActionUnsupported) {
 		t.Fatalf("err = %v, want ErrContainerActionUnsupported", err)
+	}
+}
+
+// boundRepo returns a canonical repository root containing services/api.
+// EvalSymlinks matches internal/bindpath's canonicalization, so expected
+// paths compare equal on macOS, where /var is a symlink to /private/var.
+func boundRepo(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "services", "api"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	return root
+}
+
+func boundDesired(root string, bind *string) controller.Desired {
+	d := ensureDesired()
+	ws := ensureWorkspace()
+	ws.RepoRoot = root
+	d.Workspace = ws
+	d.Bind = bind
+	return d
+}
+
+func TestEnsurePersistsTheBindAndPlansWindowsFromIt(t *testing.T) {
+	root := boundRepo(t)
+	live := controller.LiveSession{
+		Name: "slab", WorkspaceID: "w1", Slug: "slab", Worktree: root,
+	}
+	r := newEnsureRig(t,
+		absentStep(),   // initial observation
+		absentStep(),   // allocated-name squat check
+		liveStep(live), // post-create confirmation
+	)
+	bind := "services/api"
+	res, err := r.ensure(t, boundDesired(root, &bind))
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if res.BindWarning != "" {
+		t.Errorf("BindWarning = %q, want none for a usable bind", res.BindWarning)
+	}
+
+	rec, err := r.store.Workspace("w1")
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.Bind == nil || *rec.Bind != "services/api" {
+		t.Fatalf("stored Bind = %v, want services/api", rec.Bind)
+	}
+
+	if len(r.actuator.Created) != 1 {
+		t.Fatalf("actuator calls = %d, want 1", len(r.actuator.Created))
+	}
+	spec := r.actuator.Created[0]
+	want := filepath.Join(root, "services", "api")
+	if spec.Windows[0].Dir != want {
+		t.Errorf("window dir = %q, want %q; the bind was not visible to planning",
+			spec.Windows[0].Dir, want)
+	}
+	// Worktree is written to @dev_worktree and compared by
+	// SessionBelongsTo: it is identity, not a working directory, and the
+	// bind must not move it.
+	if spec.Worktree != root {
+		t.Errorf("SessionSpec.Worktree = %q, want the repository root %q", spec.Worktree, root)
+	}
+}
+
+func TestEnsureFallsBackWhenTheBindIsUnusable(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, root string) string
+	}{
+		{
+			name: "the directory is gone",
+			setup: func(t *testing.T, root string) string {
+				return "services/gone"
+			},
+		},
+		{
+			name: "the bind now resolves outside the repository",
+			setup: func(t *testing.T, root string) string {
+				outside := t.TempDir()
+				if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+				return "escape"
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := boundRepo(t)
+			bind := tc.setup(t, root)
+			live := controller.LiveSession{
+				Name: "slab", WorkspaceID: "w1", Slug: "slab", Worktree: root,
+			}
+			r := newEnsureRig(t, absentStep(), absentStep(), liveStep(live))
+
+			res, err := r.ensure(t, boundDesired(root, &bind))
+			if err != nil {
+				t.Fatalf("Ensure: %v; an unusable bind must not be fatal", err)
+			}
+			if res.BindWarning == "" {
+				t.Error("BindWarning is empty; the fallback was silent")
+			}
+			if !strings.Contains(res.BindWarning, bind) {
+				t.Errorf("BindWarning = %q, want it to name the bind %q", res.BindWarning, bind)
+			}
+			spec := r.actuator.Created[0]
+			if spec.Windows[0].Dir != root {
+				t.Errorf("window dir = %q, want the repository root %q", spec.Windows[0].Dir, root)
+			}
+			// The bind is not discarded: fixing the directory and
+			// reopening must work without re-binding.
+			rec, err := r.store.Workspace("w1")
+			if err != nil {
+				t.Fatalf("Workspace: %v", err)
+			}
+			if rec.Bind == nil || *rec.Bind != bind {
+				t.Errorf("stored Bind = %v, want it kept as %q", rec.Bind, bind)
+			}
+		})
 	}
 }

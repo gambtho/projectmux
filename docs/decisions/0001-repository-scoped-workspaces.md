@@ -79,9 +79,15 @@ better than one that silently reads a repository root as a worktree path.
 
 ## Deferred
 
+**Closed.** Both items shipped; see
+[decision 0002](0002-session-targets-and-the-bound-directory.md).
+
 The design also specified a `<repo>/<session>` target form and a `bind` command
 for per-session working directories. Neither shipped in #31. The identity was
 built session-aware anyway — `sha256(repo_root + "\0" + session)` — so that
-adding them later does not rewrite every stored ID a second time. Until then
-`resolve.Resolve` hardcodes the empty session, and one repository has exactly
-one session.
+adding them later would not rewrite every stored ID a second time. That is what
+happened: `resolve.Resolve` now takes the session component instead of
+hardcoding the empty one, a repository may hold several sessions, and each can
+be bound to a directory inside the repository. The empty session component is
+still what a repository's default session uses, so no ID recorded by #31
+changed and no existing session was invalidated.

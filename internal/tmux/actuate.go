@@ -15,7 +15,7 @@ var _ controller.SessionActuator = (*Client)(nil)
 
 // CreateSession creates the workspace session in one chained tmux
 // invocation (verified on tmux 3.4): new-session with the first window,
-// the three identity keys via set-option, remaining windows detached,
+// the four identity keys via set-option, remaining windows detached,
 // and an explicit focus selection when configured. One subprocess makes
 // creation-with-identity near-atomic (open/attach spec §4).
 func (c *Client) CreateSession(ctx context.Context, spec controller.SessionSpec) error {
@@ -58,6 +58,7 @@ func createArgv(spec controller.SessionSpec) []string {
 		";", "set-option", "-t", target, controller.KeyWorkspaceID, escapeChainArg(spec.WorkspaceID),
 		";", "set-option", "-t", target, controller.KeySlug, escapeChainArg(spec.Slug),
 		";", "set-option", "-t", target, controller.KeyWorktree, escapeChainArg(spec.Worktree),
+		";", "set-option", "-t", target, controller.KeySession, escapeChainArg(spec.Session),
 	)
 
 	for _, w := range spec.Windows[1:] {

@@ -111,7 +111,7 @@ func TestConfigHelpIsSuccessful(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d", code)
 	}
-	for _, want := range []string{"--json", "--compact", "<workspace>"} {
+	for _, want := range []string{"--json", "--compact", "<target>"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("config help %q does not mention %q", stdout, want)
 		}

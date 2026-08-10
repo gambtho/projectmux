@@ -23,7 +23,7 @@ import (
 // Resolve reports both as a plain error, so the distinction has to be
 // asked for.
 type Resolver interface {
-	Resolve(repoRoot string) (resolve.Workspace, error)
+	Resolve(repoRoot, session string) (resolve.Workspace, error)
 	Exists(path string) bool
 }
 
@@ -120,7 +120,11 @@ func (a *Applier) Apply(ctx context.Context, plan Plan) Report {
 func (a *Applier) applyCandidate(ctx context.Context, cand Candidate) (*Registered, *Conflict) {
 	sess := cand.Session
 
-	ws, err := a.Resolver.Resolve(sess.Worktree)
+	// The session component is an input to the workspace ID (decision
+	// 0001), so re-deriving identity without it resolves every named
+	// session to its repository's default workspace and fails the gate
+	// below as a false identity conflict.
+	ws, err := a.Resolver.Resolve(sess.Worktree, sess.Session)
 	if err != nil {
 		return nil, conflictf(sess.Name,
 			"resolving the workspace from %s failed: %v; a session whose worktree is gone cannot be re-registered",

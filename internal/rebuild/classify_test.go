@@ -3,6 +3,7 @@ package rebuild
 import (
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gambtho/projectmux/internal/controller"
@@ -139,10 +140,35 @@ func TestClassifyIdentityMismatchIsAConflict(t *testing.T) {
 		[]state.Record{stored("id-1", "slab", "/w/slab", "")},
 	)
 	onlyConflict(t, plan, "slab",
-		`session "slab" carries slug "other" and worktree "/w/slab", but workspace `+
-			`id-1 is recorded as slug "slab" and worktree "/w/slab"; that `+
-			`contradiction is evidence of corruption or collision rather than a `+
-			`match, so nothing is written.`)
+		`session "slab" carries slug "other", worktree "/w/slab", and session `+
+			`component "", but workspace id-1 is recorded as slug "slab", worktree `+
+			`"/w/slab", and session component ""; that contradiction is evidence of `+
+			`corruption or collision rather than a match, so nothing is written.`)
+}
+
+// TestClassifyRejectsASessionWhoseSessionKeyContradictsTheRecord covers the
+// fourth identity key. Slug and worktree agree here; only @dev_session
+// disagrees, which is exactly the case a three-key comparison cannot see.
+func TestClassifyRejectsASessionWhoseSessionKeyContradictsTheRecord(t *testing.T) {
+	s := live("proj--feature-a", "w1", "proj", "/w/proj")
+	s.Session = "feature-b"
+	rows := []state.Record{{
+		ID: "w1", Slug: "proj", RepoRoot: "/w/proj", Session: "feature-a",
+	}}
+
+	plan := Classify([]controller.LiveSession{s}, rows)
+
+	if len(plan.Candidates) != 0 {
+		t.Errorf("Candidates = %+v, want none: a contradiction is not an adoption",
+			plan.Candidates)
+	}
+	if len(plan.Conflicts) != 1 {
+		t.Fatalf("Conflicts = %+v, want exactly one", plan.Conflicts)
+	}
+	if !strings.Contains(plan.Conflicts[0].Reason, "feature-b") {
+		t.Errorf("Reason = %q, want it to name the live session component",
+			plan.Conflicts[0].Reason)
+	}
 }
 
 // TestClassifyDuplicateIDIsAConflictForEverySession matches ObserveSession,
@@ -266,10 +292,10 @@ func TestClassifyIdentityMismatchBeatsSettled(t *testing.T) {
 		[]state.Record{stored("id-1", "slab", "/w/other", "slab")},
 	)
 	onlyConflict(t, plan, "slab",
-		`session "slab" carries slug "slab" and worktree "/w/slab", but workspace `+
-			`id-1 is recorded as slug "slab" and worktree "/w/other"; that `+
-			`contradiction is evidence of corruption or collision rather than a `+
-			`match, so nothing is written.`)
+		`session "slab" carries slug "slab", worktree "/w/slab", and session `+
+			`component "", but workspace id-1 is recorded as slug "slab", worktree `+
+			`"/w/other", and session component ""; that contradiction is evidence `+
+			`of corruption or collision rather than a match, so nothing is written.`)
 }
 
 // TestClassifyIdentityMismatchBeatsAdopt: an empty actual_session is an
@@ -281,10 +307,10 @@ func TestClassifyIdentityMismatchBeatsAdopt(t *testing.T) {
 		[]state.Record{stored("id-1", "renamed", "/w/slab", "")},
 	)
 	onlyConflict(t, plan, "slab",
-		`session "slab" carries slug "slab" and worktree "/w/slab", but workspace `+
-			`id-1 is recorded as slug "renamed" and worktree "/w/slab"; that `+
-			`contradiction is evidence of corruption or collision rather than a `+
-			`match, so nothing is written.`)
+		`session "slab" carries slug "slab", worktree "/w/slab", and session `+
+			`component "", but workspace id-1 is recorded as slug "renamed", worktree `+
+			`"/w/slab", and session component ""; that contradiction is evidence of `+
+			`corruption or collision rather than a match, so nothing is written.`)
 }
 
 // TestClassifySettledSessionIsNotNameTaken guards the near miss in the

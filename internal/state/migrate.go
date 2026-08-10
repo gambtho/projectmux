@@ -20,7 +20,7 @@ const sqliteBusy = 5
 const migrationBusyBudget = 5 * time.Second
 
 // SchemaVersion is the newest schema this build understands.
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 //go:embed migrations/*.sql
 var migrations embed.FS

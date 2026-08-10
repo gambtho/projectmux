@@ -17,8 +17,10 @@ import (
 	"github.com/gambtho/projectmux/internal/controller"
 	"github.com/gambtho/projectmux/internal/doctor"
 	"github.com/gambtho/projectmux/internal/rebuild"
+	"github.com/gambtho/projectmux/internal/resolve"
 	runner "github.com/gambtho/projectmux/internal/run"
 	"github.com/gambtho/projectmux/internal/state"
+	"github.com/gambtho/projectmux/internal/target"
 	"github.com/gambtho/projectmux/internal/tmux"
 )
 
@@ -48,6 +50,28 @@ var (
 		return &tmux.Client{Socket: tmux.EnvSocket()}
 	}
 )
+
+// selectWorkspace turns a command's workspace argument into the workspace
+// to act on: internal/target parses the grammar and chooses the session,
+// including the bind lookup a bare invocation runs (spec §3).
+//
+// It is one function rather than a line in each command so the grammar and
+// the selection rule cannot drift apart between `open` and `status`.
+func selectWorkspace(arg string, roots []string) (resolve.Workspace, error) {
+	ref, err := target.Parse(arg)
+	if err != nil {
+		return resolve.Workspace{}, err
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return resolve.Workspace{}, fmt.Errorf("determining the current directory: %w", err)
+	}
+	stateRoot, err := state.Root()
+	if err != nil {
+		return resolve.Workspace{}, err
+	}
+	return target.Select(ref, roots, cwd, stateRoot)
+}
 
 // systemClock satisfies controller.Clock. Nothing is persisted by the
 // observation commands, but the controller requires a clock.

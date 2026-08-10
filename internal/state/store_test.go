@@ -578,3 +578,72 @@ func TestRegisteringReplacesAStaleRepositoryForTheSamePath(t *testing.T) {
 		t.Errorf("re-keyed workspace: %v", err)
 	}
 }
+
+func TestSetBindRoundTripsAndClears(t *testing.T) {
+	s := openTestStore(t)
+	ws := testWorkspace("w1")
+	mustRegister(t, s, ws)
+
+	bind := "services/api"
+	if err := s.SetBind(ws.ID, &bind, testTime); err != nil {
+		t.Fatalf("SetBind: %v", err)
+	}
+	rec, err := s.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.Bind == nil || *rec.Bind != bind {
+		t.Fatalf("bind = %v, want %q", rec.Bind, bind)
+	}
+
+	if err := s.SetBind(ws.ID, nil, testTime); err != nil {
+		t.Fatalf("SetBind(nil): %v", err)
+	}
+	rec, err = s.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.Bind != nil {
+		t.Errorf("bind = %v, want nil after clearing", rec.Bind)
+	}
+}
+
+// TestSetBindOnAnUnregisteredWorkspace pins that SetBind records a bind and
+// does not create the session: `bind` on a session that does not exist yet is
+// a register-then-bind, and the registration is the caller's job.
+func TestSetBindOnAnUnregisteredWorkspace(t *testing.T) {
+	s := openTestStore(t)
+	bind := "services/api"
+	err := s.SetBind("absent", &bind, testTime)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetBind on an unregistered workspace = %v, want ErrNotFound", err)
+	}
+}
+
+// TestRegisterWorkspacePreservesTheBind is what protects `rebuild`. Rebuild
+// re-runs registration over every recovered session, and registration that
+// wrote the bind column would clear the bind of every session it touched.
+func TestRegisterWorkspacePreservesTheBind(t *testing.T) {
+	s := openTestStore(t)
+	ws := testWorkspace("w1")
+	mustRegister(t, s, ws)
+
+	bind := "services/api"
+	if err := s.SetBind(ws.ID, &bind, testTime); err != nil {
+		t.Fatalf("SetBind: %v", err)
+	}
+	if err := s.RegisterWorkspace(ws, "sha256:bbbb", testTime); err != nil {
+		t.Fatalf("re-registering: %v", err)
+	}
+
+	rec, err := s.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.Bind == nil || *rec.Bind != bind {
+		t.Fatalf("bind = %v, want %q preserved across re-registration", rec.Bind, bind)
+	}
+	if rec.DesiredDigest == nil || *rec.DesiredDigest != "sha256:bbbb" {
+		t.Errorf("desired digest = %v, want the re-registration's value", rec.DesiredDigest)
+	}
+}

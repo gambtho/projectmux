@@ -19,8 +19,8 @@ func decodeTime(s string) (time.Time, error) { return time.Parse(time.RFC3339Nan
 // RegisterWorkspace upserts the repository and the session on it.
 // Re-registration refreshes everything derivable from resolution and
 // configuration while preserving registered_at, the assigned session name,
-// the applied digest, and any binding — rebuilding the database is simply
-// re-running registration (design §7).
+// the applied digest, the container binding, and the session's bind —
+// rebuilding the database is simply re-running registration (design §7).
 func (s *Store) RegisterWorkspace(ws resolve.Workspace, desiredDigest string, now time.Time) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -162,7 +162,7 @@ func (s *Store) DropRepository(id string) error {
 const selectRecord = `
 SELECT
 	w.id, w.repository_id, r.slug, r.repo_root, w.session, w.proposed_session,
-	w.actual_session, w.desired_digest, w.applied_digest,
+	w.actual_session, w.desired_digest, w.applied_digest, w.bind,
 	w.registered_at, w.updated_at,
 	cb.kind, cb.container_id, cb.container_user, cb.workdir,
 	cb.health, cb.observed_at,
@@ -309,7 +309,7 @@ func scanRecord(r rowScanner) (Record, error) {
 	var (
 		rec                 Record
 		actual, desired     sql.NullString
-		applied             sql.NullString
+		applied, bind       sql.NullString
 		registered, updated string
 		cKind, cID          sql.NullString
 		cUser, cWorkdir     sql.NullString
@@ -320,7 +320,8 @@ func scanRecord(r rowScanner) (Record, error) {
 	)
 	err := r.Scan(
 		&rec.ID, &rec.RepositoryID, &rec.Slug, &rec.RepoRoot, &rec.Session,
-		&rec.ProposedSession, &actual, &desired, &applied, &registered, &updated,
+		&rec.ProposedSession, &actual, &desired, &applied, &bind,
+		&registered, &updated,
 		&cKind, &cID, &cUser, &cWorkdir, &cHealth, &cObserved,
 		&oName, &oOutcome, &oExit, &oSummary, &oFinished)
 	if err != nil {
@@ -330,6 +331,7 @@ func scanRecord(r rowScanner) (Record, error) {
 	rec.ActualSession = nullable(actual)
 	rec.DesiredDigest = nullable(desired)
 	rec.AppliedDigest = nullable(applied)
+	rec.Bind = nullable(bind)
 	if rec.RegisteredAt, err = decodeTime(registered); err != nil {
 		return Record{}, fmt.Errorf("registered_at: %w", err)
 	}
@@ -669,6 +671,37 @@ func (s *Store) AdoptSessionName(workspaceID, name string, now time.Time) error 
 	}
 	if err != nil {
 		return fmt.Errorf("adopting session name %q: %w", name, err)
+	}
+	return tx.Commit()
+}
+
+// SetBind records a session's bind, or clears it when bind is nil. It does
+// not create the workspace: the caller registers it first.
+//
+// The bind is written on its own rather than through RegisterWorkspace,
+// because registration is fill-only with respect to it — see the workspaces
+// upsert, which does not mention the column — and that is what lets `rebuild`
+// re-register a session without dropping where it opens.
+func (s *Store) SetBind(workspaceID string, bind *string, now time.Time) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning a transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := requireWorkspace(tx, workspaceID); err != nil {
+		return err
+	}
+	// A nil *string binds as SQL NULL only through an untyped nil any; a
+	// typed (*string)(nil) would be rejected by the driver.
+	var value any
+	if bind != nil {
+		value = *bind
+	}
+	if _, err := tx.Exec(
+		"UPDATE workspaces SET bind = ?, updated_at = ? WHERE id = ?",
+		value, encodeTime(now), workspaceID); err != nil {
+		return fmt.Errorf("recording the bind for workspace %s: %w", workspaceID, err)
 	}
 	return tx.Commit()
 }

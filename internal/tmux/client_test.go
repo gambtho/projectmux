@@ -42,6 +42,34 @@ display-message)
 	'#{@dev_workspace_id}') printf 'w1\n' ;;
 	'#{@dev_slug}') printf 'proj\n' ;;
 	'#{@dev_worktree}') printf '/w/evil\npath\n' ;;
+	'#{@dev_session}') printf 'feature-a\n' ;;
+	*) exit 2 ;;
+	esac
+	;;
+*)
+	exit 2
+	;;
+esac
+`
+
+// legacySessionScript is a session created before @dev_session existed: tmux
+// reports an unset user option as an empty value, which must decode to the
+// default session rather than to anything that would invalidate the session.
+const legacySessionScript = `#!/bin/sh
+while [ "$1" = "-L" ]; do shift 2; done
+cmd="$1"
+shift
+case "$cmd" in
+list-sessions)
+	printf '$0\n'
+	;;
+display-message)
+	case "$4" in
+	'#{session_name}') printf 'alpha\n' ;;
+	'#{@dev_workspace_id}') printf 'w1\n' ;;
+	'#{@dev_slug}') printf 'proj\n' ;;
+	'#{@dev_worktree}') printf '/w/alpha\n' ;;
+	'#{@dev_session}') printf '\n' ;;
 	*) exit 2 ;;
 	esac
 	;;
@@ -58,10 +86,25 @@ func TestSessionsObservesRawValues(t *testing.T) {
 		t.Fatalf("Sessions: %v", err)
 	}
 	want := controller.LiveSession{
-		ID: "$0", Name: "alpha", WorkspaceID: "w1", Slug: "proj", Worktree: "/w/evil\npath",
+		ID: "$0", Name: "alpha", WorkspaceID: "w1", Slug: "proj",
+		Worktree: "/w/evil\npath", Session: "feature-a",
 	}
 	if len(live) != 1 || live[0] != want {
 		t.Errorf("Sessions = %+v, want [%+v]", live, want)
+	}
+}
+
+func TestSessionsDecodesAnAbsentSessionKeyAsTheDefaultSession(t *testing.T) {
+	fakeTmux(t, legacySessionScript)
+	live, err := (&Client{}).Sessions(context.Background())
+	if err != nil {
+		t.Fatalf("Sessions: %v", err)
+	}
+	if len(live) != 1 {
+		t.Fatalf("Sessions = %+v, want one session", live)
+	}
+	if live[0].Session != "" {
+		t.Errorf("Session = %q, want the default session", live[0].Session)
 	}
 }
 

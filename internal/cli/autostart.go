@@ -139,7 +139,7 @@ func runAutostart(ctx context.Context, args []string, stdout io.Writer) error {
 		// would silently disable autostart for a whole repository on a
 		// transient failure. The row proceeds and reports whatever the
 		// start actually does.
-		if resolved, resolveErr := resolve.Resolve("", nil, repo.RepoRoot); resolveErr == nil &&
+		if resolved, resolveErr := resolve.Resolve("", "", nil, repo.RepoRoot); resolveErr == nil &&
 			resolved.RepoRoot != repo.RepoRoot {
 			entry.Outcome = "skipped"
 			entry.Reason = "recorded root is a linked worktree of " + resolved.RepoRoot +

@@ -200,7 +200,7 @@ func TestAutostartSkipsALinkedWorktreeRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
 	}
-	main, err := resolve.Resolve("", nil, cwd)
+	main, err := resolve.Resolve("", "", nil, cwd)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}

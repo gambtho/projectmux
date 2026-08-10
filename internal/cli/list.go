@@ -44,6 +44,11 @@ type listRow struct {
 	Container        *storedContainerInfo `json:"container,omitempty"`
 	Recorded         bool                 `json:"recorded"`
 	IdentityConflict bool                 `json:"identity_conflict"`
+	// Bind is the session's base directory, repository-relative, absent
+	// when the session opens at the repository root. list reports it
+	// verbatim and never resolves it: a broken bind is status's business
+	// (spec §5), and list resolves nothing.
+	Bind *string `json:"bind,omitempty"`
 }
 
 func runList(ctx context.Context, args []string, stdout io.Writer) error {
@@ -119,6 +124,7 @@ func buildList(ctx context.Context) (listEnvelope, error) {
 			ProposedSession: rec.ProposedSession,
 			ActualSession:   rec.ActualSession,
 			Container:       storedContainer(rec.Container),
+			Bind:            rec.Bind,
 			Recorded:        true,
 		}
 		switch claimants := byID[rec.ID]; {
@@ -131,7 +137,8 @@ func buildList(ctx context.Context) (listEnvelope, error) {
 			name := s.Name
 			row.SessionState = "live"
 			row.LiveSession = &name
-			row.IdentityConflict = s.Slug != rec.Slug || s.Worktree != rec.RepoRoot
+			row.IdentityConflict = s.Slug != rec.Slug || s.Worktree != rec.RepoRoot ||
+				s.Session != rec.Session
 			consumed[rec.ID] = true
 		default:
 			// Multiple sessions claim this workspace: uncertainty,
@@ -156,6 +163,7 @@ func buildList(ctx context.Context) (listEnvelope, error) {
 			ID:               s.WorkspaceID,
 			Slug:             s.Slug,
 			RepoRoot:         s.Worktree,
+			Session:          s.Session,
 			SessionState:     "live",
 			LiveSession:      &name,
 			Recorded:         false,
@@ -174,16 +182,36 @@ func writeListHuman(w io.Writer, env listEnvelope) error {
 		return err
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "WORKSPACE\tSESSION\tTMUX\tCONTAINER\tNOTES")
+	fmt.Fprintln(tw, "WORKSPACE\tSESSION\tBIND\tTMUX\tCONTAINER\tNOTES")
 	for _, row := range env.Workspaces {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			dashIfEmpty(row.Slug), listSessionCell(row), row.SessionState,
-			listContainerCell(row.Container), listNotesCell(row))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			listWorkspaceCell(row), listSessionCell(row), listBindCell(row),
+			row.SessionState, listContainerCell(row.Container), listNotesCell(row))
 	}
 	if err := tw.Flush(); err != nil {
 		return fmt.Errorf("writing output: %w", err)
 	}
 	return nil
+}
+
+// listWorkspaceCell renders the target a user would type for this row:
+// slug/session for a named session, bare slug for the repository's
+// default one, which carries the empty session component (spec §5).
+func listWorkspaceCell(row listRow) string {
+	if row.Slug != "" && row.Session != "" {
+		return row.Slug + "/" + row.Session
+	}
+	return dashIfEmpty(row.Slug)
+}
+
+// listBindCell renders the stored bind. It is printed verbatim: list
+// resolves nothing, so a bind that no longer exists still shows the
+// value that has to be corrected.
+func listBindCell(row listRow) string {
+	if row.Bind == nil {
+		return "-"
+	}
+	return dashIfEmpty(*row.Bind)
 }
 
 func listSessionCell(row listRow) string {

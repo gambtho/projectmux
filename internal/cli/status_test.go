@@ -29,7 +29,7 @@ func statusWorkspace(t *testing.T) resolve.Workspace {
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
 	}
-	ws, err := resolve.Resolve("", nil, cwd)
+	ws, err := resolve.Resolve("", "", nil, cwd)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -370,6 +370,66 @@ func TestStatusDoesNotBlameRebuildForAForeignSession(t *testing.T) {
 	}
 	if env := decodeStatus(t, stdout); env.NeedsRebuild {
 		t.Errorf("needs_rebuild = true for a foreign session: %s", env.NeedsRebuildReason)
+	}
+}
+
+// status reports the stored bind, and reports when that bind cannot be
+// used. Only Ensure computes the latter today, so status has to reach
+// the same check without ensuring anything (spec §5).
+func TestStatusReportsTheBindAndAnUnusableBind(t *testing.T) {
+	ws := statusWorkspace(t)
+	s := fake.NewStore()
+	if err := s.RegisterWorkspace(ws, "sha256:seed", cliTestTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	bind := "services/gone"
+	if err := s.SetBind(ws.ID, &bind, cliTestTime); err != nil {
+		t.Fatalf("set bind: %v", err)
+	}
+	installFakeStore(t, s)
+	installSessionObserver(t, controller.SessionObservation{}, nil)
+
+	code, stdout, stderr := run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	env := decodeStatus(t, stdout)
+	if env.Stored == nil || env.Stored.Bind == nil || *env.Stored.Bind != bind {
+		t.Fatalf("stored.bind = %+v, want %q", env.Stored, bind)
+	}
+	if env.BindWarning == "" {
+		t.Fatal("bind_warning is empty; an unusable bind is invisible")
+	}
+	if !strings.Contains(env.BindWarning, bind) {
+		t.Errorf("bind_warning = %q, want it to name the bind", env.BindWarning)
+	}
+	if !strings.Contains(stdout, `"schema_version": 2`) {
+		t.Errorf("status envelope is no longer schema 2:\n%s", stdout)
+	}
+}
+
+func TestStatusIsQuietWhenNoBindIsRecorded(t *testing.T) {
+	ws := statusWorkspace(t)
+	s := fake.NewStore()
+	if err := s.RegisterWorkspace(ws, "sha256:seed", cliTestTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	installFakeStore(t, s)
+	installSessionObserver(t, controller.SessionObservation{}, nil)
+
+	code, stdout, stderr := run(t, "status", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	env := decodeStatus(t, stdout)
+	if env.Stored == nil || env.Stored.Bind != nil {
+		t.Errorf("stored.bind = %+v, want none", env.Stored)
+	}
+	if env.BindWarning != "" {
+		t.Errorf("bind_warning = %q, want empty", env.BindWarning)
+	}
+	if strings.Contains(stdout, "bind") {
+		t.Errorf("an unbound workspace emits a bind key:\n%s", stdout)
 	}
 }
 

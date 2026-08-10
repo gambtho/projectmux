@@ -18,15 +18,18 @@ import (
 var sessionIDPattern = regexp.MustCompile(`^\$[0-9]+$`)
 
 // fieldFormats queries one field per subprocess, in this fixed order:
-// name, workspace ID, slug, worktree. The whole output of one query is
-// one raw value, so no in-band framing exists for a value to forge —
-// tmux emits option values verbatim in formats, and identity values are
-// not newline-free (spec §5).
-var fieldFormats = [4]string{
+// name, workspace ID, slug, worktree, session. The whole output of one
+// query is one raw value, so no in-band framing exists for a value to
+// forge — tmux emits option values verbatim in formats, and identity
+// values are not newline-free (spec §5). A session created before
+// @dev_session existed answers its query with an empty value, which is
+// exactly the default session.
+var fieldFormats = [5]string{
 	"#{session_name}",
 	"#{" + controller.KeyWorkspaceID + "}",
 	"#{" + controller.KeySlug + "}",
 	"#{" + controller.KeyWorktree + "}",
+	"#{" + controller.KeySession + "}",
 }
 
 // parseSessionIDs validates enumeration output: one well-formed session

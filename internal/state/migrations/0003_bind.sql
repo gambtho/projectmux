@@ -1,0 +1,14 @@
+-- Schema version 3: a session may open somewhere other than the repository
+-- root (design §4). The path is stored relative to the repository root so it
+-- survives the repository moving, and NULL means the session is unbound.
+--
+-- This migration is pure SQL by design (design §9) and runs inside the
+-- transaction migrate.go opens, so PRAGMA foreign_keys would be a no-op here
+-- and no statement may depend on one. Nothing here needs either: ADD COLUMN
+-- rewrites no rows, touches no foreign key, and needs no table rebuild, which
+-- is why upgrading to this version does not require `projectmux rebuild`.
+--
+-- Containment is not expressible as a CHECK constraint: whether a stored path
+-- still resolves inside the repository depends on symlinks on the filesystem,
+-- and it is re-verified on every read instead (internal/bindpath).
+ALTER TABLE workspaces ADD COLUMN bind TEXT;

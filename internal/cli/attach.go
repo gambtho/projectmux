@@ -6,16 +6,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/gambtho/projectmux/internal/config"
 	"github.com/gambtho/projectmux/internal/controller"
-	"github.com/gambtho/projectmux/internal/resolve"
 )
 
-const attachHelp = `usage: projectmux attach [--json] [--compact] [<workspace>]
+const attachHelp = `usage: projectmux attach [--json] [--compact] [<target>]
 
-Attach to the live workspace session, resolved either from <workspace>
+Attach to the live workspace session, resolved either from <target>
 or from the current directory. attach never creates a session and never
 modifies state; use projectmux open to create one.
 
@@ -43,7 +41,7 @@ func runAttach(ctx context.Context, args []string, stdout io.Writer) error {
 		return usagef("attach: %s", err)
 	}
 	if fs.NArg() > 1 {
-		return usagef("attach: expected at most one workspace, got %d", fs.NArg())
+		return usagef("attach: expected at most one target, got %d", fs.NArg())
 	}
 	if *compact {
 		*asJSON = true
@@ -80,11 +78,7 @@ func buildAttach(ctx context.Context, name string) (attachEnvelope, string, erro
 	if err != nil {
 		return zero, "", err
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return zero, "", fmt.Errorf("determining the current directory: %w", err)
-	}
-	ws, err := resolve.Resolve(name, defaults.Layer.RepositoryRoots, cwd)
+	ws, err := selectWorkspace(name, defaults.Layer.RepositoryRoots)
 	if err != nil {
 		return zero, "", err
 	}

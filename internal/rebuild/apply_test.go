@@ -42,19 +42,27 @@ func (o *scriptedObserver) ObserveSession(_ context.Context, q controller.Sessio
 	return controller.SessionObservation{}, fmt.Errorf("scriptedObserver: unscripted call %d", i+1)
 }
 
+// resolverKey is the pair the resolver is keyed on. Keying on the root
+// alone cannot hold a repository's default and named workspaces at the
+// same time, which is the case these tests exist to cover.
+type resolverKey struct {
+	root    string
+	session string
+}
+
 // mapResolver stands in for resolve.Resolve, which shells out to git. A
 // missing entry is the vanished-worktree case; errs models a tree that
 // exists but will not resolve.
 type mapResolver struct {
-	byWorktree map[string]resolve.Workspace
+	byWorktree map[resolverKey]resolve.Workspace
 	errs       map[string]error
 }
 
-func (r *mapResolver) Resolve(worktree string) (resolve.Workspace, error) {
+func (r *mapResolver) Resolve(worktree, session string) (resolve.Workspace, error) {
 	if err := r.errs[worktree]; err != nil {
 		return resolve.Workspace{}, err
 	}
-	ws, ok := r.byWorktree[worktree]
+	ws, ok := r.byWorktree[resolverKey{root: worktree, session: session}]
 	if !ok {
 		return resolve.Workspace{}, fmt.Errorf("no worktree at %s", worktree)
 	}
@@ -148,7 +156,7 @@ func newHarness() *harness {
 		fakeStore: fs,
 		store:     fs,
 		observer:  &scriptedObserver{},
-		resolver:  &mapResolver{byWorktree: map[string]resolve.Workspace{}, errs: map[string]error{}},
+		resolver:  &mapResolver{byWorktree: map[resolverKey]resolve.Workspace{}, errs: map[string]error{}},
 		config:    &mapConfig{digests: map[string]string{}, errs: map[string]error{}},
 		locker:    &countingLocker{},
 	}
@@ -157,7 +165,7 @@ func newHarness() *harness {
 // know teaches the resolver and the configuration loader about one
 // workspace, the way a real git tree and a real defaults.yaml would.
 func (h *harness) know(ws resolve.Workspace, digest string) {
-	h.resolver.byWorktree[ws.RepoRoot] = ws
+	h.resolver.byWorktree[resolverKey{root: ws.RepoRoot, session: ws.Session}] = ws
 	h.config.digests[ws.Slug] = digest
 }
 
@@ -198,6 +206,24 @@ func liveSession(ws resolve.Workspace, name string) controller.LiveSession {
 		Slug:        ws.Slug,
 		Worktree:    ws.RepoRoot,
 	}
+}
+
+// namedWorkspace is projectmux()'s sibling: the same repository root and
+// slug, a different session component, and therefore a different ID.
+func namedWorkspace() resolve.Workspace {
+	ws := workspace(
+		"2222222222222222222222222222222222222222222222222222222222222222",
+		"projectmux", "/src/projectmux", "projectmux--feature-a")
+	ws.Session = "feature-a"
+	return ws
+}
+
+// namedLiveSession carries the fourth identity key, the way a session
+// opened by this build does.
+func namedLiveSession(ws resolve.Workspace, name string) controller.LiveSession {
+	s := liveSession(ws, name)
+	s.Session = ws.Session
+	return s
 }
 
 func observing(s controller.LiveSession) controller.SessionObservation {
@@ -960,5 +986,80 @@ func TestApplyDryRunReclassifiesAnAdoptCandidateWhoseRowDisappeared(t *testing.T
 	if counting.registers != 0 || counting.adopts != 0 {
 		t.Errorf("dry run wrote: %d registers, %d adopts; want 0 and 0",
 			counting.registers, counting.adopts)
+	}
+}
+
+func TestApplyRecoversANamedSession(t *testing.T) {
+	ws := namedWorkspace()
+	sess := namedLiveSession(ws, "projectmux--feature-a")
+	h := newHarness()
+	h.know(projectmux(), "sha256:default")
+	h.know(ws, "sha256:desired")
+	h.observer.results = []controller.SessionObservation{observing(sess)}
+
+	report := h.applier().Apply(context.Background(), Plan{
+		Candidates: []Candidate{{Case: CaseRegister, Session: sess}},
+	})
+
+	if len(report.Conflicts) != 0 {
+		t.Fatalf("Conflicts = %+v, want none: the session resolves to its own workspace",
+			report.Conflicts)
+	}
+	want := []Registered{{
+		ID:       ws.ID,
+		Slug:     "projectmux",
+		RepoRoot: "/src/projectmux",
+		Session:  "projectmux--feature-a",
+	}}
+	if !reflect.DeepEqual(report.Registered, want) {
+		t.Fatalf("Registered = %+v, want %+v", report.Registered, want)
+	}
+	rec, err := h.fakeStore.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.ActualSession == nil || *rec.ActualSession != "projectmux--feature-a" {
+		t.Errorf("ActualSession = %v, want the named session", rec.ActualSession)
+	}
+}
+
+func TestApplyKeepsANamedSessionsBindWhenItNoLongerResolves(t *testing.T) {
+	ws := namedWorkspace()
+	sess := namedLiveSession(ws, "projectmux--feature-a")
+	h := newHarness()
+	h.know(ws, "sha256:desired")
+
+	// seedRecorded's fixture carries no session component, which now reads
+	// as an identity mismatch against a named session (Task 3), so the row
+	// is seeded here with one.
+	recorded := workspace(ws.ID, ws.Slug, ws.RepoRoot, "recorded-proposed")
+	recorded.Session = ws.Session
+	if err := h.fakeStore.RegisterWorkspace(recorded, "sha256:recorded", testTime); err != nil {
+		t.Fatalf("seeding the recorded row: %v", err)
+	}
+	bind := "services/gone"
+	if err := h.fakeStore.SetBind(ws.ID, &bind, testTime); err != nil {
+		t.Fatalf("SetBind: %v", err)
+	}
+	h.observer.results = []controller.SessionObservation{observing(sess)}
+
+	report := h.applier().Apply(context.Background(), Plan{
+		Candidates: []Candidate{{Case: CaseAdopt, Session: sess}},
+	})
+
+	if len(report.Conflicts) != 0 {
+		t.Fatalf("Conflicts = %+v; a bind that cannot be resolved is not a reason to refuse recovery",
+			report.Conflicts)
+	}
+	if len(report.Registered) != 1 || report.Registered[0].Session != "projectmux--feature-a" {
+		t.Fatalf("Registered = %+v, want the named session reported", report.Registered)
+	}
+	rec, err := h.fakeStore.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("Workspace: %v", err)
+	}
+	if rec.Bind == nil || *rec.Bind != "services/gone" {
+		t.Errorf("Bind = %v, want it preserved: rebuild recovers state, it does not discard it",
+			rec.Bind)
 	}
 }

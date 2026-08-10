@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gambtho/projectmux/internal/config"
+	"github.com/gambtho/projectmux/internal/target"
 )
 
 // A command whose report is its output still exits on what actually went
@@ -45,5 +46,16 @@ func TestReportedErrorUnwrapsToItsCause(t *testing.T) {
 	// The summary is what reaches stderr; it must not grow the cause's text.
 	if wrapped.Error() != "summary" {
 		t.Errorf("Error() = %q, want the one-line summary alone", wrapped.Error())
+	}
+}
+
+// A malformed target is a usage failure. It must not be allowed to fall
+// through to the generic exit 1: the grammar exists precisely so a mistyped
+// path is reported as bad usage rather than as an unknown workspace.
+func TestMalformedTargetExitsOnUsage(t *testing.T) {
+	err := &target.MalformedError{Arg: "docs/commands.md", Reason: "the session component is invalid"}
+
+	if got := exitCode(err); got != ExitUsage {
+		t.Errorf("exitCode(MalformedError) = %d, want %d", got, ExitUsage)
 	}
 }

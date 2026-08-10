@@ -300,3 +300,58 @@ func TestFakeActuatorsKillAndStop(t *testing.T) {
 		t.Error("configured stop error was not returned")
 	}
 }
+
+func TestFakeStoreSetBindRoundTrips(t *testing.T) {
+	s := NewStore()
+	if err := s.RegisterWorkspace(testWorkspace("w1", "slab"), "sha256:a", testTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	rec, err := s.Workspace("w1")
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	if rec.Bind != nil {
+		t.Errorf("a fresh record has Bind = %v, want nil", rec.Bind)
+	}
+
+	bind := "services/api"
+	if err := s.SetBind("w1", &bind, testTime); err != nil {
+		t.Fatalf("SetBind: %v", err)
+	}
+	rec, err = s.Workspace("w1")
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	if rec.Bind == nil || *rec.Bind != "services/api" {
+		t.Fatalf("Bind = %v, want services/api", rec.Bind)
+	}
+	// The record read back is a copy: mutating it must not reach the store.
+	*rec.Bind = "mutated"
+	again, err := s.Workspace("w1")
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	if *again.Bind != "services/api" {
+		t.Errorf("Bind = %q; the returned record aliased the stored one", *again.Bind)
+	}
+
+	if err := s.SetBind("w1", nil, testTime); err != nil {
+		t.Fatalf("SetBind(nil): %v", err)
+	}
+	cleared, err := s.Workspace("w1")
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	if cleared.Bind != nil {
+		t.Errorf("Bind = %v after clearing, want nil", cleared.Bind)
+	}
+}
+
+func TestFakeStoreSetBindRejectsAnUnknownWorkspace(t *testing.T) {
+	s := NewStore()
+	bind := "services/api"
+	if err := s.SetBind("nope", &bind, testTime); !errors.Is(err, state.ErrNotFound) {
+		t.Errorf("error = %v, want state.ErrNotFound", err)
+	}
+}

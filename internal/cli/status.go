@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"text/tabwriter"
 
@@ -15,10 +14,10 @@ import (
 	"github.com/gambtho/projectmux/internal/resolve"
 )
 
-const statusHelp = `usage: projectmux status [--json] [--compact] [<workspace>]
+const statusHelp = `usage: projectmux status [--json] [--compact] [<target>]
 
 Observe one workspace and explain configuration drift and dependency
-failures, resolved either from <workspace> or from the current directory.
+failures, resolved either from <target> or from the current directory.
 
   --json     emit the versioned JSON envelope instead of human-readable text
   --compact  emit the JSON on a single line (implies --json)
@@ -26,22 +25,27 @@ failures, resolved either from <workspace> or from the current directory.
 
 // statusEnvelope is the versioned JSON structure for projectmux status.
 type statusEnvelope struct {
-	SchemaVersion      int            `json:"schema_version"`
-	Workspace          workspaceInfo  `json:"workspace"`
-	NeedsRebuild       bool           `json:"needs_rebuild"`
-	NeedsRebuildReason string         `json:"needs_rebuild_reason,omitempty"`
-	Registered         bool           `json:"registered"`
-	Stored             *storedInfo    `json:"stored,omitempty"`
-	Session            sessionInfo    `json:"session"`
-	Container          *containerInfo `json:"container,omitempty"`
-	Config             configInfo     `json:"config"`
-	LastOperation      *operationInfo `json:"last_operation,omitempty"`
-	Plan               planInfo       `json:"plan"`
+	SchemaVersion      int           `json:"schema_version"`
+	Workspace          workspaceInfo `json:"workspace"`
+	NeedsRebuild       bool          `json:"needs_rebuild"`
+	NeedsRebuildReason string        `json:"needs_rebuild_reason,omitempty"`
+	// BindWarning explains why the recorded bind cannot be used. It sits
+	// beside the workspace rather than under stored, because it is a
+	// verdict about the current filesystem, not something the store holds.
+	BindWarning   string         `json:"bind_warning,omitempty"`
+	Registered    bool           `json:"registered"`
+	Stored        *storedInfo    `json:"stored,omitempty"`
+	Session       sessionInfo    `json:"session"`
+	Container     *containerInfo `json:"container,omitempty"`
+	Config        configInfo     `json:"config"`
+	LastOperation *operationInfo `json:"last_operation,omitempty"`
+	Plan          planInfo       `json:"plan"`
 }
 
 type storedInfo struct {
 	ProposedSession string  `json:"proposed_session"`
 	ActualSession   *string `json:"actual_session,omitempty"`
+	Bind            *string `json:"bind,omitempty"`
 	RegisteredAt    string  `json:"registered_at"`
 	UpdatedAt       string  `json:"updated_at"`
 }
@@ -108,7 +112,7 @@ func runStatus(ctx context.Context, args []string, stdout io.Writer) error {
 		return usagef("status: %s", err)
 	}
 	if fs.NArg() > 1 {
-		return usagef("status: expected at most one workspace, got %d", fs.NArg())
+		return usagef("status: expected at most one target, got %d", fs.NArg())
 	}
 	if *compact {
 		*asJSON = true
@@ -136,11 +140,7 @@ func buildStatus(ctx context.Context, name string) (statusEnvelope, error) {
 	if err != nil {
 		return statusEnvelope{}, err
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return statusEnvelope{}, fmt.Errorf("determining the current directory: %w", err)
-	}
-	ws, err := resolve.Resolve(name, defaults.Layer.RepositoryRoots, cwd)
+	ws, err := selectWorkspace(name, defaults.Layer.RepositoryRoots)
 	if err != nil {
 		return statusEnvelope{}, err
 	}
@@ -222,7 +222,7 @@ func staleSessions(snap controller.Snapshot, ws resolve.Workspace) []string {
 		if controller.SessionBelongsTo(s, ws) || s.Worktree == "" {
 			continue
 		}
-		resolved, err := resolve.Resolve("", nil, s.Worktree)
+		resolved, err := resolve.Resolve("", "", nil, s.Worktree)
 		if err != nil || resolved.RepoRoot != ws.RepoRoot {
 			continue
 		}
@@ -256,7 +256,7 @@ func staleRepositoryRoots(st stateStore, ws resolve.Workspace) ([]string, error)
 		if repo.Slug != ws.Slug || repo.RepoRoot == ws.RepoRoot {
 			continue
 		}
-		resolved, err := resolve.Resolve("", nil, repo.RepoRoot)
+		resolved, err := resolve.Resolve("", "", nil, repo.RepoRoot)
 		if err != nil || resolved.RepoRoot != ws.RepoRoot {
 			continue
 		}
@@ -302,6 +302,7 @@ func statusEnvelopeFrom(ws resolve.Workspace, effective config.Effective, snap c
 		env.Stored = &storedInfo{
 			ProposedSession: rec.ProposedSession,
 			ActualSession:   rec.ActualSession,
+			Bind:            rec.Bind,
 			RegisteredAt:    stamp(rec.RegisteredAt),
 			UpdatedAt:       stamp(rec.UpdatedAt),
 		}
@@ -341,6 +342,7 @@ func statusEnvelopeFrom(ws resolve.Workspace, effective config.Effective, snap c
 		}
 		env.Container = &containerInfo{Stored: storedBinding, Observation: obs}
 	}
+	env.BindWarning = controller.BindWarning(ws.RepoRoot, snap.Stored)
 	return env
 }
 
@@ -366,6 +368,12 @@ func writeStatusHuman(w io.Writer, env statusEnvelope) error {
 		fmt.Fprintf(tw, "updated\t%s\n", env.Stored.UpdatedAt)
 	} else {
 		fmt.Fprint(tw, "recorded session\tnot registered\n")
+	}
+	if env.Stored != nil && env.Stored.Bind != nil {
+		fmt.Fprintf(tw, "bind\t%s\n", *env.Stored.Bind)
+	}
+	if env.BindWarning != "" {
+		fmt.Fprintf(tw, "bind warning\t%s\n", env.BindWarning)
 	}
 
 	sessionLine := env.Session.State

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -100,7 +101,7 @@ func openWorkspace(t *testing.T) resolve.Workspace {
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
 	}
-	ws, err := resolve.Resolve("", nil, cwd)
+	ws, err := resolve.Resolve("", "", nil, cwd)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -268,7 +269,7 @@ func TestOpenContainerWindowWithoutContainerFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
 	}
-	ws, err := resolve.Resolve("", nil, cwd)
+	ws, err := resolve.Resolve("", "", nil, cwd)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -368,5 +369,136 @@ func TestOpenReplacementReportsStaleWindows(t *testing.T) {
 	env := decodeOpen(t, stdout)
 	if env.Action != "already-running" || !env.ContainerWindowsStale {
 		t.Errorf("envelope = %+v, want already-running with stale container windows", env)
+	}
+}
+
+// mkSubdir creates a directory inside the test repository and returns its
+// repository-relative form, which is what a bind is stored as.
+func mkSubdir(t *testing.T, rel string) string {
+	t.Helper()
+	repo, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, filepath.FromSlash(rel)), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", rel, err)
+	}
+	return rel
+}
+
+func TestOpenCwdRecordsTheBind(t *testing.T) {
+	ws := openWorkspace(t)
+	rel := mkSubdir(t, "services/api")
+	s := fake.NewStore()
+	installOpenStore(t, s)
+	installFakeActuator(t)
+	installScriptedSessions(t,
+		cliAbsent(), cliAbsent(), cliLive(ownLive(ws, ws.SessionName)))
+
+	code, _, stderr := run(t, "open", "--cwd", rel, "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	rec, err := s.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if rec.Bind == nil || *rec.Bind != rel {
+		t.Errorf("bind = %v, want %q", rec.Bind, rel)
+	}
+}
+
+// A bind is a declaration about the session, not a side effect of a
+// successful open (spec §4). Ensure registers and persists before it
+// plans, so a refusal afterwards leaves the bind in place and retrying
+// keeps it.
+func TestOpenCwdBindSurvivesAFailedOpen(t *testing.T) {
+	ws := openWorkspace(t)
+	rel := mkSubdir(t, "services/api")
+	s := fake.NewStore()
+	installOpenStore(t, s)
+	installFakeActuator(t)
+	installScriptedSessions(t,
+		func(controller.SessionQuery) (controller.SessionObservation, error) {
+			return controller.SessionObservation{}, errors.New("tmux exploded")
+		})
+
+	code, _, _ := run(t, "open", "--cwd", rel, "--json")
+	if code != ExitRefused {
+		t.Fatalf("exit %d, want %d", code, ExitRefused)
+	}
+	rec, err := s.Workspace(ws.ID)
+	if err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if rec.Bind == nil || *rec.Bind != rel {
+		t.Errorf("bind = %v, want %q kept after the failed open", rec.Bind, rel)
+	}
+}
+
+// A --cwd outside the repository is a caller mistake (spec §6: exit 2),
+// and nothing is registered on the way to reporting it.
+func TestOpenCwdOutsideTheRepositoryExitsTwo(t *testing.T) {
+	ws := openWorkspace(t)
+	s := fake.NewStore()
+	installOpenStore(t, s)
+	installFakeActuator(t)
+
+	code, stdout, stderr := run(t, "open", "--cwd", t.TempDir(), "--json")
+	if code != ExitUsage {
+		t.Fatalf("exit %d, want %d (stderr: %s)", code, ExitUsage, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("a failing command wrote to stdout: %q", stdout)
+	}
+	if _, err := s.Workspace(ws.ID); err == nil {
+		t.Error("a rejected --cwd registered the workspace anyway")
+	}
+}
+
+func TestOpenReportsTheEffectiveBind(t *testing.T) {
+	ws := openWorkspace(t)
+	if err := os.MkdirAll(filepath.Join(ws.RepoRoot, "services", "api"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	s := fake.NewStore()
+	if err := s.RegisterWorkspace(ws, "sha256:seed", cliTestTime); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	bind := "services/api"
+	if err := s.SetBind(ws.ID, &bind, cliTestTime); err != nil {
+		t.Fatalf("set bind: %v", err)
+	}
+	installOpenStore(t, s)
+	installFakeActuator(t)
+	installScriptedSessions(t,
+		cliAbsent(), cliAbsent(), cliLive(ownLive(ws, ws.SessionName)))
+
+	code, stdout, stderr := run(t, "open", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	env := decodeOpen(t, stdout)
+	if env.Bind == nil || *env.Bind != bind {
+		t.Errorf("bind = %v, want %q", env.Bind, bind)
+	}
+	if env.SchemaVersion != OutputSchemaVersion {
+		t.Errorf("schema_version = %d", env.SchemaVersion)
+	}
+}
+
+func TestOpenEmitsNoBindWhenUnbound(t *testing.T) {
+	ws := openWorkspace(t)
+	installOpenStore(t, fake.NewStore())
+	installFakeActuator(t)
+	installScriptedSessions(t,
+		cliAbsent(), cliAbsent(), cliLive(ownLive(ws, ws.SessionName)))
+
+	code, stdout, stderr := run(t, "open", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	if strings.Contains(stdout, `"bind"`) {
+		t.Errorf("an unbound open emits a bind key:\n%s", stdout)
 	}
 }

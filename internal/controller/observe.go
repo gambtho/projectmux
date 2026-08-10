@@ -31,6 +31,11 @@ type Desired struct {
 	Workspace resolve.Workspace
 	Config    config.Config
 	Digest    string
+	// Bind is the session's base directory, repository-relative. A nil
+	// pointer leaves whatever is stored alone — an open that carries no
+	// --cwd must not clear an existing bind. Clearing goes through a
+	// nil-valued SetBind from the CLI instead.
+	Bind *string
 }
 
 // Snapshot is one observation pass: desired state, stored state (nil when

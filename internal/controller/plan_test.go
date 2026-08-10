@@ -327,3 +327,88 @@ func TestContainerActionAcquireOnIncompleteBinding(t *testing.T) {
 		t.Errorf("complete present binding: action = %q, want none", p.Container)
 	}
 }
+
+// The backward-compatibility guarantee. A session created by v0.5.0 carries
+// no @dev_session at all, and tmux reports an absent user option as the empty
+// string — which is exactly what a default session's session component is. So
+// every session a user has running right now keeps matching, and nobody is
+// forced to rebuild.
+func TestSessionBelongsToMatchesAPreV060DefaultSession(t *testing.T) {
+	ws := resolve.Workspace{
+		ID:       "w1",
+		Slug:     "slabledger",
+		RepoRoot: "/w/slabledger",
+		Session:  "",
+	}
+	legacy := controller.LiveSession{
+		Name:        "slabledger",
+		WorkspaceID: "w1",
+		Slug:        "slabledger",
+		Worktree:    "/w/slabledger",
+		// Session is deliberately absent, as tmux reports it for a session
+		// created before the key existed.
+	}
+
+	if !controller.SessionBelongsTo(legacy, ws) {
+		t.Error("a v0.5.0 default session no longer belongs to its workspace")
+	}
+}
+
+func TestSessionBelongsToMatchesANamedSession(t *testing.T) {
+	ws := resolve.Workspace{
+		ID:       "w2",
+		Slug:     "slabledger",
+		RepoRoot: "/w/slabledger",
+		Session:  "feature-a",
+	}
+	live := controller.LiveSession{
+		Name:        "slabledger--feature-a",
+		WorkspaceID: "w2",
+		Slug:        "slabledger",
+		Worktree:    "/w/slabledger",
+		Session:     "feature-a",
+	}
+
+	if !controller.SessionBelongsTo(live, ws) {
+		t.Error("a named session does not belong to its own workspace")
+	}
+}
+
+// A disagreeing session component is evidence of corruption or collision, not
+// a match — the same rule the other three keys already enforce.
+func TestSessionBelongsToRejectsADisagreeingSessionComponent(t *testing.T) {
+	base := resolve.Workspace{
+		ID:       "w1",
+		Slug:     "slabledger",
+		RepoRoot: "/w/slabledger",
+	}
+	live := controller.LiveSession{
+		Name:        "slabledger",
+		WorkspaceID: "w1",
+		Slug:        "slabledger",
+		Worktree:    "/w/slabledger",
+	}
+
+	cases := []struct {
+		name       string
+		wsSession  string
+		livSession string
+	}{
+		{"live is named, workspace is default", "", "feature-a"},
+		{"workspace is named, live is default", "feature-a", ""},
+		{"both named, differently", "feature-a", "feature-b"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := base
+			ws.Session = tc.wsSession
+			s := live
+			s.Session = tc.livSession
+			if controller.SessionBelongsTo(s, ws) {
+				t.Errorf("session %q was accepted for workspace session %q",
+					tc.livSession, tc.wsSession)
+			}
+		})
+	}
+}
